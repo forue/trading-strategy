@@ -1,0 +1,6 @@
+com/rotation/auth/repository/UserRepository.class
+com/rotation/auth/controller/AuthController.class
+com/rotation/auth/entity/User.class
+com/rotation/auth/controller/AuthController$LoginRequest.class
+com/rotation/auth/util/JwtUtil.class
+com/rotation/auth/controller/AuthController$RegisterRequest.class

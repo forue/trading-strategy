@@ -1,0 +1,124 @@
+// 全局样式
+$primary-color: #409eff;
+$success-color: #67c23a;
+$warning-color: #e6a23c;
+$danger-color: #f56c6c;
+$bg-color: #f0f2f5;
+$sidebar-width: 220px;
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background-color: $bg-color;
+}
+
+.app-container {
+  display: flex;
+  height: 100vh;
+}
+
+// 侧边栏
+.sidebar {
+  width: $sidebar-width;
+  background: linear-gradient(180deg, #1d1e2c 0%, #2b2d42 100%);
+  color: #fff;
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  transition: width 0.3s;
+
+  .logo {
+    height: 60px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    font-weight: bold;
+    border-bottom: 1px solid rgba(255,255,255,0.1);
+
+    .logo-icon {
+      font-size: 24px;
+      margin-right: 8px;
+    }
+  }
+
+  .el-menu {
+    border-right: none;
+    background: transparent;
+
+    .el-menu-item {
+      color: rgba(255,255,255,0.7);
+      &:hover, &.is-active {
+        background: rgba(64, 158, 255, 0.2);
+        color: #fff;
+      }
+    }
+  }
+}
+
+// 主内容区
+.main-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+
+  .header {
+    height: 60px;
+    background: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 20px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+
+    .header-left {
+      display: flex;
+      align-items: center;
+      font-size: 16px;
+      font-weight: 500;
+    }
+
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+  }
+
+  .page-content {
+    flex: 1;
+    padding: 20px;
+    overflow-y: auto;
+  }
+}
+
+// 卡片样式
+.page-card {
+  background: #fff;
+  border-radius: 8px;
+  padding: 20px;
+  margin-bottom: 20px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.05);
+}
+
+// 信号方向标签
+.signal-buy {
+  color: $danger-color;
+  font-weight: bold;
+}
+
+.signal-sell {
+  color: $success-color;
+  font-weight: bold;
+}
+
+// 响应式
+@media (max-width: 768px) {
+  .sidebar {
+    width: 64px;
+    .logo span { display: none; }
+    .el-menu-item span { display: none; }
+  }
+}

@@ -1,0 +1,27 @@
+server:
+  port: 8005
+
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/rotation_db
+    username: admin
+    password: secret
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      password: redis123
+
+influxdb:
+  url: http://localhost:8086
+  token: my-super-secret-token
+  org: rotation
+  bucket: market_data

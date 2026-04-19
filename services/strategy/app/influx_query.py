@@ -1,0 +1,326 @@
+"""策略引擎服务 - InfluxDB历史数据查询"""
+from datetime import datetime, timedelta
+from influxdb_client import InfluxDBClient
+from loguru import logger
+
+from .config import settings
+
+
+class InfluxDBQuery:
+    """从InfluxDB读取板块历史数据供回测使用"""
+
+    @staticmethod
+    def _safe_float(val, default=0.0) -> float:
+        """安全转换为浮点数，处理 NaN/Infinity/None"""
+        try:
+            if val is None or (isinstance(val, float) and (val != val or val == float('inf') or val == float('-inf'))):
+                return default
+            result = float(val)
+            if result != result or result == float('inf') or result == float('-inf'):
+                return default
+            return result
+        except (ValueError, TypeError):
+            return default
+
+    def __init__(self):
+        self.client = InfluxDBClient(
+            url=settings.influxdb_url,
+            token=settings.influxdb_token,
+            org=settings.influxdb_org,
+        )
+        self.query_api = self.client.query_api()
+        self.bucket = settings.influxdb_bucket
+        self.org = settings.influxdb_org
+
+    @staticmethod
+    def _date_to_flux_range(start_date: str, end_date: str) -> tuple[str, str]:
+        """将 YYYY-MM-DD 日期转换为 FluxQL range() 所需的 RFC3339 格式
+
+        InfluxDB 的 range() 不接受纯日期字符串(如 2026-01-01)，
+        必须是相对时间(如 -365d)或 RFC3339 时间戳(如 2026-01-01T00:00:00Z)。
+        """
+        try:
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+            # end_date 需要加1天，因为 range() 的 stop 是排他的
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
+            flux_start = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+            flux_stop = end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+            return flux_start, flux_stop
+        except ValueError:
+            # 回退：用足够大的相对时间范围
+            return "-730d", "now()"
+
+    def query_daily_sectors(self, start_date: str, end_date: str,
+                            sector_code: str = None) -> dict[str, list[dict]]:
+        """查询指定日期范围内每天的板块资金流数据
+
+        Args:
+            start_date: 起始日期 YYYY-MM-DD
+            end_date: 结束日期 YYYY-MM-DD
+            sector_code: 可选，筛选特定板块代码
+
+        Returns:
+            {date_str: [{sector_code, sector_name, main_net_inflow, north_net_inflow,
+                         index_close, index_change_pct, turnover}, ...]}
+        """
+        flux_start, flux_stop = self._date_to_flux_range(start_date, end_date)
+
+        # 构建板块过滤条件
+        sector_filter = ""
+        if sector_code:
+            sector_filter = f'  |> filter(fn: (r) => r.sector_code == "{sector_code}")\n'
+
+        query = f'''
+        from(bucket: "{self.bucket}")
+          |> range(start: {flux_start}, stop: {flux_stop})
+          |> filter(fn: (r) => r._measurement == "sector_capital_flow")
+{sector_filter}          |> pivot(rowKey: ["_time", "sector_code"], columnKey: ["_field"], valueColumn: "_value")
+          |> keep(columns: ["_time", "sector_code", "sector_name",
+                            "main_net_inflow", "north_net_inflow",
+                            "index_close", "index_change_pct", "turnover",
+                            "open", "high", "low"])
+        '''
+        try:
+            tables = self.query_api.query_data_frame(query)
+        except Exception as e:
+            logger.error(f"InfluxDB查询失败: {e}")
+            return {}
+
+        # query_data_frame 在无数据时可能返回空列表或空DataFrame
+        if isinstance(tables, list) and len(tables) == 0:
+            return {}
+        if hasattr(tables, "empty") and tables.empty:
+            return {}
+
+        # 按日期分组
+        daily_data: dict[str, list[dict]] = {}
+        records = tables.to_dict("records")
+        for row in records:
+            time_str = str(row.get("_time", ""))
+            try:
+                dt = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
+                date_key = dt.strftime("%Y-%m-%d")
+            except (ValueError, TypeError):
+                continue
+
+            if date_key not in daily_data:
+                daily_data[date_key] = []
+
+            daily_data[date_key].append({
+                "sector_code": str(row.get("sector_code", "")),
+                "sector_name": str(row.get("sector_name", "")),
+                "main_net_inflow": self._safe_float(row.get("main_net_inflow", 0)),
+                "north_net_inflow": self._safe_float(row.get("north_net_inflow", 0)),
+                "index_close": self._safe_float(row.get("index_close", 0)),
+                "index_change_pct": self._safe_float(row.get("index_change_pct", 0)),
+                "turnover": self._safe_float(row.get("turnover", 0)),
+                # K线附加字段（通过 collect_sector_history_via_kline 写入）
+                "open": self._safe_float(row.get("open", 0)),
+                "high": self._safe_float(row.get("high", 0)),
+                "low": self._safe_float(row.get("low", 0)),
+            })
+
+        logger.info(f"从InfluxDB查询到 {len(daily_data)} 天数据, 共 {len(records)} 条记录")
+        return daily_data
+
+    def get_available_date_range(self) -> tuple[str, str]:
+        """获取InfluxDB中数据的可用日期范围"""
+        # 查最早日期
+        query_min = f'''
+        from(bucket: "{self.bucket}")
+          |> range(start: -730d)
+          |> filter(fn: (r) => r._measurement == "sector_capital_flow")
+          |> keep(columns: ["_time"])
+          |> group()
+          |> sort(columns: ["_time"])
+          |> limit(n: 1)
+        '''
+        try:
+            tables = self.query_api.query_data_frame(query_min)
+            if isinstance(tables, list) and len(tables) == 0:
+                return "", ""
+            if hasattr(tables, "empty") and tables.empty:
+                return "", ""
+        except Exception as e:
+            logger.error(f"获取最早日期失败: {e}")
+            return "", ""
+
+        records = tables.to_dict("records")
+        if not records:
+            return "", ""
+        times = sorted([str(r.get("_time", "")) for r in records if r.get("_time")])
+        if not times:
+            return "", ""
+
+        min_date = datetime.fromisoformat(times[0].replace("Z", "+00:00")).strftime("%Y-%m-%d")
+
+        # 查最新日期
+        query_max = f'''
+        from(bucket: "{self.bucket}")
+          |> range(start: -730d)
+          |> filter(fn: (r) => r._measurement == "sector_capital_flow")
+          |> keep(columns: ["_time"])
+          |> group()
+          |> sort(columns: ["_time"], desc: true)
+          |> limit(n: 1)
+        '''
+        try:
+            tables_max = self.query_api.query_data_frame(query_max)
+            if not (isinstance(tables_max, list) and len(tables_max) == 0) and \
+               not (hasattr(tables_max, "empty") and tables_max.empty):
+                records_max = tables_max.to_dict("records")
+                times_max = sorted([str(r.get("_time", "")) for r in records_max if r.get("_time")])
+                if times_max:
+                    max_date = datetime.fromisoformat(times_max[-1].replace("Z", "+00:00")).strftime("%Y-%m-%d")
+                    return min_date, max_date
+        except Exception as e:
+            logger.error(f"获取最新日期失败: {e}")
+
+        return min_date, min_date
+
+    def get_sector_list(self) -> list[dict]:
+        """获取所有可用的板块列表（代码+名称）"""
+        # 使用 pivot 后的数据按 sector_code 去重
+        # 先取最近1天的数据获取所有板块（包含sector_code和sector_name）
+        query = f'''
+        from(bucket: "{self.bucket}")
+          |> range(start: -730d)
+          |> filter(fn: (r) => r._measurement == "sector_capital_flow")
+          |> pivot(rowKey: ["_time", "sector_code"], columnKey: ["_field"], valueColumn: "_value")
+          |> keep(columns: ["sector_code", "sector_name"])
+          |> group()
+          |> distinct(column: "sector_code")
+        '''
+        try:
+            tables = self.query_api.query_data_frame(query)
+            if isinstance(tables, list) and len(tables) == 0:
+                return []
+            if hasattr(tables, "empty") and tables.empty:
+                return []
+            records = tables.to_dict("records")
+            # distinct结果中 sector_code 在 _value 列
+            codes = []
+            for r in records:
+                code = str(r.get("_value", "") or r.get("sector_code", ""))
+                if code:
+                    codes.append(code)
+
+            # 再查一次获取板块名称（从最近有数据的日期）
+            if not codes:
+                return []
+            sectors = []
+            for code in sorted(set(codes)):
+                sectors.append({"sector_code": code, "sector_name": ""})
+
+            # 用最近一天数据补充板块名称
+            recent_data = self.query_daily_sectors(
+                self.get_available_date_range()[1] or "2026-01-01",
+                self.get_available_date_range()[1] or "2026-12-31",
+            )
+            if recent_data:
+                last_date = sorted(recent_data.keys())[-1]
+                name_map = {s["sector_code"]: s["sector_name"] for s in recent_data[last_date]}
+                for s in sectors:
+                    if s["sector_code"] in name_map:
+                        s["sector_name"] = name_map[s["sector_code"]]
+                    else:
+                        s["sector_name"] = s["sector_code"]  # fallback
+
+            return sectors
+        except Exception as e:
+            logger.error(f"获取板块列表失败: {e}")
+            return []
+
+    def query_sector_history(self, sector_code: str, start_date: str, end_date: str) -> list[dict]:
+        """查询单个板块的历史数据序列（用于按板块回放）
+
+        优先使用K线数据（sector_kline measurement），如果无K线数据则回退到资金流数据
+
+        Returns:
+            [{date, sector_code, sector_name, main_net_inflow, north_net_inflow,
+              index_close, index_change_pct, turnover, open, high, low}, ...]
+        """
+        # 先尝试查询K线数据
+        kline_data = self.query_sector_kline(sector_code, start_date, end_date)
+
+        # 查询资金流数据
+        daily_data = self.query_daily_sectors(start_date, end_date, sector_code=sector_code)
+        flow_result = []
+        for date in sorted(daily_data.keys()):
+            for sector in daily_data[date]:
+                if sector["sector_code"] == sector_code:
+                    flow_result.append({"date": date, **sector})
+
+        # 如果有K线数据，合并到结果中
+        if kline_data:
+            kline_map = {k["date"]: k for k in kline_data}
+            for item in flow_result:
+                kline = kline_map.get(item["date"])
+                if kline:
+                    item["open"] = kline["open"]
+                    item["high"] = kline["high"]
+                    item["low"] = kline["low"]
+                    item["close"] = kline["close"]
+                    item["volume"] = kline["volume"]
+        return flow_result
+
+    def query_sector_kline(self, sector_code: str, start_date: str, end_date: str) -> list[dict]:
+        """查询板块K线数据（OHLC）
+
+        Returns:
+            [{date, sector_code, sector_name, open, close, high, low, volume, amount, change_pct}, ...]
+        """
+        flux_start, flux_stop = self._date_to_flux_range(start_date, end_date)
+
+        query = f'''
+        from(bucket: "{self.bucket}")
+          |> range(start: {flux_start}, stop: {flux_stop})
+          |> filter(fn: (r) => r._measurement == "sector_kline")
+          |> filter(fn: (r) => r.sector_code == "{sector_code}")
+          |> pivot(rowKey: ["_time", "sector_code"], columnKey: ["_field"], valueColumn: "_value")
+          |> keep(columns: ["_time", "sector_code", "sector_name",
+                            "open", "close", "high", "low",
+                            "volume", "amount", "change_pct"])
+        '''
+        try:
+            tables = self.query_api.query_data_frame(query)
+        except Exception as e:
+            logger.debug(f"K线数据查询失败(可能无数据): {e}")
+            return []
+
+        if isinstance(tables, list) and len(tables) == 0:
+            return []
+        if hasattr(tables, "empty") and tables.empty:
+            return []
+
+        result = []
+        records = tables.to_dict("records")
+        for row in records:
+            time_str = str(row.get("_time", ""))
+            try:
+                dt = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
+                date_key = dt.strftime("%Y-%m-%d")
+            except (ValueError, TypeError):
+                continue
+
+            result.append({
+                "date": date_key,
+                "sector_code": str(row.get("sector_code", "")),
+                "sector_name": str(row.get("sector_name", "")),
+                "open": self._safe_float(row.get("open", 0)),
+                "close": self._safe_float(row.get("close", 0)),
+                "high": self._safe_float(row.get("high", 0)),
+                "low": self._safe_float(row.get("low", 0)),
+                "volume": self._safe_float(row.get("volume", 0)),
+                "amount": self._safe_float(row.get("amount", 0)),
+                "change_pct": self._safe_float(row.get("change_pct", 0)),
+            })
+
+        return result
+
+    def close(self):
+        self.client.close()
+
+
+# 全局实例
+influx_query = InfluxDBQuery()
