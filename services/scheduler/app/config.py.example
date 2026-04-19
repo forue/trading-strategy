@@ -1,0 +1,21 @@
+"""任务调度中心 - 配置模块"""
+from pydantic_settings import BaseSettings
+
+
+class Settings(BaseSettings):
+    data_collector_url: str = "http://backend-data-collector:8003"
+    strategy_url: str = "http://backend-strategy:8002"
+    signal_url: str = "http://backend-signal:8004"
+
+    rabbitmq_host: str = "rabbitmq"
+    rabbitmq_port: int = 5672
+    rabbitmq_user: str = "guest"
+    rabbitmq_password: str = "guest"
+
+    service_port: int = 8006
+
+    class Config:
+        env_file = ".env"
+
+
+settings = Settings()

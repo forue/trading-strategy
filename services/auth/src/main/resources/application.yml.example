@@ -1,0 +1,25 @@
+server:
+  port: 8001
+
+spring:
+  datasource:
+    url: jdbc:postgresql://postgres:5432/rotation_db
+    username: ${DB_USER:admin}
+    password: ${DB_PASSWORD:secret}
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+  data:
+    redis:
+      host: ${REDIS_HOST:redis}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:redis123}
+
+jwt:
+  secret: ${JWT_SECRET:your-secret-key-here}
+  expiration: 86400000

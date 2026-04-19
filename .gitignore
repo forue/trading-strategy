@@ -55,3 +55,11 @@ htmlcov/
 *.tmp
 *.bak
 deployment_report.md
+
+# Config files (keep example files only)
+**/application.yml
+!**/application.yml.example
+**/config.py
+!**/config.py.example
+**/.env
+!.env.example

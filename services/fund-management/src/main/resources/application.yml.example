@@ -1,0 +1,27 @@
+server:
+  port: 8005
+
+spring:
+  datasource:
+    url: jdbc:postgresql://postgres:5432/rotation_db
+    username: ${DB_USER:admin}
+    password: ${DB_PASSWORD:secret}
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+  data:
+    redis:
+      host: ${REDIS_HOST:redis}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:redis123}
+
+influxdb:
+  url: ${INFLUXDB_URL:http://influxdb:8086}
+  token: ${INFLUXDB_TOKEN:my-super-secret-token}
+  org: ${INFLUXDB_ORG:rotation}
+  bucket: ${INFLUXDB_BUCKET:market_data}

@@ -1,0 +1,34 @@
+"""信号通知服务 - 配置模块"""
+from pydantic_settings import BaseSettings
+
+
+class Settings(BaseSettings):
+    # Redis
+    redis_host: str = "redis"
+    redis_port: int = 6379
+    redis_password: str = "redis123"
+    redis_db: int = 2
+
+    # RabbitMQ
+    rabbitmq_host: str = "rabbitmq"
+    rabbitmq_port: int = 5672
+    rabbitmq_user: str = "guest"
+    rabbitmq_password: str = "guest"
+
+    # 钉钉推送
+    dingtalk_enabled: bool = False
+    dingtalk_webhook_url: str = ""
+    dingtalk_secret: str = ""
+
+    # 企业微信推送
+    wecom_enabled: bool = False
+    wecom_webhook_url: str = ""
+
+    # Service
+    service_port: int = 8004
+
+    class Config:
+        env_file = ".env"
+
+
+settings = Settings()
