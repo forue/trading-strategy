@@ -1,0 +1,10 @@
+@echo off
+setlocal enabledelayedexpansion
+set "MSG_FILE=%1"
+if defined MSG_FILE (
+    set /p COMMIT_MSG=<"%MSG_FILE%"
+) else (
+    set COMMIT_MSG=%*
+)
+powershell -ExecutionPolicy Bypass -Command "& {.\check-commit.ps1 -CommitMsg '%COMMIT_MSG%'}"
+exit /b %ERRORLEVEL%
