@@ -40,6 +40,8 @@ class TradeSignal(BaseModel):
     position_ratio: float
     score: float
     reason: str
+    rank: Optional[int] = None
+    total_sectors: Optional[int] = None
     created_at: Optional[str] = None
 
 
