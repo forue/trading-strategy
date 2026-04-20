@@ -89,8 +89,9 @@ class RotationScoringModel:
             signal_date = datetime.now().strftime("%Y-%m-%d")
 
         if not sector_data:
-            logger.warning(f"无板块数据，使用模拟数据计算信号")
-            sector_data = self._generate_mock_sector_data()
+            logger.warning(f"无板块数据，无法计算信号 (信号日期: {signal_date})")
+            logger.warning(f"传入的sector_data类型: {type(sector_data)}, 长度: {len(sector_data) if isinstance(sector_data, list) else 'N/A'}")
+            return []
 
         # 计算综合评分
         scored_sectors = []
@@ -168,12 +169,16 @@ class RotationScoringModel:
         """获取板块对应的场内ETF信息"""
         etf = SECTOR_ETF_MAP.get(sector_code)
         if etf:
-            return {"etf_code": etf["code"], "etf_name": etf["name"]}
+            return {
+                "etf_code": etf["code"], 
+                "etf_name": etf["name"]
+            }
         return {"etf_code": None, "etf_name": None}
 
     def _build_signal(self, sector: dict, strategy_type: StrategyType,
                       direction: SignalDirection, position_ratio: float,
-                      score: float, reason: str, signal_date: str) -> TradeSignal:
+                      score: float, reason: str, signal_date: str,
+                      rank: Optional[int] = None, total_sectors: Optional[int] = None) -> TradeSignal:
         """构建交易信号，自动填充ETF信息"""
         sector_code = sector.get("sector_code", "")
         etf_info = self._get_etf_info(sector_code)
@@ -188,6 +193,8 @@ class RotationScoringModel:
             position_ratio=round(position_ratio, 4),
             score=round(score, 4),
             reason=reason,
+            rank=rank,
+            total_sectors=total_sectors,
         )
 
     def _aggressive_rotation(self, scored_sectors: list, params: StrategyParams, signal_date: str) -> list[TradeSignal]:
@@ -202,16 +209,20 @@ class RotationScoringModel:
                 direction=SignalDirection.BUY, position_ratio=position_ratio,
                 score=sector["composite_score"], signal_date=signal_date,
                 reason=f"激进轮动: 资金强度排名#{i+1}, 综合评分{sector['composite_score']:.2f}, 建议满仓轮换持有{params.hold_days}日",
+                rank=i+1,
+                total_sectors=len(scored_sectors),
             ))
 
         # 对排名靠后的板块发出卖出信号
-        for sector in scored_sectors[-3:]:
-            if sector["composite_score"] < 4.0:
+        for i, sector in enumerate(scored_sectors):
+            if sector["composite_score"] < 4.0 and i >= len(scored_sectors) - 3:
                 signals.append(self._build_signal(
                     sector=sector, strategy_type=StrategyType.AGGRESSIVE,
                     direction=SignalDirection.SELL, position_ratio=0,
                     score=sector["composite_score"], signal_date=signal_date,
                     reason=f"激进轮动: 资金流出, 评分{sector['composite_score']:.2f}低于阈值, 建议卖出",
+                    rank=i+1,
+                    total_sectors=len(scored_sectors),
                 ))
 
         return signals
@@ -228,15 +239,19 @@ class RotationScoringModel:
                 direction=SignalDirection.BUY, position_ratio=position_ratio,
                 score=sector["composite_score"], signal_date=signal_date,
                 reason=f"稳健轮动: 综合排名#{i+1}, 评分{sector['composite_score']:.2f}, 半仓分散持有{params.hold_days}日",
+                rank=i+1,
+                total_sectors=len(scored_sectors),
             ))
 
-        for sector in scored_sectors:
+        for i, sector in enumerate(scored_sectors):
             if sector["composite_score"] < 3.0:
                 signals.append(self._build_signal(
                     sector=sector, strategy_type=StrategyType.MODERATE,
                     direction=SignalDirection.SELL, position_ratio=0,
                     score=sector["composite_score"], signal_date=signal_date,
                     reason=f"稳健轮动: 评分{sector['composite_score']:.2f}过低, 建议减仓",
+                    rank=i+1,
+                    total_sectors=len(scored_sectors),
                 ))
 
         return signals
@@ -251,41 +266,30 @@ class RotationScoringModel:
 
         top_n = min(params.top_n, len(filtered))
         for i, sector in enumerate(filtered[:top_n]):
+            # 找到该板块在原始排序中的排名
+            original_rank = next((idx+1 for idx, s in enumerate(scored_sectors) if s.get("sector_code") == sector.get("sector_code")), 0)
             position_ratio = params.max_position / max(top_n, 1)
             signals.append(self._build_signal(
                 sector=sector, strategy_type=StrategyType.CONSERVATIVE,
                 direction=SignalDirection.BUY, position_ratio=position_ratio,
                 score=sector["composite_score"], signal_date=signal_date,
                 reason=f"保守轮动: 综合评分{sector['composite_score']:.2f}, 估值分位<={valuation_max}%, 仓位上限{params.max_position*100:.0f}%",
+                rank=original_rank,
+                total_sectors=len(scored_sectors),
             ))
 
-        for sector in scored_sectors:
+        for i, sector in enumerate(scored_sectors):
             if sector["composite_score"] < 3.5:
                 signals.append(self._build_signal(
                     sector=sector, strategy_type=StrategyType.CONSERVATIVE,
                     direction=SignalDirection.SELL, position_ratio=0,
                     score=sector["composite_score"], signal_date=signal_date,
                     reason=f"保守轮动: 评分{sector['composite_score']:.2f}不满足安全边际, 建议规避",
+                    rank=i+1,
+                    total_sectors=len(scored_sectors),
                 ))
 
         return signals
 
-    def _generate_mock_sector_data(self) -> list[dict]:
-        """生成模拟板块数据（固定种子，保证可复现）"""
-        import random
-        rng = random.Random(42)
-        data = []
-        for code, name in SECTOR_MAP.items():
-            data.append({
-                "sector_code": code,
-                "sector_name": name,
-                "main_net_inflow": rng.uniform(-5e8, 5e8),
-                "north_net_inflow": rng.uniform(-2e8, 2e8),
-                "index_close": rng.uniform(2000, 8000),
-                "index_change_pct": rng.uniform(-3, 3),
-            })
-        return data
-
-
-# 全局实例
+    # 全局实例
 scoring_model = RotationScoringModel()

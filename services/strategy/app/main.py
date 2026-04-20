@@ -4,7 +4,7 @@ import hashlib
 import pika
 import redis as redis_lib
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException
 from loguru import logger
 
@@ -63,6 +63,25 @@ async def health_check():
     return {"status": "healthy", "service": "strategy", "timestamp": datetime.now().isoformat()}
 
 
+@app.get("/trade-day/check")
+async def check_trade_day(date: str = None):
+    """检查指定日期是否为交易日"""
+    try:
+        target_date = date or datetime.now().strftime("%Y-%m-%d")
+        is_trade = _is_trade_day(target_date)
+        return {
+            "code": 200,
+            "data": {
+                "date": target_date,
+                "is_trade_day": is_trade,
+                "message": f"{target_date} {'是' if is_trade else '不是'}交易日"
+            }
+        }
+    except Exception as e:
+        logger.error(f"交易日检查失败: {e}")
+        raise HTTPException(status_code=500, detail=f"交易日检查失败: {e}")
+
+
 def _is_trade_day(date_str: str) -> bool:
     """检查是否为交易日（使用akshare交易日历）"""
     try:
@@ -103,8 +122,66 @@ async def calculate_signals(strategy_type: StrategyType, signal_date: str = None
         cached = redis_client.get("sector_capital_flow:latest")
         if cached:
             sector_data = json.loads(cached)
+            logger.info(f"从Redis获取到 {len(sector_data)} 条板块数据")
+        else:
+            # 如果Redis中没有数据，从InfluxDB读取最新数据
+            logger.info("Redis中没有板块数据，从InfluxDB读取")
+            try:
+                # 获取最近3天的数据，确保有足够的数据
+                end_date = effective_date
+                start_date = (datetime.strptime(end_date, "%Y-%m-%d") - timedelta(days=3)).strftime("%Y-%m-%d")
+                daily_data = influx_query.query_daily_sectors(start_date, end_date)
+                
+                if daily_data and len(daily_data) > 0:
+                    # 获取最新一天的数据
+                    sorted_dates = sorted(daily_data.keys())
+                    latest_date = sorted_dates[-1]
+                    sector_data = daily_data[latest_date]
+                    logger.info(f"从InfluxDB获取到 {len(sector_data)} 条板块数据（日期: {latest_date}）")
+                    
+                    # 检查数据格式
+                    if sector_data and len(sector_data) > 0:
+                        sample_item = sector_data[0]
+                        logger.info(f"数据样例字段: {list(sample_item.keys())}")
+                        logger.info(f"数据样例值: main_net_inflow={sample_item.get('main_net_inflow')}, "
+                                  f"north_net_inflow={sample_item.get('north_net_inflow')}, "
+                                  f"index_change_pct={sample_item.get('index_change_pct')}")
+                    
+                    # 将数据缓存到Redis，供下次使用
+                    redis_client.setex(
+                        "sector_capital_flow:latest",
+                        3600,  # 1小时过期
+                        json.dumps(sector_data, ensure_ascii=False)
+                    )
+                else:
+                    logger.warning(f"InfluxDB中也没有找到板块数据，查询日期范围: {start_date} 到 {end_date}")
+                    # 尝试查询更早的数据
+                    earlier_start_date = (datetime.strptime(end_date, "%Y-%m-%d") - timedelta(days=30)).strftime("%Y-%m-%d")
+                    earlier_data = influx_query.query_daily_sectors(earlier_start_date, end_date)
+                    if earlier_data and len(earlier_data) > 0:
+                        sorted_dates = sorted(earlier_data.keys())
+                        latest_date = sorted_dates[-1]
+                        sector_data = earlier_data[latest_date]
+                        logger.info(f"从更早范围获取到 {len(sector_data)} 条板块数据（日期: {latest_date}）")
+                        
+                        # 将数据缓存到Redis，供下次使用
+                        redis_client.setex(
+                            "sector_capital_flow:latest",
+                            3600,  # 1小时过期
+                            json.dumps(sector_data, ensure_ascii=False)
+                        )
+                    else:
+                        logger.error("InfluxDB中完全找不到板块数据")
+            except Exception as e:
+                logger.error(f"从InfluxDB读取数据失败: {e}")
 
         # 计算信号
+        logger.info(f"准备计算信号，sector_data类型: {type(sector_data)}, 长度: {len(sector_data) if isinstance(sector_data, list) else 'N/A'}")
+        if sector_data and isinstance(sector_data, list) and len(sector_data) > 0:
+            logger.info(f"第一个板块数据样例: sector_code={sector_data[0].get('sector_code')}, "
+                      f"main_net_inflow={sector_data[0].get('main_net_inflow')}, "
+                      f"north_net_inflow={sector_data[0].get('north_net_inflow')}")
+        
         signals = scoring_model.calculate_daily_signals(
             sector_data=sector_data,
             strategy_type=strategy_type,
@@ -263,6 +340,8 @@ async def run_backtest(request: BacktestRequest):
         if not config:
             raise HTTPException(status_code=400, detail="未知策略类型")
         params = request.params if request.params else config.params
+        logger.info(f"回测请求参数: request.params={request.params}")
+        logger.info(f"回测使用参数: stop_loss={params.stop_loss}, top_n={params.top_n}, hold_days={params.hold_days}")
 
         # 从InfluxDB查询历史数据
         daily_data = influx_query.query_daily_sectors(request.start_date, request.end_date)
@@ -322,6 +401,9 @@ async def run_backtest(request: BacktestRequest):
             # === Step 3: 止损检查（收益已计入，检查是否需要止损）===
             if params.stop_loss and not stop_loss_triggered and peak_capital > 0 and current_positions:
                 drawdown_from_peak = (peak_capital - capital) / peak_capital
+                # 记录每日回撤情况（仅在有持仓时）
+                if i % 5 == 0:  # 每5天记录一次，减少日志量
+                    logger.debug(f"止损检查: 日期={date}, 峰值={peak_capital:.2f}, 当前={capital:.2f}, 回撤={drawdown_from_peak:.2%}, 止损线={params.stop_loss:.2%}, 持仓={bool(current_positions)}")
                 if drawdown_from_peak >= params.stop_loss:
                     # 止损触发，卖出所有持仓并计算交易成本
                     sell_trade_cost = 0.0
