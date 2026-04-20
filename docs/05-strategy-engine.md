@@ -170,7 +170,7 @@
 
 计算流程:
   1. 从Redis获取最新板块数据 (sector_capital_flow:latest)
-     └─ 无缓存时，使用模拟数据生成信号
+     └─ 无缓存时，返回空信号（无数据）
 
   2. 遍历每个板块数据，计算四维评分:
      a. 资金强度得分 (normalize main_flow + north_flow)

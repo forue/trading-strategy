@@ -161,7 +161,7 @@ class DataCollector:
     def collect_sector_capital_flow(trade_date: str = None) -> list[dict]:
         """采集板块主力资金流向数据
         - 调用 AkShare stock_sector_fund_flow_rank()
-        - AkShare异常时自动切换模拟数据
+        - AkShare异常时返回空数据
         - 写入 InfluxDB
         - 返回数据列表
         """
@@ -171,9 +171,6 @@ class DataCollector:
 
     def collect_north_bound_flow() -> list[dict]:
         """采集北向资金行业持股变化"""
-
-    def _generate_mock_data(trade_date: str) -> list[dict]:
-        """生成模拟数据（开发/测试/数据源异常时使用）"""
 ```
 
 ### 5.2 InfluxDBManager
@@ -229,21 +226,8 @@ Routing Key: data.updated.sector_flow
 AkShare调用失败
     │
     ├─ 网络超时 → 记录WARN日志，返回空数据
-    ├─ 接口变更 → 记录ERROR日志，切换模拟数据
+    ├─ 接口变更 → 记录ERROR日志，返回空数据
     └─ 频率限制 → 延迟重试，最多3次
-```
-
-### 7.2 模拟数据模式
-
-开发/测试环境或数据源不可用时，自动生成模拟数据：
-
-```python
-def _generate_mock_data(trade_date: str) -> list[dict]:
-    """为28个板块生成随机资金流数据
-    - main_net_inflow: uniform(-5亿, 5亿)
-    - north_net_inflow: uniform(-2亿, 2亿)
-    - index_change_pct: uniform(-3%, 3%)
-    """
 ```
 
 ---
