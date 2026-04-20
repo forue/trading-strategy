@@ -125,8 +125,8 @@ class DataCollector:
                     })
                 logger.info(f"同花顺行业汇总采集成功: {len(results)} 个板块")
         except Exception as e:
-            logger.warning(f"同花顺行业汇总采集异常: {e}，使用模拟数据")
-            results = self._generate_mock_data(trade_date)
+            logger.error(f"同花顺行业汇总采集异常: {e}，返回空数据")
+            results = []
 
         # 写入InfluxDB
         if results:
@@ -287,40 +287,6 @@ class DataCollector:
             logger.info("同花顺数据源暂不支持北向资金细分数据")
         except Exception as e:
             logger.warning(f"北向资金数据采集异常: {e}")
-        return results
-
-    def _generate_mock_data(self, trade_date: str) -> list[dict]:
-        """生成模拟数据（仅在同花顺接口也失败时使用），基于日期确定性生成"""
-        import random
-        sector_map = self._get_sector_name_code_map()
-        if not sector_map:
-            # 如果连板块列表都没有，使用固定列表
-            sector_map = {
-                "银行": "881156", "电子": "881121", "医药生物": "881139",
-                "计算机": "881165", "食品饮料": "881141", "非银金融": "881157",
-                "房地产": "881153", "传媒": "881164", "通信": "881167",
-                "电气设备": "881136", "化工": "881108", "机械设备": "881160",
-                "有色金属": "881107", "汽车": "881159", "公用事业": "881149",
-                "国防军工": "881137", "建筑材料": "881142", "家用电器": "881131",
-                "采掘": "881102", "钢铁": "881104", "纺织服装": "881132",
-                "轻工制造": "881133", "交通运输": "881151", "商业贸易": "881155",
-                "休闲服务": "881154", "综合": "881170", "建筑装饰": "881143",
-                "农林牧渔": "881101", "通信设备": "881167",
-            }
-        seed_val = int(trade_date.replace("-", "")) if trade_date else 42
-        rng = random.Random(seed_val)
-        results = []
-        for sector_name, code in sector_map.items():
-            results.append({
-                "sector_code": f"THS{code}",
-                "sector_name": sector_name,
-                "date": trade_date,
-                "main_net_inflow": round(rng.uniform(-5e8, 5e8), 2),
-                "north_net_inflow": round(rng.uniform(-2e8, 2e8), 2),
-                "index_close": round(rng.uniform(2000, 8000), 2),
-                "index_change_pct": round(rng.uniform(-3, 3), 4),
-                "turnover": round(rng.uniform(1e8, 5e9), 2),
-            })
         return results
 
     @staticmethod
