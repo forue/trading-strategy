@@ -195,6 +195,7 @@ interface StrategyState {
     max_position_pct: number
     hold_days: number
     stop_loss_pct: number
+    capital_pct: number
     valuation_pct_max: number
     commission_rate_pct: number
     stamp_tax_rate_pct: number
@@ -206,17 +207,17 @@ const strategies = reactive<StrategyState[]>([
   {
     type: 'AGGRESSIVE', name: '激进轮动策略', icon: 'Lightning', tagType: 'danger', riskLevel: '高风险',
     description: '仅取资金强度前2名板块，满仓轮换，持有周期1-3日，追求最大收益',
-    params: { top_n: 2, max_position_pct: 100, hold_days: 3, stop_loss_pct: 5, valuation_pct_max: 100, commission_rate_pct: 0.3, stamp_tax_rate_pct: 1.0, slippage_rate_pct: 1.0 },
+    params: { top_n: 2, max_position_pct: 100, hold_days: 3, stop_loss_pct: 5, capital_pct: 50, valuation_pct_max: 100, commission_rate_pct: 0.3, stamp_tax_rate_pct: 1.0, slippage_rate_pct: 1.0 },
   },
   {
     type: 'MODERATE', name: '稳健轮动策略', icon: 'Odometer', tagType: 'warning', riskLevel: '中风险',
     description: '取资金强度+指数相对强弱综合前3名，半仓分散，持有周期5日',
-    params: { top_n: 3, max_position_pct: 50, hold_days: 5, stop_loss_pct: 3, valuation_pct_max: 100, commission_rate_pct: 0.3, stamp_tax_rate_pct: 1.0, slippage_rate_pct: 1.0 },
+    params: { top_n: 3, max_position_pct: 50, hold_days: 5, stop_loss_pct: 3, capital_pct: 30, valuation_pct_max: 100, commission_rate_pct: 0.3, stamp_tax_rate_pct: 1.0, slippage_rate_pct: 1.0 },
   },
   {
     type: 'CONSERVATIVE', name: '保守轮动策略', icon: 'Shield', tagType: 'success', riskLevel: '低风险',
     description: '取资金持续流入且估值分位低于50%的板块，仓位上限30%，注重安全边际',
-    params: { top_n: 5, max_position_pct: 30, hold_days: 10, stop_loss_pct: 2, valuation_pct_max: 50, commission_rate_pct: 0.3, stamp_tax_rate_pct: 1.0, slippage_rate_pct: 1.0 },
+    params: { top_n: 5, max_position_pct: 30, hold_days: 10, stop_loss_pct: 2, capital_pct: 20, valuation_pct_max: 50, commission_rate_pct: 0.3, stamp_tax_rate_pct: 1.0, slippage_rate_pct: 1.0 },
   },
 ])
 
@@ -282,6 +283,10 @@ async function loadStrategyConfigs() {
         strategy.params.hold_days = cfg.params.hold_days ?? strategy.params.hold_days
         strategy.params.stop_loss_pct = cfg.params.stop_loss != null
           ? cfg.params.stop_loss * 100 : strategy.params.stop_loss_pct
+        // 加载 capital_pct 参数
+        if (cfg.params.capital_pct != null) {
+          strategy.params.capital_pct = cfg.params.capital_pct * 100  // 转换为百分比
+        }
         if (cfg.params.valuation_pct_max != null) {
           strategy.params.valuation_pct_max = cfg.params.valuation_pct_max
         }
@@ -344,6 +349,7 @@ async function runBacktest() {
       top_n: currentStrategy.params.top_n,
       max_position: currentStrategy.params.max_position_pct / 100,
       hold_days: currentStrategy.params.hold_days,
+      capital_pct: (currentStrategy.params.capital_pct || 30) / 100,  // 转换为小数，默认30%
       stop_loss: currentStrategy.params.stop_loss_pct / 100,
       // 交易成本参数：前端使用千分比，后端使用小数
       commission_rate: currentStrategy.params.commission_rate_pct / 1000,

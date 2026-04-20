@@ -148,7 +148,7 @@
             <el-form-item label="数据说明">
               <el-alert :closable="false" type="warning" show-icon>
                 <template #title>
-                  当前使用 AkShare 开源接口，板块资金流仅支持当日数据，历史回采使用确定性模拟数据。
+                  当前使用 AkShare 开源接口，板块资金流仅支持当日数据。
                   Tushare Pro / Wind 需要付费授权，暂未集成。
                 </template>
               </el-alert>

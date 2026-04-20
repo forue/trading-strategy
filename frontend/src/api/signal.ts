@@ -12,6 +12,8 @@ export interface TradeSignal {
   position_ratio: number
   score: number
   reason: string
+  rank: number | null
+  total_sectors: number | null
   created_at: string | null
 }
 

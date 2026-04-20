@@ -78,6 +78,13 @@ export const strategyApi = {
     return request.get('/strategy/data/availability')
   },
 
+  // 检查是否为交易日
+  checkTradeDay(date?: string): Promise<{ date: string; is_trade_day: boolean; message: string }> {
+    const params: any = {}
+    if (date) params.date = date
+    return request.get('/strategy/trade-day/check', { params })
+  },
+
   collectHistory(days: number): Promise<any> {
     return request.post('/data/collect/history', null, { params: { days }, timeout: 180000 })
   },
