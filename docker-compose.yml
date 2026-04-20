@@ -4,6 +4,7 @@ services:
     image: postgres:15
     container_name: rotation-postgres
     environment:
+      TZ: Asia/Shanghai
       POSTGRES_DB: rotation_db
       POSTGRES_USER: admin
       POSTGRES_PASSWORD: secret
@@ -22,6 +23,8 @@ services:
     image: redis:7-alpine
     container_name: rotation-redis
     command: redis-server --requirepass redis123 --appendonly yes
+    environment:
+      TZ: Asia/Shanghai
     ports:
       - "6380:6379"
     volumes:
@@ -36,6 +39,7 @@ services:
     image: influxdb:2.7
     container_name: rotation-influxdb
     environment:
+      TZ: Asia/Shanghai
       DOCKER_INFLUXDB_INIT_MODE: setup
       DOCKER_INFLUXDB_INIT_USERNAME: admin
       DOCKER_INFLUXDB_INIT_PASSWORD: influx123456
@@ -56,6 +60,7 @@ services:
     image: rabbitmq:3-management-alpine
     container_name: rotation-rabbitmq
     environment:
+      TZ: Asia/Shanghai
       RABBITMQ_DEFAULT_USER: guest
       RABBITMQ_DEFAULT_PASS: guest
     ports:
@@ -78,6 +83,7 @@ services:
     ports:
       - "8001:8001"
     environment:
+      TZ: Asia/Shanghai
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/rotation_db
       SPRING_DATASOURCE_USERNAME: admin
       SPRING_DATASOURCE_PASSWORD: secret
@@ -100,6 +106,7 @@ services:
     ports:
       - "8003:8003"
     environment:
+      TZ: Asia/Shanghai
       INFLUXDB_URL: http://influxdb:8086
       INFLUXDB_TOKEN: my-super-secret-token
       INFLUXDB_ORG: rotation
@@ -127,6 +134,7 @@ services:
     ports:
       - "8002:8002"
     environment:
+      TZ: Asia/Shanghai
       INFLUXDB_URL: http://influxdb:8086
       INFLUXDB_TOKEN: my-super-secret-token
       INFLUXDB_ORG: rotation
@@ -154,6 +162,7 @@ services:
     ports:
       - "8004:8004"
     environment:
+      TZ: Asia/Shanghai
       REDIS_HOST: redis
       REDIS_PORT: 6379
       REDIS_PASSWORD: redis123
@@ -182,6 +191,7 @@ services:
     ports:
       - "8005:8005"
     environment:
+      TZ: Asia/Shanghai
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/rotation_db
       SPRING_DATASOURCE_USERNAME: admin
       SPRING_DATASOURCE_PASSWORD: secret
@@ -208,9 +218,11 @@ services:
     ports:
       - "8006:8006"
     environment:
+      TZ: Asia/Shanghai
       DATA_COLLECTOR_URL: http://backend-data-collector:8003
       STRATEGY_URL: http://backend-strategy:8002
       SIGNAL_URL: http://backend-signal:8004
+
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_PORT: 5672
       RABBITMQ_USER: guest
