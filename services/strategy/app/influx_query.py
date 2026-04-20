@@ -1,9 +1,14 @@
 """策略引擎服务 - InfluxDB历史数据查询"""
+import warnings
 from datetime import datetime, timedelta
 from influxdb_client import InfluxDBClient
+from influxdb_client.client.warnings import MissingPivotFunction
 from loguru import logger
 
 from .config import settings
+
+# 抑制MissingPivotFunction警告，因为我们已经在所有查询中正确使用了pivot()函数
+warnings.simplefilter("ignore", MissingPivotFunction)
 
 
 class InfluxDBQuery:
@@ -130,7 +135,6 @@ class InfluxDBQuery:
         from(bucket: "{self.bucket}")
           |> range(start: -730d)
           |> filter(fn: (r) => r._measurement == "sector_capital_flow")
-          |> keep(columns: ["_time"])
           |> group()
           |> sort(columns: ["_time"])
           |> limit(n: 1)
@@ -159,7 +163,6 @@ class InfluxDBQuery:
         from(bucket: "{self.bucket}")
           |> range(start: -730d)
           |> filter(fn: (r) => r._measurement == "sector_capital_flow")
-          |> keep(columns: ["_time"])
           |> group()
           |> sort(columns: ["_time"], desc: true)
           |> limit(n: 1)
