@@ -71,8 +71,33 @@
         <span class="card-title">策略信号日历</span>
         <el-date-picker v-model="calendarMonth" type="month" placeholder="选择月份" size="small" value-format="YYYY-MM" />
       </div>
-      <v-chart :option="calendarOption" style="height: 300px" autoresize />
+      <v-chart :option="calendarOption" style="height: 300px" autoresize @click="handleCalendarClick" />
     </div>
+
+    <!-- 信号详情对话框 -->
+    <el-dialog v-model="signalDialogVisible" :title="`${selectedDate} 信号详情`" width="600px">
+      <el-table :data="selectedDateSignals" max-height="400">
+        <el-table-column prop="sector_name" label="板块" />
+        <el-table-column prop="direction" label="方向">
+          <template #default="{ row }">
+            <el-tag :type="row.direction === 'BUY' ? 'danger' : 'success'">
+              {{ row.direction === 'BUY' ? '买入' : '卖出' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="etf_code" label="ETF代码" />
+        <el-table-column prop="etf_name" label="ETF名称" />
+        <el-table-column prop="score" label="评分">
+          <template #default="{ row }">{{ row.score?.toFixed(2) }}</template>
+        </el-table-column>
+        <el-table-column prop="position_ratio" label="仓位">
+          <template #default="{ row }">{{ (row.position_ratio * 100).toFixed(1) }}%</template>
+        </el-table-column>
+      </el-table>
+      <template #footer>
+        <el-button @click="signalDialogVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -123,7 +148,18 @@ const heatmapOption = computed(() => {
     }},
     grid: { top: 10, bottom: 60, left: 80, right: 20 },
     xAxis: { type: 'category', data: displaySectors, axisLabel: { rotate: 45, fontSize: 11 } },
-    yAxis: { type: 'category', data: ['资金强度', '资金斜率', '相对强弱'] },
+    yAxis: { 
+      type: 'category', 
+      data: ['资金强度', '资金斜率', '相对强弱'],
+      name: '热度排行指标',
+      nameLocation: 'end',
+      nameGap: 20,
+      nameTextStyle: {
+        fontSize: 12,
+        fontWeight: 'bold',
+        color: '#606266',
+      },
+    },
     visualMap: { min: -3, max: 3, calculable: true, orient: 'horizontal', left: 'center', bottom: 0,
       inRange: { color: ['#313695', '#4575b4', '#74add1', '#abd9e9', '#ffffbf', '#fee090', '#fdae61', '#f46d43', '#d73027'] },
       text: ['强', '弱'],
@@ -201,20 +237,51 @@ async function loadHeatmapData() {
     const start = dayjs().subtract(parseInt(heatmapPeriod.value), 'day').format('YYYY-MM-DD')
     const dates = await settingsApi.getReplayDates(start, end)
     if (dates && dates.length > 0) {
-      // 使用最近一个交易日的数据
-      const latestDate = dates[dates.length - 1]
-      const dayData = await settingsApi.getReplayDayData(latestDate)
-      if (dayData?.sectors) {
-        heatmapRawData.value = dayData.sectors
-        sectorNames.value = dayData.sectors.map((s: any) => s.sector_name)
+      // 获取周期内所有交易日的数据并汇总
+      const sectorDataMap = new Map<string, { mainNetInflow: number[], indexChangePct: number[] }>()
+      
+      for (const date of dates) {
+        const dayData = await settingsApi.getReplayDayData(date)
+        if (dayData?.sectors) {
+          for (const sector of dayData.sectors) {
+            const name = sector.sector_name
+            if (!sectorDataMap.has(name)) {
+              sectorDataMap.set(name, { mainNetInflow: [], indexChangePct: [] })
+            }
+            const data = sectorDataMap.get(name)!
+            data.mainNetInflow.push(sector.main_net_inflow || 0)
+            data.indexChangePct.push(sector.index_change_pct || 0)
+          }
+        }
+      }
+      
+      // 计算周期内的平均值
+      const aggregatedSectors = Array.from(sectorDataMap.entries()).map(([name, data]) => {
+        const avgInflow = data.mainNetInflow.reduce((a, b) => a + b, 0) / data.mainNetInflow.length
+        const avgChange = data.indexChangePct.reduce((a, b) => a + b, 0) / data.indexChangePct.length
+        return {
+          sector_name: name,
+          main_net_inflow: avgInflow,
+          index_change_pct: avgChange,
+        }
+      })
+      
+      if (aggregatedSectors.length > 0) {
+        // 按资金强度降序排序
+        const sortedSectors = aggregatedSectors.sort((a: any, b: any) => 
+          (b.main_net_inflow || 0) - (a.main_net_inflow || 0)
+        )
+        heatmapRawData.value = sortedSectors
+        sectorNames.value = sortedSectors.map((s: any) => s.sector_name)
+      } else {
+        heatmapRawData.value = []
+        sectorNames.value = []
       }
     } else {
-      // 无数据时清空，让 computed 回退到随机数据
       heatmapRawData.value = []
       sectorNames.value = []
     }
   } catch {
-    // 加载失败使用随机数据
     heatmapRawData.value = []
     sectorNames.value = []
   } finally {
@@ -226,38 +293,66 @@ async function loadHeatmapData() {
 watch(heatmapPeriod, () => { loadHeatmapData() })
 
 const calendarOption = computed(() => {
-  // 优先使用真实信号数据
+  // 只使用真实信号数据
   let calData: any[] = []
-  if (calendarRealData.value.length > 0) {
-    const dateCount: Record<string, number> = {}
-    for (const sig of calendarRealData.value) {
-      const d = sig.signal_date || sig.created_at?.substring(0, 10)
-      if (d) dateCount[d] = (dateCount[d] || 0) + 1
+  const dateSignalsMap: Record<string, any[]> = {}
+  
+  for (const sig of calendarRealData.value) {
+    const d = sig.signal_date || sig.created_at?.substring(0, 10)
+    if (d) {
+      if (!dateSignalsMap[d]) dateSignalsMap[d] = []
+      dateSignalsMap[d].push(sig)
     }
-    calData = Object.entries(dateCount).map(([date, count]) => [date, count])
-  } else {
-    calData = generateCalendarData()
   }
-  return {
-    tooltip: { formatter: (p: any) => `${p.data[0]}: ${p.data[1]}个信号` },
-    visualMap: { min: 0, max: 10, show: true, orient: 'horizontal', bottom: 0, inRange: { color: ['#ebedf0', '#9be9a8', '#40c463', '#30a14e', '#216e39'] } },
-    calendar: { top: 20, left: 60, right: 30, range: calendarMonth.value, cellSize: ['auto', 18], itemStyle: { borderWidth: 3, borderColor: '#fff' }, yearLabel: { show: false } },
-    series: [{ type: 'heatmap', coordinateSystem: 'calendar', data: calData }],
-  }
-})
-
-function generateCalendarData(): any[] {
-  const data: any[] = []
+  calData = Object.entries(dateSignalsMap).map(([date, signals]) => [date, signals.length])
+  
+  // 填充当月所有日期，确保信号为0的日期也有显示
   const start = dayjs(calendarMonth.value + '-01')
   const daysInMonth = start.daysInMonth()
+  const filledData: any[] = []
   for (let i = 1; i <= daysInMonth; i++) {
     const d = start.date(i).format('YYYY-MM-DD')
-    if (dayjs(d).isBefore(dayjs())) {
-      data.push([d, Math.floor(Math.random() * 8)])
+    const existing = calData.find(item => item[0] === d)
+    if (existing) {
+      filledData.push(existing)
+    } else if (dayjs(d).isBefore(dayjs()) || dayjs(d).isSame(dayjs(), 'day')) {
+      filledData.push([d, 0])
     }
   }
-  return data
-}
+  
+  return {
+    tooltip: { 
+      formatter: (p: any) => {
+        const date = p.data[0]
+        const count = p.data[1]
+        if (count > 0 && dateSignalsMap[date]) {
+          const signals = dateSignalsMap[date]
+          const details = signals.slice(0, 5).map((s: any) => 
+            `<br/>${s.sector_name} - ${s.direction === 'BUY' ? '买入' : '卖出'}`
+          ).join('')
+          const more = signals.length > 5 ? `<br/>...还有${signals.length - 5}个信号` : ''
+          return `${date}: ${count}个信号${details}${more}`
+        }
+        return `${date}: ${count}个信号`
+      }
+    },
+    visualMap: { min: 0, max: 10, show: true, orient: 'horizontal', bottom: 0, inRange: { color: ['#f5f5f5', '#9be9a8', '#40c463', '#30a14e', '#216e39'] } },
+    calendar: { 
+      top: 20, left: 60, right: 30, range: calendarMonth.value, 
+      cellSize: ['auto', 18], 
+      itemStyle: { borderWidth: 1, borderColor: '#dcdee0' }, 
+      yearLabel: { show: false },
+      dayLabel: { firstDay: 1, nameMap: 'cn' },
+      monthLabel: { nameMap: 'cn' },
+    },
+    series: [{ 
+      type: 'heatmap', 
+      coordinateSystem: 'calendar', 
+      data: filledData,
+      clickable: true,
+    }],
+  }
+})
 
 onMounted(async () => {
   try {
@@ -291,6 +386,26 @@ async function loadCalendarData() {
   } catch { /* ignore */ }
 }
 const calendarRealData = ref<any[]>([])
+
+// 日历点击相关
+const signalDialogVisible = ref(false)
+const selectedDate = ref('')
+const selectedDateSignals = ref<any[]>([])
+
+function handleCalendarClick(params: any) {
+  if (params.data) {
+    const date = params.data[0]
+    const count = params.data[1]
+    if (count > 0) {
+      selectedDate.value = date
+      selectedDateSignals.value = calendarRealData.value.filter((sig: any) => {
+        const d = sig.signal_date || sig.created_at?.substring(0, 10)
+        return d === date
+      })
+      signalDialogVisible.value = true
+    }
+  }
+}
 
 watch(currentStrategy, () => { loadCalendarData() })
 watch(calendarMonth, () => { loadCalendarData() })
