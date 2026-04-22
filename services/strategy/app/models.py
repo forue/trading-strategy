@@ -26,6 +26,13 @@ class StrategyParams(BaseModel):
     commission_rate: float = 0.0003    # 佣金费率，默认万三
     stamp_tax_rate: float = 0.001     # 印花税率，默认千一（仅卖出）
     slippage_rate: float = 0.001      # 滑点费率，默认千一
+    # 调仓优化参数
+    min_score_threshold: float = 4.0      # 最低评分阈值，低于此评分不买入
+    score_gap_threshold: float = 1.5        # 评分差异阈值，新信号评分需高于当前持仓此阈值才调仓
+    cooldown_days: int = 2                  # 调仓冷却期额外的交易日间隔
+    keep_overlap: bool = True               # 是否保留重叠持仓
+    allow_empty: bool = True               # 市场不景气时是否允许空仓
+    min_score_keep: float = 5.0            # 持仓保留阈值，评分高于此值可保留
 
 
 class TradeSignal(BaseModel):
