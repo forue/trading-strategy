@@ -8,6 +8,9 @@ from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException
 from loguru import logger
 
+# 常量定义
+TRADING_DAYS_PER_YEAR = 252  # 年化交易日天数
+
 from .config import settings
 from .models import (
     StrategyType, StrategyParams, StrategyConfig,
@@ -28,15 +31,15 @@ redis_client = redis_lib.Redis(
 DEFAULT_CONFIGS = {
     StrategyType.AGGRESSIVE: StrategyConfig(
         id=1, strategy_type=StrategyType.AGGRESSIVE, name="激进轮动策略",
-        params=StrategyParams(top_n=2, max_position=1.0, hold_days=3, capital_pct=0.5, stop_loss=0.05, commission_rate=0.0003, stamp_tax_rate=0.001, slippage_rate=0.001),
+        params=StrategyParams(top_n=2, max_position=1.0, hold_days=3, capital_pct=0.5, stop_loss=0.05, commission_rate=0.0003, stamp_tax_rate=0.001, slippage_rate=0.001, min_score_threshold=4.0, score_gap_threshold=1.5, cooldown_days=2, keep_overlap=True, allow_empty=True, min_score_keep=5.0),
     ),
     StrategyType.MODERATE: StrategyConfig(
         id=2, strategy_type=StrategyType.MODERATE, name="稳健轮动策略",
-        params=StrategyParams(top_n=3, max_position=0.5, hold_days=5, capital_pct=0.3, stop_loss=0.03, commission_rate=0.0003, stamp_tax_rate=0.001, slippage_rate=0.001),
+        params=StrategyParams(top_n=3, max_position=0.5, hold_days=5, capital_pct=0.3, stop_loss=0.03, commission_rate=0.0003, stamp_tax_rate=0.001, slippage_rate=0.001, min_score_threshold=4.0, score_gap_threshold=1.5, cooldown_days=2, keep_overlap=True, allow_empty=True, min_score_keep=5.0),
     ),
     StrategyType.CONSERVATIVE: StrategyConfig(
         id=3, strategy_type=StrategyType.CONSERVATIVE, name="保守轮动策略",
-        params=StrategyParams(top_n=5, max_position=0.3, hold_days=10, capital_pct=0.2, stop_loss=0.02, valuation_pct_max=50, commission_rate=0.0003, stamp_tax_rate=0.001, slippage_rate=0.001),
+        params=StrategyParams(top_n=5, max_position=0.3, hold_days=10, capital_pct=0.2, stop_loss=0.02, valuation_pct_max=50, commission_rate=0.0003, stamp_tax_rate=0.001, slippage_rate=0.001, min_score_threshold=4.0, score_gap_threshold=1.5, cooldown_days=3, keep_overlap=True, allow_empty=True, min_score_keep=5.0),
     ),
 }
 
@@ -370,6 +373,7 @@ async def run_backtest(request: BacktestRequest):
         total_stamp_tax = 0.0  # 累计印花税
         total_slippage_cost = 0.0  # 累计滑点成本
         trade_count_actual = 0  # 实际交易笔数
+        rebalance_cooldown = 0  # 调仓冷却期
 
         for i, date in enumerate(sorted_dates):
             sector_data = daily_data[date]
@@ -438,23 +442,30 @@ async def run_backtest(request: BacktestRequest):
             if stop_loss_cooldown > 0:
                 stop_loss_cooldown -= 1
 
+            # === Step 5.5: 更新调仓冷却期 ===
+            if rebalance_cooldown > 0:
+                rebalance_cooldown -= 1
+
             # === Step 6: 检查是否需要调仓（冷静期结束后才可建仓）===
-            if not stop_loss_triggered and position_hold_counter <= 0 and stop_loss_cooldown <= 0:
+            if not stop_loss_triggered and position_hold_counter <= 0 and stop_loss_cooldown <= 0 and rebalance_cooldown <= 0:
                 # 用当天的数据选板块 → 新持仓从明天开始生效
+                # 传递当前持仓以支持持仓保留逻辑
                 signals = scoring_model.calculate_daily_signals(
                     sector_data=sector_data,
                     strategy_type=request.strategy_type,
                     params=params,
                     signal_date=date,
+                    current_positions=current_positions,
                 )
 
                 # 构建新持仓：买入信号对应的板块
                 new_positions = {}
                 buy_signals = [s for s in signals if s.direction.value == "BUY"]
                 if buy_signals:
-                    # 实际仓位 = max_position * capital_pct / 买入信号数量
-                    actual_position = params.max_position * params.capital_pct
-                    per_weight = actual_position / len(buy_signals)
+                    # 修复：总仓位不超过1.0，防止杠杆超限
+                    # 实际仓位 = min(max_position * capital_pct, 1.0) / 买入信号数量
+                    total_weight = min(params.max_position * params.capital_pct, 1.0)
+                    per_weight = total_weight / len(buy_signals)
                     for sig in buy_signals:
                         new_positions[sig.sector_code] = per_weight
 
@@ -495,7 +506,8 @@ async def run_backtest(request: BacktestRequest):
 
                     current_positions = new_positions
                     position_hold_counter = params.hold_days
-                    stop_loss_triggered = False  # 重新建仓后重置止损标记
+                    stop_loss_triggered = False
+                    rebalance_cooldown = params.cooldown_days if params.cooldown_days else 2
                 # 如果没有买入信号，保持空仓，下次再选
 
             # === Step 7: 记录净值曲线 ===
@@ -512,7 +524,7 @@ async def run_backtest(request: BacktestRequest):
 
         # 计算回测指标
         total_return = (capital / request.initial_capital) - 1
-        trading_years = max(trading_days / 252, 0.01)
+        trading_years = max(trading_days / TRADING_DAYS_PER_YEAR, 0.01)
         annual_return = (1 + total_return) ** (1 / trading_years) - 1
 
         # 最大回撤 - 使用净值曲线计算
@@ -526,7 +538,7 @@ async def run_backtest(request: BacktestRequest):
 
         # 夏普比率
         daily_arr = np.array(daily_returns)
-        sharpe = (np.mean(daily_arr) * 252) / (np.std(daily_arr) * np.sqrt(252)) if np.std(daily_arr) > 0 else 0
+        sharpe = (np.mean(daily_arr) * TRADING_DAYS_PER_YEAR) / (np.std(daily_arr) * np.sqrt(TRADING_DAYS_PER_YEAR)) if np.std(daily_arr) > 0 else 0
 
         # 胜率
         win_rate = float(np.mean(daily_arr > 0)) if len(daily_arr) > 0 else 0
@@ -983,6 +995,7 @@ async def replay_strategy_overlay(request_body: dict):
         total_stamp_tax = 0.0  # 累计印花税
         total_slippage_cost = 0.0  # 累计滑点成本
         trade_count_actual = 0  # 实际交易笔数
+        rebalance_cooldown = 0  # 调仓冷却期
 
         daily_signals_out = []
         nav_curve = []
@@ -997,7 +1010,11 @@ async def replay_strategy_overlay(request_body: dict):
 
             # === Step 1: 计算当日收益（基于昨日持仓，用今日涨跌幅）===
             strategy_daily_return = 0.0
-            if not stop_loss_triggered and current_positions:
+            if stop_loss_triggered:
+                # 止损触发后已空仓，当日无策略收益（持仓在当日开盘前已卖出）
+                strategy_daily_return = 0.0
+            elif current_positions:
+                # 正常持仓，计算收益
                 for sector_code, weight in current_positions.items():
                     strategy_daily_return += weight * sector_change_map.get(sector_code, 0)
 
@@ -1053,13 +1070,18 @@ async def replay_strategy_overlay(request_body: dict):
             if stop_loss_cooldown > 0:
                 stop_loss_cooldown -= 1
 
+            # === Step 4.5: 更新调仓冷却期 ===
+            if rebalance_cooldown > 0:
+                rebalance_cooldown -= 1
+
             # === Step 5: 检查是否需要调仓 ===
-            if not stop_loss_triggered and position_hold_counter <= 0 and stop_loss_cooldown <= 0:
+            if not stop_loss_triggered and position_hold_counter <= 0 and stop_loss_cooldown <= 0 and rebalance_cooldown <= 0:
                 signals = scoring_model.calculate_daily_signals(
                     sector_data=sector_data,
                     strategy_type=strategy_type,
                     params=params,
                     signal_date=date,
+                    current_positions=current_positions,
                 )
 
                 new_positions = {}
@@ -1067,9 +1089,10 @@ async def replay_strategy_overlay(request_body: dict):
                 sell_sigs = [s for s in signals if s.direction.value == "SELL"]
                 
                 if buy_sigs:
-                    # 实际仓位 = max_position * capital_pct / 买入信号数量
-                    actual_position = params.max_position * params.capital_pct
-                    per_weight = actual_position / len(buy_sigs)
+                    # 修复：总仓位不超过1.0，防止杠杆超限
+                    # 实际仓位 = min(max_position * capital_pct, 1.0) / 买入信号数量
+                    total_weight = min(params.max_position * params.capital_pct, 1.0)
+                    per_weight = total_weight / len(buy_sigs)
                     for sig in buy_sigs:
                         new_positions[sig.sector_code] = per_weight
                         buy_count += 1
@@ -1124,6 +1147,7 @@ async def replay_strategy_overlay(request_body: dict):
                     current_positions = new_positions
                     position_hold_counter = params.hold_days
                     stop_loss_triggered = False
+                    rebalance_cooldown = params.cooldown_days if params.cooldown_days else 2
 
             # 记录信号
             daily_signals_out.append({
@@ -1143,15 +1167,18 @@ async def replay_strategy_overlay(request_body: dict):
                 "stop_loss": stop_loss_triggered,
             })
 
+        # 预计算每日基准收益（性能优化：避免循环内重复计算）
+        benchmark_returns = {}
+        for date, sector_data in daily_data.items():
+            all_changes = [s.get("index_change_pct", 0) / 100 for s in sector_data]
+            benchmark_returns[date] = float(np.mean(all_changes)) if all_changes else 0.0
+
         # 计算基准净值（复利）
         benchmark_nav = initial_capital
-        for i, date in enumerate(sorted_dates):
-            sector_data = daily_data[date]
-            all_changes = [s.get("index_change_pct", 0) / 100 for s in sector_data]
-            benchmark_return = float(np.mean(all_changes)) if all_changes else 0.0
-            benchmark_nav *= (1 + benchmark_return)
-            if i < len(nav_curve):
-                nav_curve[i]["benchmark"] = round(benchmark_nav, 2)
+        for i, nav_item in enumerate(nav_curve):
+            date = nav_item["date"]
+            benchmark_nav *= (1 + benchmark_returns.get(date, 0))
+            nav_item["benchmark"] = round(benchmark_nav, 2)
 
         # 汇总
         total_return = (capital / initial_capital) - 1
@@ -1162,7 +1189,7 @@ async def replay_strategy_overlay(request_body: dict):
 
         summary = {
             "total_return": round(float(total_return), 4),
-            "annual_return": round(float((1 + total_return) ** (252 / max(trading_days, 1)) - 1), 4),
+            "annual_return": round(float((1 + total_return) ** (TRADING_DAYS_PER_YEAR / max(trading_days, 1)) - 1), 4),
             "max_drawdown": round(float(max_drawdown), 4),
             "trade_count": max(1, trading_days // params.hold_days),
             "buy_count": buy_count,
