@@ -126,6 +126,18 @@ public class AuthController {
         return ResponseEntity.ok(Map.of("code", 200, "message", "退出成功"));
     }
 
+    @GetMapping("/health")
+    public ResponseEntity<?> healthCheck() {
+        return ResponseEntity.ok(Map.of(
+            "code", 200,
+            "data", Map.of(
+                "status", "healthy",
+                "service", "auth",
+                "timestamp", System.currentTimeMillis()
+            )
+        ));
+    }
+
     @Data
     public static class LoginRequest {
         private String username;
