@@ -62,22 +62,25 @@ async def job_collect_north_bound():
 
 def setup_scheduler():
     """配置定时任务"""
-    # 每个交易日15:00采集数据
+    # 每个交易日15:00采集数据（仅限交易日）
     scheduler.add_job(
         job_collect_data, CronTrigger(day_of_week="mon-fri", hour=15, minute=0),
         id="collect_data", name="板块资金流数据采集", replace_existing=True,
+        misfire_grace_time=300,  # 5分钟容错时间
     )
-    # 数据采集后5分钟计算策略
+    # 数据采集后5分钟计算策略（仅限交易日）
     scheduler.add_job(
         job_calculate_strategy, CronTrigger(day_of_week="mon-fri", hour=15, minute=5),
         id="calculate_strategy", name="三档轮动策略计算", replace_existing=True,
+        misfire_grace_time=300,
     )
-    # 16:00采集北向资金
+    # 16:00采集北向资金（仅限交易日）
     scheduler.add_job(
         job_collect_north_bound, CronTrigger(day_of_week="mon-fri", hour=16, minute=0),
         id="collect_north_bound", name="北向资金数据采集", replace_existing=True,
+        misfire_grace_time=300,
     )
-    logger.info("定时任务配置完成")
+    logger.info("定时任务配置完成 - 仅限交易日执行")
 
 
 @app.on_event("startup")
