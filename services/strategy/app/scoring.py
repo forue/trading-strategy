@@ -74,6 +74,7 @@ class RotationScoringModel:
         strategy_type: StrategyType,
         params: StrategyParams,
         signal_date: Optional[str] = None,
+        current_positions: Optional[dict] = None,
     ) -> list[TradeSignal]:
         """计算每日轮动信号
 
@@ -82,6 +83,7 @@ class RotationScoringModel:
             strategy_type: 策略类型
             params: 策略参数
             signal_date: 信号日期
+            current_positions: 当前持仓 dict {sector_code: weight}
         Returns:
             交易信号列表
         """
@@ -109,11 +111,11 @@ class RotationScoringModel:
         # 根据策略类型生成信号
         signals = []
         if strategy_type == StrategyType.AGGRESSIVE:
-            signals = self._aggressive_rotation(scored_sectors, params, signal_date)
+            signals = self._aggressive_rotation(scored_sectors, params, signal_date, current_positions)
         elif strategy_type == StrategyType.MODERATE:
-            signals = self._moderate_rotation(scored_sectors, params, signal_date)
+            signals = self._moderate_rotation(scored_sectors, params, signal_date, current_positions)
         elif strategy_type == StrategyType.CONSERVATIVE:
-            signals = self._conservative_rotation(scored_sectors, params, signal_date)
+            signals = self._conservative_rotation(scored_sectors, params, signal_date, current_positions)
 
         logger.info(f"策略 {strategy_type.value} 生成 {len(signals)} 条信号")
         return signals
@@ -197,97 +199,296 @@ class RotationScoringModel:
             total_sectors=total_sectors,
         )
 
-    def _aggressive_rotation(self, scored_sectors: list, params: StrategyParams, signal_date: str) -> list[TradeSignal]:
-        """激进轮动：仅取资金强度前2名，满仓轮换"""
+    def _aggressive_rotation(self, scored_sectors: list, params: StrategyParams, signal_date: str, current_positions: Optional[dict] = None) -> list[TradeSignal]:
+        """激进轮动：仅取资金强度前2名，满仓轮换（带持仓优化）"""
         signals = []
+        current_positions = current_positions or {}
+        min_score = params.min_score_threshold or 4.0
+        score_gap = params.score_gap_threshold or 1.5
+        keep_overlap = params.keep_overlap if params.keep_overlap is not None else True
+        allow_empty = params.allow_empty if params.allow_empty is not None else True
+        keep_score_min = params.min_score_keep or 5.0
+
+        # 构建当前持仓评分映射
+        current_scores = {}
+        for s in scored_sectors:
+            if current_positions and s.get("sector_code") in current_positions:
+                current_scores[s.get("sector_code")] = s.get("composite_score", 0)
+
+        # 市场景气判断：至少有一个板块评分 >= min_score
+        market_good = any(s.get("composite_score", 0) >= min_score for s in scored_sectors[:10])
+
+        # 如果市场不景气且允许空仓，返回空信号
+        if not market_good and allow_empty:
+            return signals
+
         top_n = min(params.top_n, len(scored_sectors))
+        top_sectors = scored_sectors[:top_n]
 
-        for i, sector in enumerate(scored_sectors[:top_n]):
-            position_ratio = params.max_position / top_n
-            signals.append(self._build_signal(
-                sector=sector, strategy_type=StrategyType.AGGRESSIVE,
-                direction=SignalDirection.BUY, position_ratio=position_ratio,
-                score=sector["composite_score"], signal_date=signal_date,
-                reason=f"激进轮动: 资金强度排名#{i+1}, 综合评分{sector['composite_score']:.2f}, 建议满仓轮换持有{params.hold_days}日",
-                rank=i+1,
-                total_sectors=len(scored_sectors),
-            ))
+        # 筛选合格的目标板块
+        buy_targets = []
+        for s in top_sectors:
+            score = s.get("composite_score", 0)
+            if score >= min_score:
+                buy_targets.append(s)
 
-        # 对排名靠后的板块发出卖出信号
-        for i, sector in enumerate(scored_sectors):
-            if sector["composite_score"] < 4.0 and i >= len(scored_sectors) - 3:
+        if not buy_targets:
+            return signals
+
+        # 构建新的买入板块集合
+        new_codes = set(s.get("sector_code") for s in buy_targets)
+        current_codes = set(current_positions.keys()) if current_positions else set()
+
+        # 调仓决策：检查是否需要调仓
+        should_rebalance = False
+
+        # 情况1：新信号包含当前持仓的板块 → 保留
+        if keep_overlap and current_codes:
+            overlap = current_codes & new_codes
+            if overlap:
+                # 保留重叠持仓，只处理其他
+                should_rebalance = True
+
+        # 情况2：评分差异显著高于当前持仓才调仓
+        if current_positions:
+            max_current_score = max(current_scores.values()) if current_scores else 0
+            max_new_score = max(s.get("composite_score", 0) for s in buy_targets)
+            if max_new_score - max_current_score < score_gap:
+                # 差异不足，保持当前持仓
+                buy_targets = [s for s in buy_targets if s.get("sector_code") in current_codes]
+                if not buy_targets:
+                    # 当前持仓评分尚可，保留
+                    for code in current_codes:
+                        s = next((sec for sec in scored_sectors if sec.get("sector_code") == code), None)
+                        if s and s.get("composite_score", 0) >= keep_score_min:
+                            signals.append(self._build_signal(
+                                sector=s, strategy_type=StrategyType.AGGRESSIVE,
+                                direction=SignalDirection.BUY, position_ratio=params.max_position,
+                                score=s["composite_score"], signal_date=signal_date,
+                                reason=f"激进轮动: 持仓保留, 评分{s['composite_score']:.2f}>=保留阈值{keep_score_min:.2f}, 继续持有",
+                                rank=next((i+1 for i, x in enumerate(scored_sectors) if x.get("sector_code") == code), 0),
+                                total_sectors=len(scored_sectors),
+                            ))
+                    return signals
+        else:
+            should_rebalance = True
+
+        # 生成买入信号
+        if buy_targets:
+            # 检查是否完全替换
+            replace_all = current_codes and new_codes and len(new_codes - current_codes) == len(new_codes)
+            position_ratio = params.max_position / len(buy_targets)
+            for s in buy_targets:
+                rank = next((i+1 for i, x in enumerate(scored_sectors) if x.get("sector_code") == s.get("sector_code")), 0)
+                reason_prefix = "满仓轮换" if replace_all else "部分调仓"
                 signals.append(self._build_signal(
-                    sector=sector, strategy_type=StrategyType.AGGRESSIVE,
-                    direction=SignalDirection.SELL, position_ratio=0,
-                    score=sector["composite_score"], signal_date=signal_date,
-                    reason=f"激进轮动: 资金流出, 评分{sector['composite_score']:.2f}低于阈值, 建议卖出",
-                    rank=i+1,
+                    sector=s, strategy_type=StrategyType.AGGRESSIVE,
+                    direction=SignalDirection.BUY, position_ratio=position_ratio,
+                    score=s["composite_score"], signal_date=signal_date,
+                    reason=f"激进轮动: {reason_prefix}, 评分{s['composite_score']:.2f}, 持有{params.hold_days}日",
+                    rank=rank,
                     total_sectors=len(scored_sectors),
                 ))
 
+        # 卖出不再持有的板块
+        if current_positions and should_rebalance:
+            for code in current_codes - new_codes:
+                s = next((sec for sec in scored_sectors if sec.get("sector_code") == code), None)
+                if s:
+                    old_score = current_scores.get(code, 0)
+                    signals.append(self._build_signal(
+                        sector=s, strategy_type=StrategyType.AGGRESSIVE,
+                        direction=SignalDirection.SELL, position_ratio=0,
+                        score=s["composite_score"], signal_date=signal_date,
+                        reason=f"激进轮动: 调出, 原评分{old_score:.2f}, 新建议评分{buy_targets[0].get('composite_score', 0):.2f}",
+                        rank=0,
+                        total_sectors=len(scored_sectors),
+                    ))
+
         return signals
 
-    def _moderate_rotation(self, scored_sectors: list, params: StrategyParams, signal_date: str) -> list[TradeSignal]:
-        """稳健轮动：取综合前3名，半仓分散"""
+    def _moderate_rotation(self, scored_sectors: list, params: StrategyParams, signal_date: str, current_positions: Optional[dict] = None) -> list[TradeSignal]:
+        """稳健轮动：取综合前3名，半仓分散（带持仓优化）"""
         signals = []
+        current_positions = current_positions or {}
+        min_score = params.min_score_threshold or 4.0
+        score_gap = params.score_gap_threshold or 1.5
+        keep_overlap = params.keep_overlap if params.keep_overlap is not None else True
+        allow_empty = params.allow_empty if params.allow_empty is not None else True
+        keep_score_min = params.min_score_keep or 5.0
+
+        current_scores = {}
+        for s in scored_sectors:
+            if current_positions and s.get("sector_code") in current_positions:
+                current_scores[s.get("sector_code")] = s.get("composite_score", 0)
+
+        market_good = any(s.get("composite_score", 0) >= min_score for s in scored_sectors[:10])
+
+        if not market_good and allow_empty:
+            return signals
+
         top_n = min(params.top_n, len(scored_sectors))
+        top_sectors = scored_sectors[:top_n]
 
-        for i, sector in enumerate(scored_sectors[:top_n]):
-            position_ratio = params.max_position / top_n
-            signals.append(self._build_signal(
-                sector=sector, strategy_type=StrategyType.MODERATE,
-                direction=SignalDirection.BUY, position_ratio=position_ratio,
-                score=sector["composite_score"], signal_date=signal_date,
-                reason=f"稳健轮动: 综合排名#{i+1}, 评分{sector['composite_score']:.2f}, 半仓分散持有{params.hold_days}日",
-                rank=i+1,
-                total_sectors=len(scored_sectors),
-            ))
+        buy_targets = []
+        for s in top_sectors:
+            score = s.get("composite_score", 0)
+            if score >= min_score:
+                buy_targets.append(s)
 
-        for i, sector in enumerate(scored_sectors):
-            if sector["composite_score"] < 3.0:
+        if not buy_targets:
+            return signals
+
+        new_codes = set(s.get("sector_code") for s in buy_targets)
+        current_codes = set(current_positions.keys()) if current_positions else set()
+
+        should_rebalance = False
+
+        if keep_overlap and current_codes:
+            overlap = current_codes & new_codes
+            if overlap:
+                should_rebalance = True
+
+        if current_positions:
+            max_current_score = max(current_scores.values()) if current_scores else 0
+            max_new_score = max(s.get("composite_score", 0) for s in buy_targets)
+            if max_new_score - max_current_score < score_gap:
+                buy_targets = [s for s in buy_targets if s.get("sector_code") in current_codes]
+                if not buy_targets:
+                    for code in current_codes:
+                        s = next((sec for sec in scored_sectors if sec.get("sector_code") == code), None)
+                        if s and s.get("composite_score", 0) >= keep_score_min:
+                            signals.append(self._build_signal(
+                                sector=s, strategy_type=StrategyType.MODERATE,
+                                direction=SignalDirection.BUY, position_ratio=params.max_position / max(len(current_positions), 1),
+                                score=s["composite_score"], signal_date=signal_date,
+                                reason=f"稳健轮动: 持仓保留, 评分{s['composite_score']:.2f}>=保留阈值{keep_score_min:.2f}",
+                                rank=next((i+1 for i, x in enumerate(scored_sectors) if x.get("sector_code") == code), 0),
+                                total_sectors=len(scored_sectors),
+                            ))
+                    return signals
+        else:
+            should_rebalance = True
+
+        if buy_targets:
+            replace_all = current_codes and new_codes and len(new_codes - current_codes) == len(new_codes)
+            position_ratio = params.max_position / len(buy_targets)
+            for s in buy_targets:
+                rank = next((i+1 for i, x in enumerate(scored_sectors) if x.get("sector_code") == s.get("sector_code")), 0)
+                reason_prefix = "半仓轮换" if replace_all else "部分调仓"
                 signals.append(self._build_signal(
-                    sector=sector, strategy_type=StrategyType.MODERATE,
-                    direction=SignalDirection.SELL, position_ratio=0,
-                    score=sector["composite_score"], signal_date=signal_date,
-                    reason=f"稳健轮动: 评分{sector['composite_score']:.2f}过低, 建议减仓",
-                    rank=i+1,
+                    sector=s, strategy_type=StrategyType.MODERATE,
+                    direction=SignalDirection.BUY, position_ratio=position_ratio,
+                    score=s["composite_score"], signal_date=signal_date,
+                    reason=f"稳健轮动: {reason_prefix}, 评分{s['composite_score']:.2f}, 持有{params.hold_days}日",
+                    rank=rank,
                     total_sectors=len(scored_sectors),
                 ))
 
+        if current_positions and should_rebalance:
+            for code in current_codes - new_codes:
+                s = next((sec for sec in scored_sectors if sec.get("sector_code") == code), None)
+                if s:
+                    old_score = current_scores.get(code, 0)
+                    signals.append(self._build_signal(
+                        sector=s, strategy_type=StrategyType.MODERATE,
+                        direction=SignalDirection.SELL, position_ratio=0,
+                        score=s["composite_score"], signal_date=signal_date,
+                        reason=f"稳健轮动: 调出, 原评分{old_score:.2f}",
+                        rank=0,
+                        total_sectors=len(scored_sectors),
+                    ))
+
         return signals
 
-    def _conservative_rotation(self, scored_sectors: list, params: StrategyParams, signal_date: str) -> list[TradeSignal]:
-        """保守轮动：资金持续流入且估值分位低于50%"""
+    def _conservative_rotation(self, scored_sectors: list, params: StrategyParams, signal_date: str, current_positions: Optional[dict] = None) -> list[TradeSignal]:
+        """保守轮动：资金持续流入且估值分位低于50%（带持仓优化）"""
         signals = []
+        current_positions = current_positions or {}
         valuation_max = params.valuation_pct_max or 50
+        min_score = params.min_score_threshold or 4.0
+        score_gap = params.score_gap_threshold or 1.5
+        keep_overlap = params.keep_overlap if params.keep_overlap is not None else True
+        allow_empty = params.allow_empty if params.allow_empty is not None else True
+        keep_score_min = params.min_score_keep or 5.0
+
+        current_scores = {}
+        for s in scored_sectors:
+            if current_positions and s.get("sector_code") in current_positions:
+                current_scores[s.get("sector_code")] = s.get("composite_score", 0)
+
+        market_good = any(s.get("composite_score", 0) >= min_score for s in scored_sectors[:10])
+
+        if not market_good and allow_empty:
+            return signals
 
         # 筛选估值分位低于阈值的板块
-        filtered = [s for s in scored_sectors if s["composite_score"] >= 5.0]
+        filtered = [s for s in scored_sectors if s["composite_score"] >= min_score]
 
         top_n = min(params.top_n, len(filtered))
-        for i, sector in enumerate(filtered[:top_n]):
-            # 找到该板块在原始排序中的排名
-            original_rank = next((idx+1 for idx, s in enumerate(scored_sectors) if s.get("sector_code") == sector.get("sector_code")), 0)
-            position_ratio = params.max_position / max(top_n, 1)
-            signals.append(self._build_signal(
-                sector=sector, strategy_type=StrategyType.CONSERVATIVE,
-                direction=SignalDirection.BUY, position_ratio=position_ratio,
-                score=sector["composite_score"], signal_date=signal_date,
-                reason=f"保守轮动: 综合评分{sector['composite_score']:.2f}, 估值分位<={valuation_max}%, 仓位上限{params.max_position*100:.0f}%",
-                rank=original_rank,
-                total_sectors=len(scored_sectors),
-            ))
+        buy_targets = filtered[:top_n]
 
-        for i, sector in enumerate(scored_sectors):
-            if sector["composite_score"] < 3.5:
+        if not buy_targets:
+            return signals
+
+        new_codes = set(s.get("sector_code") for s in buy_targets)
+        current_codes = set(current_positions.keys()) if current_positions else set()
+
+        should_rebalance = False
+
+        if keep_overlap and current_codes:
+            overlap = current_codes & new_codes
+            if overlap:
+                should_rebalance = True
+
+        if current_positions:
+            max_current_score = max(current_scores.values()) if current_scores else 0
+            max_new_score = max(s.get("composite_score", 0) for s in buy_targets)
+            if max_new_score - max_current_score < score_gap:
+                buy_targets = [s for s in buy_targets if s.get("sector_code") in current_codes]
+                if not buy_targets:
+                    for code in current_codes:
+                        s = next((sec for sec in scored_sectors if sec.get("sector_code") == code), None)
+                        if s and s.get("composite_score", 0) >= keep_score_min:
+                            signals.append(self._build_signal(
+                                sector=s, strategy_type=StrategyType.CONSERVATIVE,
+                                direction=SignalDirection.BUY, position_ratio=params.max_position / max(len(current_positions), 1),
+                                score=s["composite_score"], signal_date=signal_date,
+                                reason=f"保守轮动: 持仓保留, 评分{s['composite_score']:.2f}>=保留阈值{keep_score_min:.2f}",
+                                rank=next((i+1 for i, x in enumerate(scored_sectors) if x.get("sector_code") == code), 0),
+                                total_sectors=len(scored_sectors),
+                            ))
+                    return signals
+        else:
+            should_rebalance = True
+
+        if buy_targets:
+            replace_all = current_codes and new_codes and len(new_codes - current_codes) == len(new_codes)
+            position_ratio = params.max_position / max(len(buy_targets), 1)
+            for s in buy_targets:
+                original_rank = next((idx+1 for idx, x in enumerate(scored_sectors) if x.get("sector_code") == s.get("sector_code")), 0)
+                reason_prefix = "保守轮换" if replace_all else "部分调仓"
                 signals.append(self._build_signal(
-                    sector=sector, strategy_type=StrategyType.CONSERVATIVE,
-                    direction=SignalDirection.SELL, position_ratio=0,
-                    score=sector["composite_score"], signal_date=signal_date,
-                    reason=f"保守轮动: 评分{sector['composite_score']:.2f}不满足安全边际, 建议规避",
-                    rank=i+1,
+                    sector=s, strategy_type=StrategyType.CONSERVATIVE,
+                    direction=SignalDirection.BUY, position_ratio=position_ratio,
+                    score=s["composite_score"], signal_date=signal_date,
+                    reason=f"保守轮动: {reason_prefix}, 评分{s['composite_score']:.2f}, 估值分位<={valuation_max}%",
+                    rank=original_rank,
                     total_sectors=len(scored_sectors),
                 ))
+
+        if current_positions and should_rebalance:
+            for code in current_codes - new_codes:
+                s = next((sec for sec in scored_sectors if sec.get("sector_code") == code), None)
+                if s:
+                    signals.append(self._build_signal(
+                        sector=s, strategy_type=StrategyType.CONSERVATIVE,
+                        direction=SignalDirection.SELL, position_ratio=0,
+                        score=s["composite_score"], signal_date=signal_date,
+                        reason=f"保守轮动: 调出, 原评分{current_scores.get(code, 0):.2f}",
+                        rank=0,
+                        total_sectors=len(scored_sectors),
+                    ))
 
         return signals
 
