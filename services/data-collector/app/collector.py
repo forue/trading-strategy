@@ -228,7 +228,9 @@ class DataCollector:
             for item in results:
                 pe_pct, pb_pct = self.calculate_sector_valuation_percentile(
                     item["sector_code"], 
-                    item["date"]
+                    item["date"],
+                    item.get("pe_ttm"),
+                    item.get("pb")
                 )
                 item["pe_percentile"] = pe_pct
                 item["pb_percentile"] = pb_pct
@@ -388,7 +390,7 @@ class DataCollector:
         logger.info("北向资金数据暂无数据源")
         return []
 
-    def calculate_sector_valuation_percentile(self, sector_code: str, trade_date: str = None) -> tuple[float | None, float | None]:
+    def calculate_sector_valuation_percentile(self, sector_code: str, trade_date: str = None, current_pe: float = None, current_pb: float = None) -> tuple[float | None, float | None]:
         """计算板块PE/PB历史分位
 
         从InfluxDB查询历史数据，计算当前PE/PB在历史数据中的分位
@@ -396,6 +398,8 @@ class DataCollector:
         Args:
             sector_code: 板块代码
             trade_date: 交易日期，默认今天
+            current_pe: 当前PE值（用于避免查询新写入的数据）
+            current_pb: 当前PB值
 
         Returns:
             (pe_percentile, pb_percentile) - 0-100范围，None表示无足够历史数据
@@ -433,29 +437,6 @@ class DataCollector:
         
         pe_values = []
         pb_values = []
-        current_pe = None
-        current_pb = None
-        
-        target_date = trade_date[:4] + "-" + trade_date[4:6] + "-" + trade_date[6:8]
-        
-        for row in records:
-            time_str = str(row.get("_time", ""))
-            try:
-                dt = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
-                date_key = dt.strftime("%Y-%m-%d")
-            except (ValueError, TypeError):
-                continue
-            
-            if date_key != target_date:
-                continue
-                
-            pe = self._safe_float(row.get("pe_ttm"), 0)
-            pb = self._safe_float(row.get("pb"), 0)
-            
-            if pe > 0:
-                current_pe = pe
-            if pb > 0:
-                current_pb = pb
         
         for row in records:
             time_str = str(row.get("_time", ""))
@@ -475,12 +456,12 @@ class DataCollector:
         pe_percentile = None
         pb_percentile = None
         
-        if current_pe is not None and len(pe_values) >= 10:
+        if current_pe is not None and current_pe > 0 and len(pe_values) >= 10:
             sorted_pe = sorted(pe_values)
             rank = sum(1 for v in sorted_pe if v < current_pe)
             pe_percentile = rank / len(sorted_pe) * 100
         
-        if current_pb is not None and len(pb_values) >= 10:
+        if current_pb is not None and current_pb > 0 and len(pb_values) >= 10:
             sorted_pb = sorted(pb_values)
             rank = sum(1 for v in sorted_pb if v < current_pb)
             pb_percentile = rank / len(sorted_pb) * 100
