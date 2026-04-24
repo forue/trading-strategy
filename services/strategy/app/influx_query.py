@@ -83,7 +83,9 @@ class InfluxDBQuery:
           |> keep(columns: ["_time", "sector_code", "sector_name",
                             "main_net_inflow", "north_net_inflow",
                             "index_close", "index_change_pct", "turnover",
-                            "open", "high", "low"])
+                            "open", "high", "low",
+                            "pe_ttm", "pb", "pe_percentile", "pb_percentile",
+                            "etf_code", "etf_name"])
         '''
         try:
             tables = self.query_api.query_data_frame(query)
@@ -119,10 +121,15 @@ class InfluxDBQuery:
                 "index_close": self._safe_float(row.get("index_close", 0)),
                 "index_change_pct": self._safe_float(row.get("index_change_pct", 0)),
                 "turnover": self._safe_float(row.get("turnover", 0)),
-                # K线附加字段（通过 collect_sector_history_via_kline 写入）
                 "open": self._safe_float(row.get("open", 0)),
                 "high": self._safe_float(row.get("high", 0)),
                 "low": self._safe_float(row.get("low", 0)),
+                "pe_ttm": self._safe_float(row.get("pe_ttm", 0)),
+                "pb": self._safe_float(row.get("pb", 0)),
+                "pe_percentile": self._safe_float(row.get("pe_percentile", 0)),
+                "pb_percentile": self._safe_float(row.get("pb_percentile", 0)),
+                "etf_code": str(row.get("etf_code", "")) or None,
+                "etf_name": str(row.get("etf_name", "")) or None,
             })
 
         logger.info(f"从InfluxDB查询到 {len(daily_data)} 天数据, 共 {len(records)} 条记录")
@@ -323,6 +330,103 @@ class InfluxDBQuery:
 
     def close(self):
         self.client.close()
+
+    def calculate_valuation_percentile(self, sector_code: str, date: str, lookback_days: int = 365) -> tuple[float | None, float | None]:
+        """计算指定日期板块的PE/PB历史分位
+
+        Args:
+            sector_code: 板块代码
+            date: 日期 YYYY-MM-DD
+            lookback_days: 回溯天数
+
+        Returns:
+            (pe_percentile, pb_percentile) - 0-100范围，None表示无数据
+        """
+        start_date = (datetime.strptime(date, "%Y-%m-%d") - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+        
+        flux_start, flux_stop = self._date_to_flux_range(start_date, date)
+
+        query = f'''
+        from(bucket: "{self.bucket}")
+          |> range(start: {flux_start}, stop: {flux_stop})
+          |> filter(fn: (r) => r._measurement == "sector_capital_flow")
+          |> filter(fn: (r) => r.sector_code == "{sector_code}")
+          |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+          |> keep(columns: ["_time", "pe_ttm", "pb"])
+        '''
+        try:
+            tables = self.query_api.query_data_frame(query)
+        except Exception as e:
+            logger.debug(f"估值分位计算失败: {e}")
+            return None, None
+
+        if isinstance(tables, list) and len(tables) == 0:
+            return None, None
+        if hasattr(tables, "empty") and tables.empty:
+            return None, None
+
+        records = tables.to_dict("records")
+        
+        pe_values = []
+        pb_values = []
+        current_pe = None
+        current_pb = None
+        
+        target_dt = datetime.strptime(date, "%Y-%m-%d")
+        
+        for row in records:
+            time_str = str(row.get("_time", ""))
+            try:
+                dt = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
+            except (ValueError, TypeError):
+                continue
+            
+            pe = self._safe_float(row.get("pe_ttm"), 0)
+            pb = self._safe_float(row.get("pb"), 0)
+            
+            if pe > 0:
+                pe_values.append(pe)
+                if dt.date() == target_dt.date():
+                    current_pe = pe
+            if pb > 0:
+                pb_values.append(pb)
+                if dt.date() == target_dt.date():
+                    current_pb = pb
+
+        pe_percentile = None
+        pb_percentile = None
+        
+        if current_pe is not None and len(pe_values) >= 10:
+            sorted_pe = sorted(pe_values)
+            rank = sum(1 for v in sorted_pe if v < current_pe)
+            pe_percentile = rank / len(sorted_pe) * 100
+        
+        if current_pb is not None and len(pb_values) >= 10:
+            sorted_pb = sorted(pb_values)
+            rank = sum(1 for v in sorted_pb if v < current_pb)
+            pb_percentile = rank / len(sorted_pb) * 100
+
+        return pe_percentile, pb_percentile
+
+    def batch_update_valuation_percentile(self, start_date: str, end_date: str):
+        """批量更新历史数据的估值分位"""
+        daily_data = self.query_daily_sectors(start_date, end_date)
+        
+        updated_count = 0
+        for date, sectors in daily_data.items():
+            for sector in sectors:
+                sector_code = sector.get("sector_code")
+                if not sector_code:
+                    continue
+                
+                pe_pct, pb_pct = self.calculate_valuation_percentile(sector_code, date)
+                if pe_pct is not None or pb_pct is not None:
+                    sector["pe_percentile"] = pe_pct
+                    sector["pb_percentile"] = pb_pct
+                    updated_count += 1
+        
+        logger.info(f"估值分位更新完成: {updated_count} 条")
+        return daily_data
 
 
 # 全局实例
