@@ -4,7 +4,7 @@ import router from '@/router'
 
 const request = axios.create({
   baseURL: '/api',
-  timeout: 30000,
+  timeout: 300000,  // 5分钟超时用于自动寻优
 })
 
 // 请求拦截器 - 自动携带Token
