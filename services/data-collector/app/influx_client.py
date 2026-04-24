@@ -54,6 +54,15 @@ class InfluxDBManager:
             for k in ("open", "high", "low"):
                 if item.get(k) is not None and item.get(k) != 0:
                     point = point.field(k, float(item[k]))
+            # 估值字段（如果有）
+            for k in ("pe_ttm", "pb", "pe_percentile", "pb_percentile"):
+                if item.get(k) is not None and item.get(k) != 0:
+                    point = point.field(k, float(item[k]))
+            # 基金字段（如果有）
+            if item.get("etf_code"):
+                point = point.field("etf_code", str(item["etf_code"]))
+            if item.get("etf_name"):
+                point = point.field("etf_name", str(item["etf_name"]))
             point = point.time(dt, WritePrecision.MS)
             points.append(point)
 
