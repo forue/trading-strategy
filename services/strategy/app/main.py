@@ -27,19 +27,19 @@ redis_client = redis_lib.Redis(
     password=settings.redis_password, db=settings.redis_db, decode_responses=True,
 )
 
-# 默认策略配置
+# 默认策略配置 - 均衡参数
 DEFAULT_CONFIGS = {
     StrategyType.AGGRESSIVE: StrategyConfig(
         id=1, strategy_type=StrategyType.AGGRESSIVE, name="激进轮动策略",
-        params=StrategyParams(top_n=2, max_position=1.0, hold_days=3, capital_pct=0.5, stop_loss=0.05, commission_rate=0.0003, stamp_tax_rate=0.001, slippage_rate=0.001, min_score_threshold=4.0, score_gap_threshold=1.5, cooldown_days=2, keep_overlap=True, allow_empty=True, min_score_keep=5.0),
+        params=StrategyParams(top_n=2, max_position=1.0, hold_days=3, capital_pct=0.5, stop_loss=0.12, commission_rate=0.0003, stamp_tax_rate=0.001, slippage_rate=0.001, min_score_threshold=2.0, score_gap_threshold=1.0, cooldown_days=2, keep_overlap=True, allow_empty=True, min_score_keep=3.0),
     ),
     StrategyType.MODERATE: StrategyConfig(
         id=2, strategy_type=StrategyType.MODERATE, name="稳健轮动策略",
-        params=StrategyParams(top_n=3, max_position=0.5, hold_days=5, capital_pct=0.3, stop_loss=0.03, commission_rate=0.0003, stamp_tax_rate=0.001, slippage_rate=0.001, min_score_threshold=4.0, score_gap_threshold=1.5, cooldown_days=2, keep_overlap=True, allow_empty=True, min_score_keep=5.0),
+        params=StrategyParams(top_n=3, max_position=0.5, hold_days=5, capital_pct=0.3, stop_loss=0.10, commission_rate=0.0003, stamp_tax_rate=0.001, slippage_rate=0.001, min_score_threshold=2.0, score_gap_threshold=1.0, cooldown_days=2, keep_overlap=True, allow_empty=True, min_score_keep=3.0),
     ),
     StrategyType.CONSERVATIVE: StrategyConfig(
         id=3, strategy_type=StrategyType.CONSERVATIVE, name="保守轮动策略",
-        params=StrategyParams(top_n=5, max_position=0.3, hold_days=10, capital_pct=0.2, stop_loss=0.02, valuation_pct_max=50, commission_rate=0.0003, stamp_tax_rate=0.001, slippage_rate=0.001, min_score_threshold=4.0, score_gap_threshold=1.5, cooldown_days=3, keep_overlap=True, allow_empty=True, min_score_keep=5.0),
+        params=StrategyParams(top_n=5, max_position=0.3, hold_days=10, capital_pct=0.2, stop_loss=0.08, valuation_pct_max=50, commission_rate=0.0003, stamp_tax_rate=0.001, slippage_rate=0.001, min_score_threshold=2.0, score_gap_threshold=1.0, cooldown_days=3, keep_overlap=True, allow_empty=True, min_score_keep=3.0),
     ),
 }
 
@@ -83,6 +83,25 @@ async def check_trade_day(date: str = None):
     except Exception as e:
         logger.error(f"交易日检查失败: {e}")
         raise HTTPException(status_code=500, detail=f"交易日检查失败: {e}")
+
+
+@app.post("/collect")
+async def collect_data():
+    """触发数据采集：从数据采集服务获取最新板块数据并写入InfluxDB"""
+    try:
+        import requests
+        data_collector_url = "http://data-collector:8001/collect/sector-flow"
+        response = requests.post(data_collector_url, timeout=60)
+        if response.status_code == 200:
+            result = response.json()
+            logger.info(f"数据采集完成: {result}")
+            return {"code": 200, "message": "数据采集完成", "data": result}
+        else:
+            logger.error(f"数据采集失败: {response.status_code}")
+            return {"code": 500, "message": "数据采集失败"}
+    except Exception as e:
+        logger.error(f"数据采集异常: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 def _is_trade_day(date_str: str) -> bool:
@@ -936,9 +955,356 @@ async def get_replay_day_data(date: str, sector_code: str = None):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/data/replay/strategy-optimize")
+async def optimize_strategy_params(request_body: dict):
+    """自动寻优 - 根据历史数据遍历参数组合找出最优参数
+    
+    Request Body:
+        start_date: str - 起始日期
+        end_date: str - 结束日期
+        strategy_type: str - 策略类型
+        initial_capital: float - 初始资金（默认100万）
+    
+    Returns:
+        best_params: 最优参数
+        best_result: 最优结果
+        all_results: 所有组合的结果
+    """
+    try:
+        start_date = request_body.get("start_date", "")
+        end_date = request_body.get("end_date", "")
+        strategy_type_str = request_body.get("strategy_type", "MODERATE")
+        initial_capital = request_body.get("initial_capital", 1000000.0)
+        
+        if not start_date or not end_date:
+            raise HTTPException(status_code=400, detail="必须提供 start_date 和 end_date")
+        
+        try:
+            strategy_type = StrategyType(strategy_type_str)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"未知策略类型: {strategy_type_str}")
+        
+        # 参数组合（根据策略类型生成）
+        param_combinations = _generate_param_combinations(strategy_type)
+        logger.info(f"自动寻优: 将测试 {len(param_combinations)} 种参数组合")
+        
+        # 查询历史数据
+        daily_data = influx_query.query_daily_sectors(start_date, end_date)
+        if not daily_data:
+            raise HTTPException(status_code=404, detail="该时间范围内无历史数据")
+        
+        sorted_dates = sorted(daily_data.keys())
+        logger.info(f"自动寻优: 查询到 {len(sorted_dates)} 个交易日, 从 {sorted_dates[0]} 到 {sorted_dates[-1]}")
+        
+        # 遍历参数组合
+        results = []
+        for i, params_dict in enumerate(param_combinations):
+            params = StrategyParams(**params_dict)
+            
+            # 运行回测
+            result = _run_backtest(daily_data, sorted_dates, strategy_type, params, initial_capital)
+            results.append({
+                "params": params_dict,
+                "total_return": result["total_return"],
+                "annual_return": result["annual_return"],
+                "max_drawdown": result["max_drawdown"],
+                "trade_count": result["trade_count"],
+            })
+            
+            logger.info(f"参数组合 {i+1}/{len(param_combinations)}: {params_dict}, 收益={result['total_return']*100:.2f}%")
+        
+        # 排序找最优
+        results.sort(key=lambda x: x["total_return"], reverse=True)
+        best = results[0]
+        
+        # 用最优参数再次运行获取完整结果
+        best_params = StrategyParams(**best["params"])
+        final_result = _run_backtest(daily_data, sorted_dates, strategy_type, best_params, initial_capital, return_full=True)
+        
+        return {
+            "code": 200,
+            "data": {
+                "best_params": best["params"],
+                "best_result": final_result,
+                "all_results": results,
+            }
+        }
+    except Exception as e:
+        logger.error(f"自动寻优失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+def _generate_param_combinations(strategy_type: StrategyType) -> list[dict]:
+    """根据策略类型生成参数组合"""
+    combinations = []
+    
+    if strategy_type == StrategyType.AGGRESSIVE:
+        # 激进策略：top_n 1-3, hold_days 2-5, stop_loss 6%-15%, min_score 1.0-3.0
+        for top_n in [1, 2, 3]:
+            for hold_days in [2, 3, 5]:
+                for stop_loss in [0.06, 0.08, 0.10, 0.12, 0.15]:
+                    for min_score in [1.0, 2.0, 2.5]:
+                        combinations.append({
+                            "top_n": top_n,
+                            "max_position": 1.0,
+                            "hold_days": hold_days,
+                            "capital_pct": 0.5,
+                            "stop_loss": stop_loss,
+                            "commission_rate": 0.0003,
+                            "stamp_tax_rate": 0.001,
+                            "slippage_rate": 0.001,
+                            "min_score_threshold": min_score,
+                            "score_gap_threshold": 1.0,
+                            "cooldown_days": 2,
+                            "keep_overlap": True,
+                            "allow_empty": True,
+                            "min_score_keep": min(min_score + 0.5, 3.0),
+                        })
+    elif strategy_type == StrategyType.MODERATE:
+        # 稳健策略
+        for top_n in [2, 3, 4]:
+            for hold_days in [3, 5, 7]:
+                for stop_loss in [0.05, 0.08, 0.10, 0.12]:
+                    for min_score in [1.5, 2.0, 2.5]:
+                        combinations.append({
+                            "top_n": top_n,
+                            "max_position": 0.5,
+                            "hold_days": hold_days,
+                            "capital_pct": 0.3,
+                            "stop_loss": stop_loss,
+                            "commission_rate": 0.0003,
+                            "stamp_tax_rate": 0.001,
+                            "slippage_rate": 0.001,
+                            "min_score_threshold": min_score,
+                            "score_gap_threshold": 1.0,
+                            "cooldown_days": 2,
+                            "keep_overlap": True,
+                            "allow_empty": True,
+                            "min_score_keep": min(min_score + 0.5, 3.0),
+                        })
+    else:
+        # 保守策略
+        for top_n in [3, 4, 5]:
+            for hold_days in [5, 7, 10]:
+                for stop_loss in [0.03, 0.05, 0.08]:
+                    for min_score in [2.0, 2.5, 3.0]:
+                        combinations.append({
+                            "top_n": top_n,
+                            "max_position": 0.3,
+                            "hold_days": hold_days,
+                            "capital_pct": 0.2,
+                            "stop_loss": stop_loss,
+                            "valuation_pct_max": 50,
+                            "commission_rate": 0.0003,
+                            "stamp_tax_rate": 0.001,
+                            "slippage_rate": 0.001,
+                            "min_score_threshold": min_score,
+                            "score_gap_threshold": 1.0,
+                            "cooldown_days": 3,
+                            "keep_overlap": True,
+                            "allow_empty": True,
+                            "min_score_keep": min(min_score + 0.5, 3.5),
+                        })
+    
+    # 限制数量避免过长
+    return combinations[:30] if len(combinations) > 30 else combinations
+
+def _run_backtest(daily_data, sorted_dates, strategy_type, params, initial_capital, return_full=False):
+    """运行回测的核心逻辑"""
+    TRADING_DAYS_PER_YEAR = 244
+    
+    capital = initial_capital
+    peak_capital = capital
+    position_hold_counter = 0
+    current_positions = {}
+    stop_loss_triggered = False
+    stop_loss_cooldown = 0
+    rebalance_cooldown = 0  # 调仓冷却期
+    nav_curve = []
+    daily_signals_out = []
+    buy_count = 0
+    sell_count = 0
+    total_commission = 0.0
+    total_stamp_tax = 0.0
+    total_slippage_cost = 0.0
+    
+    logger.info(f"=== 回测开始: {sorted_dates[0]} ~ {sorted_dates[-1]}, 初始资金={initial_capital}, 日期数={len(sorted_dates)} ===")
+    
+    for date in sorted_dates:
+        sector_data = daily_data[date]
+        day_signals = []
+        
+        sector_change_map = {s["sector_code"]: s.get("index_change_pct", 0) / 100 for s in sector_data}
+        
+        strategy_daily_return = 0.0
+        if stop_loss_triggered:
+            strategy_daily_return = 0.0
+        elif current_positions:
+            for sector_code, weight in current_positions.items():
+                strategy_daily_return += weight * sector_change_map.get(sector_code, 0)
+        
+        all_changes = [s.get("index_change_pct", 0) / 100 for s in sector_data]
+        benchmark_return = float(np.mean(all_changes)) if all_changes else 0.0
+        
+        capital *= (1 + strategy_daily_return)
+        if capital > peak_capital:
+            peak_capital = capital
+        
+        # Debug logging for first few dates and around problematic dates
+        if date >= '2026-03-01' and date <= '2026-03-10':
+            logger.info(f"{date}: 涨停后capital={capital:.2f}, peak={peak_capital:.2f}, 持仓={list(current_positions.keys())}, 止损={stop_loss_triggered}, 冷却={stop_loss_cooldown}, rebalance={rebalance_cooldown}")
+        
+        # 止损检查
+        if params.stop_loss and not stop_loss_triggered and peak_capital > 0 and current_positions:
+            drawdown = (peak_capital - capital) / peak_capital
+            if drawdown >= params.stop_loss:
+                logger.info(f"{date}: 止损触发! 回撤={drawdown:.2%}, threshold={params.stop_loss:.2%}, 当前持仓={current_positions}")
+                sell_trade_cost = 0.0
+                for sector_code, weight in current_positions.items():
+                    sell_amount = capital * weight
+                    commission = max(sell_amount * params.commission_rate, 5.0)
+                    stamp_tax = sell_amount * params.stamp_tax_rate
+                    slippage_cost = sell_amount * params.slippage_rate
+                    sell_trade_cost += commission + stamp_tax + slippage_cost
+                    total_commission += commission
+                    total_stamp_tax += stamp_tax
+                    total_slippage_cost += slippage_cost
+                capital -= sell_trade_cost
+                stop_loss_triggered = True
+                stop_loss_cooldown = params.hold_days + 1
+                for code in current_positions:
+                    day_signals.append({
+                        "sector_code": code,
+                        "sector_name": "止损",
+                        "direction": "SELL",
+                        "score": 0,
+                        "reason": f"止损触发: 回撤{drawdown:.2%}",
+                    })
+                sell_count += len(current_positions)
+                current_positions = {}
+        
+        if current_positions and position_hold_counter > 0:
+            position_hold_counter -= 1
+        
+        if stop_loss_cooldown > 0:
+            stop_loss_cooldown -= 1
+            if stop_loss_cooldown <= 0:
+                stop_loss_triggered = False
+                logger.info(f"{date}: 止损冷却结束, 重置stop_loss_triggered=False, 持仓={current_positions}")
+        
+        if rebalance_cooldown > 0:
+            rebalance_cooldown -= 1
+        
+        # 调仓检查：持仓到期且不在冷却期
+        if not stop_loss_triggered and position_hold_counter <= 0 and stop_loss_cooldown <= 0 and rebalance_cooldown <= 0:
+            signals = scoring_model.calculate_daily_signals(
+                sector_data=sector_data,
+                strategy_type=strategy_type,
+                params=params,
+                signal_date=date,
+                current_positions=current_positions,
+            )
+            
+            buy_sigs = [s for s in signals if s.direction.value == "BUY"]
+            sell_sigs = [s for s in signals if s.direction.value == "SELL"]
+            
+            # Debug: log signal issues
+            if date >= '2026-03-01' and date <= '2026-03-10':
+                logger.info(f"{date}: 计算信号: BUY={len(buy_sigs)}, SELL={len(sell_sigs)}")
+                if buy_sigs:
+                    logger.info(f"{date}: BUY信号: {[(s.sector_code, s.score) for s in buy_sigs[:3]]}")
+                if sell_sigs:
+                    logger.info(f"{date}: SELL信号: {[(s.sector_code, s.score) for s in sell_sigs[:3]]}")
+            
+            new_positions = {}
+            buy_sigs = [s for s in signals if s.direction.value == "BUY"]
+            
+            if buy_sigs:
+                total_weight = min(params.max_position * params.capital_pct, 1.0)
+                per_weight = total_weight / len(buy_sigs)
+                for sig in buy_sigs:
+                    new_positions[sig.sector_code] = per_weight
+                    day_signals.append({
+                        "sector_code": sig.sector_code,
+                        "sector_name": sig.sector_name,
+                        "direction": sig.direction.value,
+                        "score": sig.score,
+                        "reason": sig.reason,
+                    })
+                    buy_count += 1
+                logger.info(f"{date}: 买入建仓 {len(buy_sigs)} 个板块: {[s.sector_code for s in buy_sigs]}")
+            
+            sell_sigs = [s for s in signals if s.direction.value == "SELL"]
+            for sig in sell_sigs:
+                day_signals.append({
+                    "sector_code": sig.sector_code,
+                    "sector_name": sig.sector_name,
+                    "direction": sig.direction.value,
+                    "score": sig.score,
+                    "reason": sig.reason,
+                })
+                sell_count += 1
+            
+            if new_positions:
+                current_positions = new_positions
+                position_hold_counter = params.hold_days
+                stop_loss_triggered = False
+                rebalance_cooldown = params.cooldown_days if params.cooldown_days else 2
+        
+        daily_signals_out.append({
+            "date": date,
+            "signals": day_signals,
+            "strategy_return": round(strategy_daily_return * 100, 4),
+            "benchmark_return": round(benchmark_return * 100, 4),
+        })
+        
+        nav_curve.append({
+            "date": date,
+            "nav": round(capital, 2),
+            "benchmark": 0.0,
+        })
+    
+    total_return = (capital / initial_capital) - 1
+    
+    # 计算基准净值
+    benchmark_nav = initial_capital
+    for item in nav_curve:
+        date = item["date"]
+        sector_data = daily_data[date]
+        all_changes = [s.get("index_change_pct", 0) / 100 for s in sector_data]
+        benchmark_nav *= (1 + float(np.mean(all_changes)) if all_changes else 0)
+        item["benchmark"] = round(benchmark_nav, 2)
+    
+    result = {
+        "total_return": total_return,
+        "annual_return": (1 + total_return) ** (TRADING_DAYS_PER_YEAR / len(sorted_dates)) - 1 if sorted_dates else 0,
+        "max_drawdown": abs(float((np.min([n["nav"] for n in nav_curve]) - np.max([n["nav"] for n in nav_curve])) / np.max([n["nav"] for n in nav_curve]))) if nav_curve else 0,
+        "trade_count": buy_count + sell_count,
+        "buy_count": buy_count,
+        "sell_count": sell_count,
+        "daily_signals": daily_signals_out,
+        "nav_curve": nav_curve,
+    }
+    
+    if return_full:
+        return result
+    
+    return {
+        "total_return": result["total_return"],
+        "annual_return": result["annual_return"],
+        "max_drawdown": result["max_drawdown"],
+        "trade_count": result["trade_count"],
+    }
+    
+    return {
+        "total_return": total_return,
+        "annual_return": (1 + total_return) ** (TRADING_DAYS_PER_YEAR / len(sorted_dates)) - 1 if sorted_dates else 0,
+        "max_drawdown": abs(float((np.min(nav_curve) - np.max(nav_curve)) / np.max(nav_curve))) if nav_curve else 0,
+        "trade_count": buy_count + sell_count,
+    }
+
 @app.post("/data/replay/strategy-overlay")
 async def replay_strategy_overlay(request_body: dict):
-    """数据回放 - 策略叠加：在时间范围内逐日运行策略引擎，返回买卖信号和策略净值曲线
+    """数据回放 - 策略叠加
 
     Request Body:
         start_date: str - 起始日期
@@ -1069,6 +1435,9 @@ async def replay_strategy_overlay(request_body: dict):
             # === Step 4: 更新冷静期 ===
             if stop_loss_cooldown > 0:
                 stop_loss_cooldown -= 1
+                # 冷静期结束后清除止损状态
+                if stop_loss_cooldown <= 0:
+                    stop_loss_triggered = False
 
             # === Step 4.5: 更新调仓冷却期 ===
             if rebalance_cooldown > 0:
@@ -1204,6 +1573,16 @@ async def replay_strategy_overlay(request_body: dict):
             "total_slippage_cost": round(total_slippage_cost, 2),
             "total_trade_cost": round(total_commission + total_stamp_tax + total_slippage_cost, 2),
             "trade_count_actual": trade_count_actual,
+            # 策略参数
+            "params": {
+                "top_n": params.top_n,
+                "max_position": params.max_position,
+                "hold_days": params.hold_days,
+                "stop_loss": params.stop_loss,
+                "min_score_threshold": params.min_score_threshold,
+                "score_gap_threshold": params.score_gap_threshold,
+                "cooldown_days": params.cooldown_days,
+            },
         }
 
         return {
