@@ -332,16 +332,14 @@ class RotationScoringModel:
             if current_positions and s.get("sector_code") in current_positions:
                 current_scores[s.get("sector_code")] = s.get("composite_score", 0)
 
-        # 市场景气判断：任一条件满足即可
+        # 市场景气判断：需要同时满足多个条件（AND关系更严格）
         top10_with_score = [s for s in scored_sectors[:10] if s.get("composite_score", 0) >= min_score]
         avg_change = sum(s.get("index_change_pct", 0) for s in scored_sectors) / max(len(scored_sectors), 1)
-        sectors_with_flow = sum(1 for s in scored_sectors if s.get("main_net_inflow", 0) != 0)
         
-        # 修改为OR关系：评分OR涨跌幅OR资金流，任一满足即可
-        market_good = len(top10_with_score) > 0 or avg_change > -3 or sectors_with_flow >= 5 or (scored_sectors[0].get("index_change_pct", 0) > 0 if scored_sectors else False)
+        market_good = (len(top10_with_score) >= 3) or (avg_change > 0 and len(top10_with_score) >= 1)
         
         # 调试日志
-        logger.info(f"市场景气判断: 前10评分达标={len(top10_with_score)}, 平均涨跌幅={avg_change:.2f}%, 有资金流板块={sectors_with_flow}")
+        logger.info(f"市场景气判断: 前10评分达标={len(top10_with_score)}, 平均涨跌幅={avg_change:.2f}%")
 
         # 如果市场不景气且允许空仓，返回空信号
         if not market_good and allow_empty:
@@ -401,9 +399,9 @@ class RotationScoringModel:
 
         # 生成买入信号
         if buy_targets:
-            # 检查是否完全替换
+            total_weight = min(params.max_position * params.capital_pct, 1.0)
+            position_ratio = total_weight / len(buy_targets)
             replace_all = current_codes and new_codes and len(new_codes - current_codes) == len(new_codes)
-            position_ratio = params.max_position / len(buy_targets)
             for s in buy_targets:
                 rank = next((i+1 for i, x in enumerate(scored_sectors) if x.get("sector_code") == s.get("sector_code")), 0)
                 reason_prefix = "满仓轮换" if replace_all else "部分调仓"
@@ -422,11 +420,12 @@ class RotationScoringModel:
                 s = next((sec for sec in scored_sectors if sec.get("sector_code") == code), None)
                 if s:
                     old_score = current_scores.get(code, 0)
+                    top_buy_score = buy_targets[0].get('composite_score', 0) if buy_targets else 0
                     signals.append(self._build_signal(
                         sector=s, strategy_type=StrategyType.AGGRESSIVE,
                         direction=SignalDirection.SELL, position_ratio=0,
                         score=s["composite_score"], signal_date=signal_date,
-                        reason=f"激进轮动: 调出, 原评分{old_score:.2f}, 新建议评分{buy_targets[0].get('composite_score', 0):.2f}",
+                        reason=f"激进轮动: 调出, 原评分{old_score:.2f}, 新建议评分{top_buy_score:.2f}",
                         rank=0,
                         total_sectors=len(scored_sectors),
                     ))
@@ -497,8 +496,9 @@ class RotationScoringModel:
             should_rebalance = True
 
         if buy_targets:
+            total_weight = min(params.max_position * params.capital_pct, 1.0)
+            position_ratio = total_weight / len(buy_targets)
             replace_all = current_codes and new_codes and len(new_codes - current_codes) == len(new_codes)
-            position_ratio = params.max_position / len(buy_targets)
             for s in buy_targets:
                 rank = next((i+1 for i, x in enumerate(scored_sectors) if x.get("sector_code") == s.get("sector_code")), 0)
                 reason_prefix = "半仓轮换" if replace_all else "部分调仓"
@@ -611,8 +611,9 @@ class RotationScoringModel:
             should_rebalance = True
 
         if buy_targets:
+            total_weight = min(params.max_position * params.capital_pct, 1.0)
+            position_ratio = total_weight / max(len(buy_targets), 1)
             replace_all = current_codes and new_codes and len(new_codes - current_codes) == len(new_codes)
-            position_ratio = params.max_position / max(len(buy_targets), 1)
             for s in buy_targets:
                 pe_percentile = s.get("pe_percentile")
                 pb_percentile = s.get("pb_percentile")
