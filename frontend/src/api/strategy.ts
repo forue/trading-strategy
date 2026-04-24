@@ -78,11 +78,8 @@ export const strategyApi = {
     return request.get('/strategy/data/availability')
   },
 
-  // 检查是否为交易日
-  checkTradeDay(date?: string): Promise<{ date: string; is_trade_day: boolean; message: string }> {
-    const params: any = {}
-    if (date) params.date = date
-    return request.get('/strategy/trade-day/check', { params })
+  checkTradeDay(date: string, strategyType: string): Promise<{ is_trade_day: boolean }> {
+    return request.get('/strategy/trade-day/check', { params: { date, strategy_type: strategyType } })
   },
 
   collectHistory(days: number): Promise<any> {

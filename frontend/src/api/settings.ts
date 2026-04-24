@@ -132,7 +132,7 @@ export const settingsApi = {
     })
   },
 
-  runStrategyOverlay(data: {
+runStrategyOverlay(data: {
     start_date: string
     end_date: string
     strategy_type: string
@@ -141,19 +141,21 @@ export const settingsApi = {
   }): Promise<{
     daily_signals: any[]
     nav_curve: any[]
-    summary: {
-      total_return: number
-      annual_return: number
-      max_drawdown: number
-      trade_count: number
-      buy_count: number
-      sell_count: number
-      trading_days: number
-      strategy_type: string
-      initial_capital: number
-      final_capital: number
-    }
+    summary: any
   }> {
     return request.post('/strategy/data/replay/strategy-overlay', data)
+  },
+
+  runStrategyOptimize(data: {
+    start_date: string
+    end_date: string
+    strategy_type: string
+    initial_capital?: number
+  }): Promise<{
+    best_params: any
+    best_result: any
+    all_results: any[]
+  }> {
+    return request.post('/strategy/data/replay/strategy-optimize', data)
   },
 }

@@ -94,8 +94,14 @@
               <el-option label="稳健轮动" value="MODERATE" />
               <el-option label="保守轮动" value="CONSERVATIVE" />
             </el-select>
+            <el-checkbox v-model="autoOptimize" :disabled="overlayLoading">自动寻优</el-checkbox>
             <el-input-number v-model="overlayCapital" :min="100000" :max="100000000" :step="100000" :controls="false" style="width: 140px" placeholder="初始资金" />
-            <el-button type="primary" @click="loadStrategyOverlay" :loading="overlayLoading" size="default">运行策略回放</el-button>
+            <el-button type="primary" @click="loadStrategyOverlay" :loading="overlayLoading" size="default">
+              {{ autoOptimize ? '自动寻优' : '运行策略回放' }}
+            </el-button>
+            <el-tag v-if="overlayLoading && autoOptimize" size="small" type="warning">
+              寻优进度: {{ optimizationProgress }}/{{ totalCombinations }}
+            </el-tag>
           </div>
         </el-tab-pane>
       </el-tabs>
@@ -128,7 +134,10 @@
         </el-col>
       </el-row>
 
-      <v-chart :option="flowChartOption" style="height: 350px" autoresize />
+      <v-chart v-if="dayData?.date" :option="flowChartOption" :key="`flow-${dayData.date}`" style="height: 350px" autoresize />
+      <div v-else style="height: 350px; display: flex; align-items: center; justify-content: center; color: #909399">
+        加载中...
+      </div>
 
       <el-table :data="dayData.sectors" stripe size="small" style="margin-top: 16px" :default-sort="{ prop: 'index_change_pct', order: 'descending' }">
         <el-table-column prop="sector_name" label="板块" width="120" fixed />
@@ -218,6 +227,11 @@
 
     <!-- ============ 策略叠加回放 ============ -->
     <div v-if="replayMode === 'strategyOverlay' && overlayData" class="page-card" style="margin-top: 16px">
+      <!-- 策略参数显示 -->
+      <div v-if="overlayData.summary.params" class="params-display">
+        <el-tag size="small" type="info">参数: top_n={{ overlayData.summary.params.top_n }}, 持仓={{ overlayData.summary.params.max_position * 100 }}%, 持有={{ overlayData.summary.params.hold_days }}日, 止损={{ overlayData.summary.params.stop_loss * 100 }}%, 评分阈值={{ overlayData.summary.params.min_score_threshold }}, 评分差={{ overlayData.summary.params.score_gap_threshold }}, 冷却={{ overlayData.summary.params.cooldown_days }}日</el-tag>
+      </div>
+
       <!-- 策略收益概览 -->
       <div class="card-header">
         <span class="card-title">{{ overlayStrategyLabel }} 回放结果</span>
@@ -354,6 +368,10 @@ const sectorHistory = ref<any[]>([])
 const overlayDateRange = ref<string[]>([])
 const overlayStrategyType = ref('MODERATE')
 const overlayCapital = ref(1000000)
+const autoOptimize = ref(false)
+const optimizationProgress = ref(0)
+const totalCombinations = ref(0)
+const bestParams = ref<any>(null)
 const overlayData = ref<{
   daily_signals: any[]
   nav_curve: any[]
@@ -442,7 +460,12 @@ async function loadDayData() {
   if (!selectedDate.value) { ElMessage.warning('请先选择日期'); return }
   loading.value = true
   try {
-    dayData.value = await settingsApi.getReplayDayData(selectedDate.value, selectedSector.value || undefined)
+    // 设置一个空key让图表强制重建
+    const loadingKey = 'loading-' + Date.now()
+    dayData.value = { date: loadingKey, sectors: [], count: 0 }
+    await new Promise(r => setTimeout(r, 100))
+    const newData = await settingsApi.getReplayDayData(selectedDate.value, selectedSector.value || undefined)
+    dayData.value = newData
     currentDateIndex.value = availableDates.value.indexOf(selectedDate.value)
   } catch { ElMessage.error('加载数据失败') }
   finally { loading.value = false }
@@ -498,6 +521,12 @@ async function loadStrategyOverlay() {
     ElMessage.warning('请选择时间范围'); return
   }
   overlayLoading.value = true
+  
+  if (autoOptimize.value) {
+    await runAutoOptimization()
+    return
+  }
+  
   try {
     overlayData.value = await settingsApi.runStrategyOverlay({
       start_date: overlayDateRange.value[0],
@@ -510,23 +539,84 @@ async function loadStrategyOverlay() {
   finally { overlayLoading.value = false }
 }
 
+async function runAutoOptimization() {
+  totalCombinations.value = 0
+  optimizationProgress.value = 0
+  overlayLoading.value = true
+  
+  try {
+    const result = await settingsApi.runStrategyOptimize({
+      start_date: overlayDateRange.value[0],
+      end_date: overlayDateRange.value[1],
+      strategy_type: overlayStrategyType.value,
+      initial_capital: overlayCapital.value,
+    })
+    
+    if (result.best_params && result.best_result) {
+      // 转换结果格式以匹配现有显示
+      overlayData.value = {
+        daily_signals: result.best_result.daily_signals || [],
+        nav_curve: result.best_result.nav_curve || [],
+        summary: result.best_result,
+      }
+      bestParams.value = result.best_params
+      
+      ElMessage.success(`寻优完成! 最优参数: top_n=${bestParams.value.top_n}, 持有=${bestParams.value.hold_days}日, 止损=${(bestParams.value.stop_loss*100).toFixed(0)}%, 总收益=${(result.best_result.total_return*100).toFixed(2)}%`)
+    } else {
+      ElMessage.error('寻优失败')
+    }
+  } catch { ElMessage.error('策略寻优失败') }
+  finally { overlayLoading.value = false }
+}
+
 function onModeChange() { stopAutoPlay() }
 
-// ============ 资金流向柱状图（按日期） ============
+// ============ 资金流向柱状图（按日期）- 双面板布局 ============
 const flowChartOption = computed(() => {
-  if (!dayData.value?.sectors.length) return {}
-  const sorted = [...dayData.value.sectors].sort((a, b) => b.main_net_inflow - a.main_net_inflow)
+  if (!dayData.value?.sectors?.length) return {}
+  const sorted = [...dayData.value.sectors].sort((a, b) => b.index_change_pct - a.index_change_pct)
+  const sectorNames = sorted.map(s => s.sector_name)
+  const changes = sorted.map(s => s.index_change_pct)
+  const mainFlow = sorted.map(s => +(s.main_net_inflow / 1e8).toFixed(2))
+  const northFlow = sorted.map(s => +(s.north_net_inflow / 1e8).toFixed(2))
   return {
-    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-    legend: { data: ['主力净流入(亿)', '北向净流入(亿)', '涨跌幅(%)'] },
-    grid: { left: 80, right: 40, bottom: 60, top: 40 },
-    dataZoom: [{ type: 'inside' }, { type: 'slider' }],
-    xAxis: { type: 'category', data: sorted.map(s => s.sector_name), axisLabel: { rotate: 45, fontSize: 11 } },
-    yAxis: [{ type: 'value', name: '亿元' }, { type: 'value', name: '%', position: 'right' }],
+    notMerge: true,
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'shadow' },
+      formatter: (params: any) => {
+        const idx = params[0]?.dataIndex
+        if (idx === undefined) return ''
+        const s = sorted[idx]
+        let html = `<b>${s.sector_name}</b><br/>`
+        html += `涨跌幅: ${s.index_change_pct >= 0 ? '+' : ''}${s.index_change_pct.toFixed(2)}%<br/>`
+        html += `主力净流入: ${(s.main_net_inflow / 1e8).toFixed(2)}亿<br/>`
+        html += `北向净流入: ${(s.north_net_inflow / 1e8).toFixed(2)}亿`
+        return html
+      }
+    },
+    legend: { data: ['涨跌幅(%)', '主力净流入(亿)', '北向净流入(亿)'], selectedMode: 'multiple' },
+    grid: [
+      { left: 70, right: 50, top: 35, height: '42%' },
+      { left: 70, right: 50, top: '58%', height: '32%' },
+    ],
+    dataZoom: [
+      { type: 'inside', xAxisIndex: [0, 1], start: 0, end: 100 },
+      { type: 'slider', xAxisIndex: [0, 1], start: 0, end: 100, bottom: 5, height: 20 },
+    ],
+    xAxis: [
+      { type: 'category', data: sectorNames, gridIndex: 0, axisLabel: { show: false }, position: 'top' },
+      { type: 'category', data: sectorNames, gridIndex: 1, axisLabel: { rotate: 45, fontSize: 10 }, position: 'bottom' },
+    ],
+    yAxis: [
+      { type: 'value', name: '涨跌幅(%)', position: 'left', gridIndex: 0, axisLine: { show: true, lineStyle: { color: '#409eff' } }, axisLabel: { formatter: '{value}%' }, splitLine: { lineStyle: { color: '#f5f5f5' } } },
+      { type: 'value', name: '主力(亿)', position: 'left', gridIndex: 1, offset: 0, axisLine: { show: true, lineStyle: { color: '#f56c6c' } }, axisLabel: { formatter: '{value}', margin: 8 }, splitLine: { lineStyle: { color: '#f5f5f5' } } },
+      { type: 'value', name: '北向(亿)', position: 'right', gridIndex: 1, axisLine: { show: true, lineStyle: { color: '#e6a23c' } }, axisLabel: { formatter: '{value}', margin: 8 }, splitLine: { show: false } },
+    ],
     series: [
-      { name: '主力净流入(亿)', type: 'bar', data: sorted.map(s => +(s.main_net_inflow / 1e8).toFixed(2)), itemStyle: { color: (p: any) => p.data >= 0 ? '#f56c6c' : '#67c23a' } },
-      { name: '北向净流入(亿)', type: 'bar', data: sorted.map(s => +(s.north_net_inflow / 1e8).toFixed(2)), itemStyle: { color: (p: any) => p.data >= 0 ? '#e6a23c' : '#909399' } },
-      { name: '涨跌幅(%)', type: 'bar', yAxisIndex: 1, data: sorted.map(s => s.index_change_pct), itemStyle: { color: (p: any) => p.data >= 0 ? '#f56c6c' : '#67c23a' }, barWidth: 4 },
+      { name: '涨跌幅(%)', type: 'bar', xAxisIndex: 0, yAxisIndex: 0, data: changes, itemStyle: { color: (p: any) => p.data >= 0 ? '#f56c6c' : '#67c23a' }, barWidth: 10 },
+      { name: '主力净流入(亿)', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: mainFlow, itemStyle: { color: '#f56c6c' }, barWidth: 6 },
+      { name: '北向净流入(亿)', type: 'bar', xAxisIndex: 1, yAxisIndex: 2, data: northFlow, itemStyle: { color: '#e6a23c' }, barWidth: 6 },
     ],
   }
 })
@@ -680,9 +770,13 @@ const overlayChartOption = computed(() => {
         html += `基准净值: ${(point.benchmark / 10000).toFixed(2)}万<br/>`
         if (point.stop_loss) html += `<span style="color:#e6a23c">⚠ 止损中</span><br/>`
         if (daySig?.signals?.length) {
-          for (const sig of daySig.signals) {
-            const color = sig.direction === 'BUY' ? '#f56c6c' : '#67c23a'
-            html += `<span style="color:${color}">${sig.direction === 'BUY' ? '▲' : '▼'} ${sig.sector_name}</span> ${sig.reason?.substring(0, 30) || ''}<br/>`
+          const buySigs = daySig.signals.filter((s: any) => s.direction === 'BUY')
+          const sellSigs = daySig.signals.filter((s: any) => s.direction === 'SELL')
+          if (buySigs.length) {
+            html += `<span style="color:#f56c6c; font-weight:bold">买入: ${buySigs.map((s: any) => s.sector_name).join(', ')}</span><br/>`
+          }
+          if (sellSigs.length) {
+            html += `<span style="color:#67c23a; font-weight:bold">卖出: ${sellSigs.map((s: any) => s.sector_name).join(', ')}</span><br/>`
           }
         }
         return html
@@ -698,7 +792,6 @@ const overlayChartOption = computed(() => {
         name: '策略净值', type: 'line', data: curve.map((p: any) => p.nav),
         smooth: true, lineStyle: { width: 2.5, color: strategyColor },
         itemStyle: { color: strategyColor }, symbol: 'none',
-        markPoint: { data: buyPoints, symbol: 'triangle', symbolSize: 12, label: { show: false } },
       },
       {
         name: '基准净值', type: 'line', data: curve.map((p: any) => p.benchmark),
@@ -706,13 +799,13 @@ const overlayChartOption = computed(() => {
         itemStyle: { color: '#909399' }, symbol: 'none',
       },
       {
-        name: '买入点', type: 'scatter', data: buyPoints.map(p => [p.coord[0], p.coord[1]]),
-        symbol: 'triangle', symbolSize: 10, itemStyle: { color: '#f56c6c' },
+        name: '买入点', type: 'scatter', data: buyPoints.map((p: any) => [p.coord[0], p.coord[1]]),
+        symbol: 'triangle', symbolSize: 12, itemStyle: { color: '#f56c6c' }, z: 10,
         tooltip: { show: false },
       },
       {
-        name: '卖出点', type: 'scatter', data: sellPoints.map(p => [p.coord[0], p.coord[1]]),
-        symbol: 'path://M-6,-6L6,6M6,-6L-6,6', symbolSize: 10, itemStyle: { color: '#67c23a' },
+        name: '卖出点', type: 'scatter', data: sellPoints.map((p: any) => [p.coord[0], p.coord[1]]),
+        symbol: 'path://M-6,-6L6,6M6,-6L-6,6', symbolSize: 12, itemStyle: { color: '#67c23a' }, z: 10,
         tooltip: { show: false },
       },
     ],
@@ -755,6 +848,12 @@ init()
 .card-header {
   display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;
   .card-title { font-size: 16px; font-weight: 600; }
+}
+.params-display {
+  margin-bottom: 12px;
+  padding: 8px;
+  background: #f5f7fa;
+  border-radius: 4px;
 }
 ::deep(.el-tabs__nav-wrap::after) { display: none; }
 </style>
