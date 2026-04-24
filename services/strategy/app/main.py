@@ -1149,10 +1149,6 @@ def _run_backtest(daily_data, sorted_dates, strategy_type, params, initial_capit
         if capital > peak_capital:
             peak_capital = capital
         
-        # Debug logging for first few dates and around problematic dates
-        if date >= '2026-03-01' and date <= '2026-03-10':
-            logger.info(f"{date}: 涨停后capital={capital:.2f}, peak={peak_capital:.2f}, 持仓={list(current_positions.keys())}, 止损={stop_loss_triggered}, 冷却={stop_loss_cooldown}, rebalance={rebalance_cooldown}")
-        
         # 止损检查
         if params.stop_loss and not stop_loss_triggered and peak_capital > 0 and current_positions:
             drawdown = (peak_capital - capital) / peak_capital
@@ -1171,6 +1167,7 @@ def _run_backtest(daily_data, sorted_dates, strategy_type, params, initial_capit
                 capital -= sell_trade_cost
                 stop_loss_triggered = True
                 stop_loss_cooldown = params.hold_days + 1
+                position_hold_counter = 0
                 for code in current_positions:
                     day_signals.append({
                         "sector_code": code,
@@ -1206,14 +1203,6 @@ def _run_backtest(daily_data, sorted_dates, strategy_type, params, initial_capit
             
             buy_sigs = [s for s in signals if s.direction.value == "BUY"]
             sell_sigs = [s for s in signals if s.direction.value == "SELL"]
-            
-            # Debug: log signal issues
-            if date >= '2026-03-01' and date <= '2026-03-10':
-                logger.info(f"{date}: 计算信号: BUY={len(buy_sigs)}, SELL={len(sell_sigs)}")
-                if buy_sigs:
-                    logger.info(f"{date}: BUY信号: {[(s.sector_code, s.score) for s in buy_sigs[:3]]}")
-                if sell_sigs:
-                    logger.info(f"{date}: SELL信号: {[(s.sector_code, s.score) for s in sell_sigs[:3]]}")
             
             new_positions = {}
             buy_sigs = [s for s in signals if s.direction.value == "BUY"]
@@ -1294,13 +1283,7 @@ def _run_backtest(daily_data, sorted_dates, strategy_type, params, initial_capit
         "max_drawdown": result["max_drawdown"],
         "trade_count": result["trade_count"],
     }
-    
-    return {
-        "total_return": total_return,
-        "annual_return": (1 + total_return) ** (TRADING_DAYS_PER_YEAR / len(sorted_dates)) - 1 if sorted_dates else 0,
-        "max_drawdown": abs(float((np.min(nav_curve) - np.max(nav_curve)) / np.max(nav_curve))) if nav_curve else 0,
-        "trade_count": buy_count + sell_count,
-    }
+
 
 @app.post("/data/replay/strategy-overlay")
 async def replay_strategy_overlay(request_body: dict):
