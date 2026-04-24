@@ -8,7 +8,9 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.client.RestTemplate;
 
+import java.time.LocalDate;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -55,7 +57,36 @@ public class AuthController {
         data.put("token", token);
         data.put("user", userInfo);
 
+        // 异步触发今日信号计算和数据采集（仅当日首次）
+        triggerSignalCalculationIfNeeded();
+
         return ResponseEntity.ok(Map.of("code", 200, "message", "登录成功", "data", data));
+    }
+
+    private void triggerSignalCalculationIfNeeded() {
+        String today = LocalDate.now().toString();
+        String flagKey = "signal:calculated:" + today;
+
+        if (Boolean.TRUE.equals(redisTemplate.hasKey(flagKey))) {
+            return;
+        }
+
+        redisTemplate.opsForValue().set(flagKey, "1", 25, TimeUnit.HOURS);
+
+        new Thread(() -> {
+            RestTemplate restTemplate = new RestTemplate();
+            try {
+                restTemplate.postForObject("http://backend-strategy:8002/collect", null, String.class);
+            } catch (Exception ignored) {
+            }
+            try {
+                String[] strategies = {"AGGRESSIVE", "MODERATE", "CONSERVATIVE"};
+                for (String st : strategies) {
+                    restTemplate.postForObject("http://backend-strategy:8002/calculate?strategy_type=" + st, null, String.class);
+                }
+            } catch (Exception ignored) {
+            }
+        }).start();
     }
 
     @PostMapping("/register")
