@@ -14,17 +14,23 @@ warnings.simplefilter("ignore", MissingPivotFunction)
 class InfluxDBQuery:
     """从InfluxDB读取板块历史数据供回测使用"""
 
+    _date_range_cache: dict = None
+    _date_range_cache_time: datetime = None
+    CACHE_TTL = 300  # 5分钟
+
     @staticmethod
     def _safe_float(val, default=0.0) -> float:
         """安全转换为浮点数，处理 NaN/Infinity/None"""
         try:
-            if val is None or (isinstance(val, float) and (val != val or val == float('inf') or val == float('-inf'))):
+            if val is None:
+                return default
+            if isinstance(val, float) and (val != val or val == float('inf') or val == float('-inf')):
                 return default
             result = float(val)
             if result != result or result == float('inf') or result == float('-inf'):
                 return default
             return result
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, ArithmeticError):
             return default
 
     def __init__(self):
@@ -136,7 +142,12 @@ class InfluxDBQuery:
         return daily_data
 
     def get_available_date_range(self) -> tuple[str, str]:
-        """获取InfluxDB中数据的可用日期范围"""
+        """获取InfluxDB中数据的可用日期范围（结果缓存5分钟）"""
+        now = datetime.now()
+        if self._date_range_cache is not None and self._date_range_cache_time is not None:
+            if (now - self._date_range_cache_time).total_seconds() < self.CACHE_TTL:
+                return self._date_range_cache
+
         # 查最早日期
         query_min = f'''
         from(bucket: "{self.bucket}")
@@ -182,10 +193,14 @@ class InfluxDBQuery:
                 times_max = sorted([str(r.get("_time", "")) for r in records_max if r.get("_time")])
                 if times_max:
                     max_date = datetime.fromisoformat(times_max[-1].replace("Z", "+00:00")).strftime("%Y-%m-%d")
+                    self._date_range_cache = (min_date, max_date)
+                    self._date_range_cache_time = now
                     return min_date, max_date
         except Exception as e:
             logger.error(f"获取最新日期失败: {e}")
 
+        self._date_range_cache = (min_date, min_date)
+        self._date_range_cache_time = now
         return min_date, min_date
 
     def get_sector_list(self) -> list[dict]:
