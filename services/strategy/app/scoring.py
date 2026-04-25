@@ -130,12 +130,12 @@ class RotationScoringModel:
         for item in sector_data:
             score, valuation_score = self._calculate_composite_score(item, strategy_type, params)
             main_flow = item.get("main_net_inflow", 0)
-            # 如果原始为0，显示模拟值
             display_flow = main_flow if main_flow != 0 else self._simulate_flow_from_kline(item)
             scored_sectors.append({
                 **item,
                 "composite_score": score,
                 "valuation_score": valuation_score,
+                "display_flow": display_flow,
                 "strength_score": self._normalize_flow(main_flow) * 0.7 + self._normalize_flow(item.get("north_net_inflow", 0)) * 0.3,
                 "slope_score": 5.0 + np.sign(main_flow) * min(abs(main_flow) / 1e8, 5.0),
                 "rs_score": 5.0 + item.get("index_change_pct", 0) * 1.5,
@@ -148,8 +148,7 @@ class RotationScoringModel:
         # 调试：打印前5名评分
         logger.info(f"信号日期 {signal_date} 前5名板块:")
         for i, s in enumerate(scored_sectors[:5]):
-            main_flow = s.get("main_net_inflow", 0)
-            display_flow = main_flow if main_flow != 0 else self._simulate_flow_from_kline(s)
+            display_flow = s.get("display_flow", s.get("main_net_inflow", 0))
             source = "真实" if s.get("main_net_inflow", 0) != 0 else "模拟"
             logger.info(f"  {i+1}. {s.get('sector_name')}: 综合={s['composite_score']:.2f} (强度={s.get('strength_score', 0):.2f}, 斜率={s.get('slope_score', 0):.2f}, 涨跌={s.get('rs_score', 0):.2f}, 净流入={display_flow/1e8:.2f}亿[{source}])")
 
