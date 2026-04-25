@@ -1,9 +1,11 @@
 """策略引擎服务 - FastAPI主应用"""
+import calendar
 import json
 import hashlib
 import pika
 import redis as redis_lib
 import numpy as np
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException
 from loguru import logger
@@ -19,7 +21,72 @@ from .models import (
 from .scoring import scoring_model, SECTOR_MAP
 from .influx_query import influx_query
 
-app = FastAPI(title="策略引擎服务", version="1.0.0")
+# RabbitMQ 连接管理
+_rmq_connection = None
+_rmq_channel = None
+
+
+def _init_rmq():
+    global _rmq_connection, _rmq_channel
+    try:
+        _rmq_connection = pika.BlockingConnection(
+            pika.ConnectionParameters(
+                host=settings.rabbitmq_host, port=settings.rabbitmq_port,
+                credentials=pika.PlainCredentials(settings.rabbitmq_user, settings.rabbitmq_password),
+            )
+        )
+        _rmq_channel = _rmq_connection.channel()
+        _rmq_channel.exchange_declare(exchange="rotation", exchange_type="topic", durable=True)
+        logger.info("RabbitMQ连接已建立")
+    except Exception as e:
+        logger.warning(f"RabbitMQ初始化失败: {e}")
+
+
+def _close_rmq():
+    global _rmq_connection, _rmq_channel
+    try:
+        if _rmq_channel and _rmq_channel.is_open:
+            _rmq_channel.close()
+        if _rmq_connection and _rmq_connection.is_open:
+            _rmq_connection.close()
+    except Exception as e:
+        logger.debug(f"RabbitMQ关闭: {e}")
+    finally:
+        _rmq_connection = None
+        _rmq_channel = None
+
+
+def _get_rmq_channel():
+    if _rmq_connection is None or _rmq_connection.is_closed:
+        _init_rmq()
+    return _rmq_channel
+
+
+def _calc_trade_cost(amount: float, commission_rate: float, stamp_tax_rate: float, slippage_rate: float, is_sell: bool = False) -> dict:
+    commission = max(amount * commission_rate, 5.0)
+    stamp_tax = amount * stamp_tax_rate if is_sell else 0.0
+    slippage = amount * slippage_rate
+    return {
+        "commission": commission,
+        "stamp_tax": stamp_tax,
+        "slippage": slippage,
+        "total": commission + stamp_tax + slippage,
+    }
+
+
+# InfluxDB日期范围缓存
+_date_range_cache = {"result": None, "time": None}
+DATE_RANGE_CACHE_TTL = 300  # 5分钟
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    _init_rmq()
+    yield
+    _close_rmq()
+
+
+app = FastAPI(title="策略引擎服务", version="1.0.0", lifespan=lifespan)
 
 # Redis客户端
 redis_client = redis_lib.Redis(
@@ -45,18 +112,13 @@ DEFAULT_CONFIGS = {
 
 
 def publish_message(routing_key: str, message: dict):
-    """发送消息到RabbitMQ"""
+    """发送消息到RabbitMQ（复用持久连接）"""
     try:
-        connection = pika.BlockingConnection(
-            pika.ConnectionParameters(
-                host=settings.rabbitmq_host, port=settings.rabbitmq_port,
-                credentials=pika.PlainCredentials(settings.rabbitmq_user, settings.rabbitmq_password),
-            )
-        )
-        channel = connection.channel()
-        channel.exchange_declare(exchange="rotation", exchange_type="topic", durable=True)
-        channel.basic_publish(exchange="rotation", routing_key=routing_key, body=json.dumps(message, ensure_ascii=False))
-        connection.close()
+        channel = _get_rmq_channel()
+        if channel and channel.is_open:
+            channel.basic_publish(exchange="rotation", routing_key=routing_key, body=json.dumps(message, ensure_ascii=False))
+        else:
+            logger.error("RabbitMQ通道不可用，消息未发送")
     except Exception as e:
         logger.error(f"RabbitMQ消息发送失败: {e}")
 
@@ -328,19 +390,21 @@ async def get_signal_calendar(strategy_type: StrategyType, month: str = None):
         if month is None:
             month = datetime.now().strftime("%Y-%m")
 
-        # 计算该月的起止日期
-        month_start = f"{month}-01"
-        import calendar
+        # 计算该月的天数
         year, mon = int(month[:4]), int(month[5:7])
         last_day = calendar.monthrange(year, mon)[1]
-        month_end = f"{month}-{last_day:02d}"
 
-        # 从Redis搜索该月所有信号
-        results = []
+        # 使用 pipeline 批量查询该月所有信号
+        pipe = redis_client.pipeline()
+        cache_keys = []
         for day in range(1, last_day + 1):
             date_str = f"{month}-{day:02d}"
             cache_key = f"signals:{strategy_type.value}:{date_str}"
-            cached = redis_client.get(cache_key)
+            cache_keys.append(date_str)
+            pipe.get(cache_key)
+
+        results = []
+        for date_str, cached in zip(cache_keys, pipe.execute()):
             if cached:
                 signals = json.loads(cached)
                 for sig in signals:
@@ -432,16 +496,11 @@ async def run_backtest(request: BacktestRequest):
                     sell_trade_cost = 0.0
                     for sector_code, weight in current_positions.items():
                         sell_amount = capital * weight
-                        # 佣金（最低5元）
-                        commission = max(sell_amount * params.commission_rate, 5.0)
-                        # 印花税（仅卖出）
-                        stamp_tax = sell_amount * params.stamp_tax_rate
-                        # 滑点成本
-                        slippage_cost = sell_amount * params.slippage_rate
-                        sell_trade_cost += commission + stamp_tax + slippage_cost
-                        total_commission += commission
-                        total_stamp_tax += stamp_tax
-                        total_slippage_cost += slippage_cost
+                        cost = _calc_trade_cost(sell_amount, params.commission_rate, params.stamp_tax_rate, params.slippage_rate, is_sell=True)
+                        sell_trade_cost += cost["total"]
+                        total_commission += cost["commission"]
+                        total_stamp_tax += cost["stamp_tax"]
+                        total_slippage_cost += cost["slippage"]
                         trade_count_actual += 1
                     
                     # 扣减交易成本
@@ -490,36 +549,25 @@ async def run_backtest(request: BacktestRequest):
 
                 if new_positions:
                     # === 计算本次调仓的交易成本 ===
-                    # 卖出旧持仓的成本（如果有旧持仓）
                     sell_trade_cost = 0.0
                     for sector_code, weight in current_positions.items():
                         sell_amount = capital * weight
-                        # 佣金（最低5元）
-                        commission = max(sell_amount * params.commission_rate, 5.0)
-                        # 印花税（仅卖出）
-                        stamp_tax = sell_amount * params.stamp_tax_rate
-                        # 滑点成本
-                        slippage_cost = sell_amount * params.slippage_rate
-                        sell_trade_cost += commission + stamp_tax + slippage_cost
-                        total_commission += commission
-                        total_stamp_tax += stamp_tax
-                        total_slippage_cost += slippage_cost
+                        cost = _calc_trade_cost(sell_amount, params.commission_rate, params.stamp_tax_rate, params.slippage_rate, is_sell=True)
+                        sell_trade_cost += cost["total"]
+                        total_commission += cost["commission"]
+                        total_stamp_tax += cost["stamp_tax"]
+                        total_slippage_cost += cost["slippage"]
                         trade_count_actual += 1
 
-                    # 买入新持仓的成本
                     buy_trade_cost = 0.0
                     for sector_code, weight in new_positions.items():
                         buy_amount = capital * weight
-                        # 佣金（最低5元）
-                        commission = max(buy_amount * params.commission_rate, 5.0)
-                        # 滑点成本（买入也有滑点）
-                        slippage_cost = buy_amount * params.slippage_rate
-                        buy_trade_cost += commission + slippage_cost
-                        total_commission += commission
-                        total_slippage_cost += slippage_cost
+                        cost = _calc_trade_cost(buy_amount, params.commission_rate, params.stamp_tax_rate, params.slippage_rate, is_sell=False)
+                        buy_trade_cost += cost["total"]
+                        total_commission += cost["commission"]
+                        total_slippage_cost += cost["slippage"]
                         trade_count_actual += 1
 
-                    # 扣减本次调仓的总成本
                     total_trade_cost = sell_trade_cost + buy_trade_cost
                     capital -= total_trade_cost
 
@@ -527,7 +575,6 @@ async def run_backtest(request: BacktestRequest):
                     position_hold_counter = params.hold_days
                     stop_loss_triggered = False
                     rebalance_cooldown = params.cooldown_days if params.cooldown_days else 2
-                # 如果没有买入信号，保持空仓，下次再选
 
             # === Step 7: 记录净值曲线 ===
             step = max(1, trading_days // 100)
@@ -698,7 +745,7 @@ async def get_cache_stats():
             ("system_settings", "settings:*"),
         ]
         for name, pattern in patterns:
-            count = len(redis_client.keys(pattern))
+            count = len(list(redis_client.scan_iter(match=pattern)))
             if count > 0:
                 categories[name] = count
 
@@ -795,7 +842,7 @@ async def get_database_status():
         data_counts = {}
         try:
             min_date, max_date = influx_query.get_available_date_range()
-            data_counts["influx_days"] = (len(min_date) > 0) if min_date else 0
+            data_counts["influx_days"] = 1 if min_date else 0
             data_counts["date_range"] = f"{min_date} ~ {max_date}" if min_date else "无数据"
         except Exception:
             data_counts["influx_days"] = 0
@@ -832,8 +879,8 @@ async def get_system_settings():
     """获取系统设置"""
     try:
         settings_map = {}
-        # 从Redis读取自定义设置
-        for key in redis_client.keys("settings:*"):
+        # 从Redis读取自定义设置（使用SCAN避免阻塞）
+        for key in redis_client.scan_iter(match="settings:*"):
             val = redis_client.get(key)
             short_key = key.replace("settings:", "")
             try:
@@ -1109,8 +1156,7 @@ def _generate_param_combinations(strategy_type: StrategyType) -> list[dict]:
     return combinations[:30] if len(combinations) > 30 else combinations
 
 def _run_backtest(daily_data, sorted_dates, strategy_type, params, initial_capital, return_full=False):
-    """运行回测的核心逻辑"""
-    TRADING_DAYS_PER_YEAR = 244
+    """运行回测的核心逻辑（使用模块级 TRADING_DAYS_PER_YEAR=252）"""
     
     capital = initial_capital
     peak_capital = capital
@@ -1157,13 +1203,11 @@ def _run_backtest(daily_data, sorted_dates, strategy_type, params, initial_capit
                 sell_trade_cost = 0.0
                 for sector_code, weight in current_positions.items():
                     sell_amount = capital * weight
-                    commission = max(sell_amount * params.commission_rate, 5.0)
-                    stamp_tax = sell_amount * params.stamp_tax_rate
-                    slippage_cost = sell_amount * params.slippage_rate
-                    sell_trade_cost += commission + stamp_tax + slippage_cost
-                    total_commission += commission
-                    total_stamp_tax += stamp_tax
-                    total_slippage_cost += slippage_cost
+                    cost = _calc_trade_cost(sell_amount, params.commission_rate, params.stamp_tax_rate, params.slippage_rate, is_sell=True)
+                    sell_trade_cost += cost["total"]
+                    total_commission += cost["commission"]
+                    total_stamp_tax += cost["stamp_tax"]
+                    total_slippage_cost += cost["slippage"]
                 capital -= sell_trade_cost
                 stop_loss_triggered = True
                 stop_loss_cooldown = params.hold_days + 1
@@ -1266,7 +1310,7 @@ def _run_backtest(daily_data, sorted_dates, strategy_type, params, initial_capit
     result = {
         "total_return": total_return,
         "annual_return": (1 + total_return) ** (TRADING_DAYS_PER_YEAR / len(sorted_dates)) - 1 if sorted_dates else 0,
-        "max_drawdown": abs(float((np.min([n["nav"] for n in nav_curve]) - np.max([n["nav"] for n in nav_curve])) / np.max([n["nav"] for n in nav_curve]))) if nav_curve else 0,
+        "max_drawdown": float(np.max((np.maximum.accumulate(np.array([n["nav"] for n in nav_curve])) - np.array([n["nav"] for n in nav_curve])) / np.maximum.accumulate(np.array([n["nav"] for n in nav_curve])))) if nav_curve else 0,
         "trade_count": buy_count + sell_count,
         "buy_count": buy_count,
         "sell_count": sell_count,
@@ -1383,19 +1427,13 @@ async def replay_strategy_overlay(request_body: dict):
                     sell_trade_cost = 0.0
                     for sector_code, weight in current_positions.items():
                         sell_amount = capital * weight
-                        # 佣金（最低5元）
-                        commission = max(sell_amount * params.commission_rate, 5.0)
-                        # 印花税（仅卖出）
-                        stamp_tax = sell_amount * params.stamp_tax_rate
-                        # 滑点成本
-                        slippage_cost = sell_amount * params.slippage_rate
-                        sell_trade_cost += commission + stamp_tax + slippage_cost
-                        total_commission += commission
-                        total_stamp_tax += stamp_tax
-                        total_slippage_cost += slippage_cost
+                        cost = _calc_trade_cost(sell_amount, params.commission_rate, params.stamp_tax_rate, params.slippage_rate, is_sell=True)
+                        sell_trade_cost += cost["total"]
+                        total_commission += cost["commission"]
+                        total_stamp_tax += cost["stamp_tax"]
+                        total_slippage_cost += cost["slippage"]
                         trade_count_actual += 1
                     
-                    # 扣减交易成本
                     capital -= sell_trade_cost
                     
                     stop_loss_triggered = True
@@ -1463,36 +1501,25 @@ async def replay_strategy_overlay(request_body: dict):
 
                 if new_positions:
                     # === 计算本次调仓的交易成本 ===
-                    # 卖出旧持仓的成本（如果有旧持仓）
                     sell_trade_cost = 0.0
                     for sector_code, weight in current_positions.items():
                         sell_amount = capital * weight
-                        # 佣金（最低5元）
-                        commission = max(sell_amount * params.commission_rate, 5.0)
-                        # 印花税（仅卖出）
-                        stamp_tax = sell_amount * params.stamp_tax_rate
-                        # 滑点成本
-                        slippage_cost = sell_amount * params.slippage_rate
-                        sell_trade_cost += commission + stamp_tax + slippage_cost
-                        total_commission += commission
-                        total_stamp_tax += stamp_tax
-                        total_slippage_cost += slippage_cost
+                        cost = _calc_trade_cost(sell_amount, params.commission_rate, params.stamp_tax_rate, params.slippage_rate, is_sell=True)
+                        sell_trade_cost += cost["total"]
+                        total_commission += cost["commission"]
+                        total_stamp_tax += cost["stamp_tax"]
+                        total_slippage_cost += cost["slippage"]
                         trade_count_actual += 1
 
-                    # 买入新持仓的成本
                     buy_trade_cost = 0.0
                     for sector_code, weight in new_positions.items():
                         buy_amount = capital * weight
-                        # 佣金（最低5元）
-                        commission = max(buy_amount * params.commission_rate, 5.0)
-                        # 滑点成本（买入也有滑点）
-                        slippage_cost = buy_amount * params.slippage_rate
-                        buy_trade_cost += commission + slippage_cost
-                        total_commission += commission
-                        total_slippage_cost += slippage_cost
+                        cost = _calc_trade_cost(buy_amount, params.commission_rate, params.stamp_tax_rate, params.slippage_rate, is_sell=False)
+                        buy_trade_cost += cost["total"]
+                        total_commission += cost["commission"]
+                        total_slippage_cost += cost["slippage"]
                         trade_count_actual += 1
 
-                    # 扣减本次调仓的总成本
                     total_trade_cost = sell_trade_cost + buy_trade_cost
                     capital -= total_trade_cost
 
