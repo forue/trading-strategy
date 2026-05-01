@@ -6,14 +6,14 @@ class Settings(BaseSettings):
     # Redis
     redis_host: str = "localhost"
     redis_port: int = 6379
-    redis_password: str = "redis123"
+    redis_password: str = ""
     redis_db: int = 2
 
     # RabbitMQ
     rabbitmq_host: str = "localhost"
     rabbitmq_port: int = 5672
     rabbitmq_user: str = "guest"
-    rabbitmq_password: str = "guest"
+    rabbitmq_password: str = ""
 
     # 钉钉推送
     dingtalk_enabled: bool = False
@@ -26,6 +26,9 @@ class Settings(BaseSettings):
 
     # Service
     service_port: int = 8004
+
+    # Logging
+    log_level: str = "INFO"
 
     class Config:
         env_file = ".env"

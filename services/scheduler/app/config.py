@@ -10,9 +10,12 @@ class Settings(BaseSettings):
     rabbitmq_host: str = "localhost"
     rabbitmq_port: int = 5672
     rabbitmq_user: str = "guest"
-    rabbitmq_password: str = "guest"
+    rabbitmq_password: str = ""
 
     service_port: int = 8006
+
+    # Logging
+    log_level: str = "INFO"
 
     class Config:
         env_file = ".env"
