@@ -90,6 +90,17 @@ CREATE TABLE IF NOT EXISTS account_nav (
     UNIQUE(user_id, nav_date)
 );
 
+-- 银证转账表
+CREATE TABLE IF NOT EXISTS bank_transfers (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES users(id),
+    transfer_date DATE NOT NULL,
+    direction VARCHAR(10) NOT NULL,
+    amount DECIMAL(15,4) NOT NULL,
+    remark VARCHAR(100),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 -- 板块基础信息表
 CREATE TABLE IF NOT EXISTS sectors (
     id BIGSERIAL PRIMARY KEY,
@@ -132,3 +143,4 @@ CREATE INDEX IF NOT EXISTS idx_trade_signals_strategy ON trade_signals(strategy_
 CREATE INDEX IF NOT EXISTS idx_positions_user ON positions(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_trades_user_date ON trades(user_id, traded_at);
 CREATE INDEX IF NOT EXISTS idx_account_nav_user_date ON account_nav(user_id, nav_date);
+CREATE INDEX IF NOT EXISTS idx_bank_transfers_user_date ON bank_transfers(user_id, transfer_date);
