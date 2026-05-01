@@ -10,7 +10,7 @@
           </div>
           <el-form label-width="160px" style="max-width: 600px">
             <el-form-item label="启用实时推送">
-              <el-switch v-model="wsEnabled" active-text="开" inactive-text="关" @change="saveSettings" />
+              <el-switch v-model="wsEnabled" active-text="开" inactive-text="关" @change="onWsEnabledChange" />
             </el-form-item>
             <el-form-item label="推送策略类型">
               <el-checkbox-group v-model="wsStrategyTypes" @change="saveSettings">
@@ -429,6 +429,16 @@ function toggleWsConnection() {
   }
 }
 
+// 监听 wsEnabled 变化，自动连接/断开 WebSocket
+function onWsEnabledChange(val: boolean) {
+  if (val) {
+    signalStore.connectWebSocket()
+  } else {
+    signalStore.disconnectWebSocket()
+  }
+  saveSettings()
+}
+
 // 数据源设置
 const dataSource = ref('akshare')
 const dataAvailability = reactive({ has_data: false, min_date: '', max_date: '' })
@@ -547,8 +557,9 @@ async function saveSettings() {
       scheduler_enabled: schedulerEnabled.value,
       scheduler_times: { ...schedulerTimes },
     })
-  } catch {
-    // 静默失败
+    ElMessage.success('设置已保存')
+  } catch (e: any) {
+    ElMessage.error('保存设置失败: ' + (e?.message || '未知错误'))
   }
 }
 

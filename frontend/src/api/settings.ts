@@ -151,6 +151,7 @@ runStrategyOverlay(data: {
     end_date: string
     strategy_type: string
     initial_capital?: number
+    n_trials?: number
   }): Promise<{
     best_params: any
     best_result: any

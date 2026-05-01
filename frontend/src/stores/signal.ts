@@ -8,6 +8,7 @@ export const useSignalStore = defineStore('signal', () => {
   const signalHistory = ref<TradeSignal[]>([])
   const wsConnection = ref<WebSocket | null>(null)
   const isConnected = ref(false)
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 
   async function fetchTodaySignals(strategyType: string) {
     const res = await signalApi.getTodaySignals(strategyType)
@@ -20,6 +21,9 @@ export const useSignalStore = defineStore('signal', () => {
   }
 
   function connectWebSocket() {
+    if (wsConnection.value && wsConnection.value.readyState === WebSocket.OPEN) return
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
+
     const token = localStorage.getItem('token')
     if (!token) return
 
@@ -28,27 +32,29 @@ export const useSignalStore = defineStore('signal', () => {
 
     ws.onopen = () => {
       isConnected.value = true
-      console.log('WebSocket 连接已建立')
+      console.log('WebSocket connected')
     }
 
     ws.onmessage = (event) => {
-      const signal: TradeSignal = JSON.parse(event.data)
-      currentSignals.value.unshift(signal)
-      // 播放提示音
-      const audio = new Audio('/notification.mp3')
-      audio.play().catch(() => {})
-      // 浏览器通知
-      if (Notification.permission === 'granted') {
-        new Notification('轮动信号推送', {
-          body: `${signal.sector_name} ${signal.direction} 仓位${(signal.position_ratio * 100).toFixed(1)}%`,
-        })
-      }
+      try {
+        const msg = JSON.parse(event.data)
+        if (msg.type === 'pong') return
+        const signal: TradeSignal = msg
+        currentSignals.value.unshift(signal)
+        const audio = new Audio('/notification.mp3')
+        audio.play().catch(() => {})
+        if (Notification.permission === 'granted') {
+          new Notification('轮动信号推送', {
+            body: `${signal.sector_name} ${signal.direction === 'BUY' ? '买入' : '卖出'} 仓位${((signal.position_ratio || 0) * 100).toFixed(1)}%`,
+          })
+        }
+      } catch { /* ignore non-JSON messages */ }
     }
 
     ws.onclose = () => {
       isConnected.value = false
-      // 5秒后重连
-      setTimeout(() => connectWebSocket(), 5000)
+      wsConnection.value = null
+      reconnectTimer = setTimeout(() => connectWebSocket(), 5000)
     }
 
     ws.onerror = () => {
@@ -59,6 +65,7 @@ export const useSignalStore = defineStore('signal', () => {
   }
 
   function disconnectWebSocket() {
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
     if (wsConnection.value) {
       wsConnection.value.close()
       wsConnection.value = null

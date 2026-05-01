@@ -3,6 +3,7 @@ import { ref } from 'vue'
 import { authApi } from '@/api/auth'
 import { schedulerApi } from '@/api/scheduler'
 import { strategyApi } from '@/api/strategy'
+import { useSignalStore } from '@/stores/signal'
 import type { UserInfo, LoginParams } from '@/api/auth'
 import dayjs from 'dayjs'
 import { ElMessage } from 'element-plus'
@@ -104,20 +105,22 @@ export const useUserStore = defineStore('user', () => {
     isLoggedIn.value = true
     localStorage.setItem('token', res.token)
     
+    // 登录后自动连接 WebSocket
+    try {
+      const signalStore = useSignalStore()
+      signalStore.connectWebSocket()
+    } catch { /* ignore */ }
+    
     // 登录成功后检查是否需要触发回测
     try {
       const today = dayjs().format('YYYY-MM-DD')
       const isTradeDay = await checkIfTradeDay(today)
       
       if (isTradeDay && isAfterAutoBacktestTime()) {
-        // 异步触发回测，不阻塞登录流程
-        setTimeout(() => {
-          triggerDailyBacktest()
-        }, 1000)
+        setTimeout(() => { triggerDailyBacktest() }, 1000)
       }
     } catch (error) {
       console.error('登录后回测检查失败:', error)
-      // 不显示错误，不影响正常登录
     }
   }
 
@@ -126,13 +129,16 @@ export const useUserStore = defineStore('user', () => {
       const res = await authApi.getUserInfo()
       userInfo.value = res
       isLoggedIn.value = true
+      // 页面刷新后自动重连 WebSocket
+      try {
+        const signalStore = useSignalStore()
+        signalStore.connectWebSocket()
+      } catch { /* ignore */ }
     } catch (error: any) {
-      // 只有 401/403 才清除 token（认证失效），其他错误保留 token
       const status = error?.response?.status
       if (status === 401 || status === 403) {
         logout()
       }
-      // 网络错误等不处理，保留 token 等下次重试
     }
   }
 
@@ -141,6 +147,10 @@ export const useUserStore = defineStore('user', () => {
     userInfo.value = null
     isLoggedIn.value = false
     localStorage.removeItem('token')
+    try {
+      const signalStore = useSignalStore()
+      signalStore.disconnectWebSocket()
+    } catch { /* ignore */ }
   }
 
   return { token, userInfo, isLoggedIn, login, checkAuth, logout }

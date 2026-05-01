@@ -96,6 +96,7 @@
             </el-select>
             <el-checkbox v-model="autoOptimize" :disabled="overlayLoading">自动寻优</el-checkbox>
             <el-input-number v-model="overlayCapital" :min="100000" :max="100000000" :step="100000" :controls="false" style="width: 140px" placeholder="初始资金" />
+            <el-input-number v-if="autoOptimize" v-model="nTrials" :min="20" :max="200" :step="10" style="width: 120px" placeholder="试验次数" />
             <el-button type="primary" @click="loadStrategyOverlay" :loading="overlayLoading" size="default">
               {{ autoOptimize ? '自动寻优' : '运行策略回放' }}
             </el-button>
@@ -368,6 +369,7 @@ const sectorHistory = ref<any[]>([])
 const overlayDateRange = ref<string[]>([])
 const overlayStrategyType = ref('MODERATE')
 const overlayCapital = ref(1000000)
+const nTrials = ref(50)
 const autoOptimize = ref(false)
 const optimizationProgress = ref(0)
 const totalCombinations = ref(0)
@@ -550,10 +552,10 @@ async function runAutoOptimization() {
       end_date: overlayDateRange.value[1],
       strategy_type: overlayStrategyType.value,
       initial_capital: overlayCapital.value,
+      n_trials: nTrials.value,
     })
     
     if (result.best_params && result.best_result) {
-      // 转换结果格式以匹配现有显示
       overlayData.value = {
         daily_signals: result.best_result.daily_signals || [],
         nav_curve: result.best_result.nav_curve || [],
@@ -561,12 +563,21 @@ async function runAutoOptimization() {
       }
       bestParams.value = result.best_params
       
-      ElMessage.success(`寻优完成! 最优参数: top_n=${bestParams.value.top_n}, 持有=${bestParams.value.hold_days}日, 止损=${(bestParams.value.stop_loss*100).toFixed(0)}%, 总收益=${(result.best_result.total_return*100).toFixed(2)}%`)
+      const totalReturn = (result.best_result.total_return * 100).toFixed(2)
+      const maxDrawdown = (result.best_result.max_drawdown * 100).toFixed(2)
+      const combos = result.all_results?.length || 0
+      ElMessage.success({
+        message: `寻优完成! 测试${combos}种参数, 最优收益=${totalReturn}%, 最大回撤=${maxDrawdown}%`,
+        duration: 5000,
+      })
     } else {
-      ElMessage.error('寻优失败')
+      ElMessage.error('寻优失败: 无有效结果')
     }
-  } catch { ElMessage.error('策略寻优失败') }
-  finally { overlayLoading.value = false }
+  } catch (e: any) {
+    ElMessage.error('策略寻优失败: ' + (e?.message || '未知错误'))
+  } finally {
+    overlayLoading.value = false
+  }
 }
 
 function onModeChange() { stopAutoPlay() }

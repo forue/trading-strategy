@@ -108,3 +108,60 @@ onUnmounted(() => {
   signalStore.disconnectWebSocket()
 })
 </script>
+
+<style lang="scss">
+.app-container {
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.sidebar {
+  width: 200px;
+  min-width: 200px;
+  background: #1f2d3d;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.main-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+}
+
+.header {
+  height: 50px;
+  line-height: 50px;
+  padding: 0 20px;
+  background: #fff;
+  border-bottom: 1px solid #e4e7ed;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.page-content {
+  flex: 1;
+  padding: 16px;
+  overflow-y: auto;
+  background: #f5f7fa;
+}
+
+@media (max-width: 768px) {
+  .sidebar {
+    width: 60px;
+    min-width: 60px;
+    .logo span { display: none; }
+    .el-menu-item span { display: none; }
+  }
+}
+
+@media (max-width: 480px) {
+  .sidebar { display: none; }
+}
+</style>

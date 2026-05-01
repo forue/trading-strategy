@@ -17,7 +17,7 @@
 
     <el-row :gutter="20">
       <!-- 板块资金流向热力图 -->
-      <el-col :span="14">
+      <el-col :xs="24" :sm="24" :md="14" :lg="14">
         <div class="page-card" v-loading="heatmapLoading">
           <div class="card-header">
             <span class="card-title">板块资金流向热力图</span>
@@ -32,7 +32,7 @@
       </el-col>
 
       <!-- 今日三档策略信号 -->
-      <el-col :span="10">
+      <el-col :xs="24" :sm="24" :md="10" :lg="10">
         <div class="page-card">
           <div class="card-header">
             <span class="card-title">今日策略信号</span>
@@ -407,7 +407,13 @@ function handleCalendarClick(params: any) {
   }
 }
 
-watch(currentStrategy, () => { loadCalendarData() })
+watch(currentStrategy, async () => {
+  loadCalendarData()
+  try {
+    todaySignals.value = await signalApi.getTodaySignals(currentStrategy.value)
+    stats.value[3].value = String(todaySignals.value.length)
+  } catch {}
+})
 watch(calendarMonth, () => { loadCalendarData() })
 </script>
 

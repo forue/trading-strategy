@@ -4,16 +4,16 @@
     <div class="page-card">
       <el-form :inline="true" :model="filterForm" size="default">
         <el-form-item label="策略类型">
-          <el-select v-model="filterForm.strategyType" style="width: 140px">
-            <el-option label="全部" value="" />
+          <el-select v-model="filterForm.strategyType" style="width: 140px" placeholder="请选择策略">
+            <el-option label="全部" value="ALL" />
             <el-option label="激进轮动" value="AGGRESSIVE" />
             <el-option label="稳健轮动" value="MODERATE" />
             <el-option label="保守轮动" value="CONSERVATIVE" />
           </el-select>
         </el-form-item>
         <el-form-item label="信号方向">
-          <el-select v-model="filterForm.direction" style="width: 100px">
-            <el-option label="全部" value="" />
+          <el-select v-model="filterForm.direction" style="width: 100px" placeholder="请选择方向">
+            <el-option label="全部" value="ALL" />
             <el-option label="买入" value="BUY" />
             <el-option label="卖出" value="SELL" />
           </el-select>
@@ -51,7 +51,7 @@
         </el-button>
       </div>
 
-      <el-table :data="filteredSignals" stripe style="width: 100%" v-loading="loading">
+       <el-table :data="pagedSignals" stripe style="width: 100%" v-loading="loading">
         <el-table-column prop="signal_date" label="信号日期" width="110" />
         <el-table-column prop="strategy_type" label="策略类型" width="90">
           <template #default="{ row }">
@@ -94,16 +94,15 @@
         </template>
       </el-table>
 
-      <el-pagination
-        v-model:current-page="pagination.page"
-        v-model:page-size="pagination.size"
-        :total="pagination.total"
-        :page-sizes="[20, 50, 100]"
-        layout="total, sizes, prev, pager, next"
-        style="margin-top: 16px; justify-content: flex-end"
-        @size-change="fetchSignals"
-        @current-change="fetchSignals"
-      />
+       <el-pagination
+         v-model:current-page="pagination.page"
+         v-model:page-size="pagination.size"
+         :total="pagination.total"
+         :page-sizes="[20, 50, 100]"
+         layout="total, sizes, prev, pager, next"
+         style="margin-top: 16px; justify-content: flex-end"
+         @size-change="onSizeChange"
+       />
     </div>
   </div>
 </template>
@@ -135,21 +134,50 @@ const strategyTagMap: Record<string, string> = { AGGRESSIVE: 'danger', MODERATE:
 // Client-side filtering for direction (backend does not support direction filter)
 const filteredSignals = computed(() => {
   let result = signalList.value
-  if (filterForm.direction) {
+  if (filterForm.direction && filterForm.direction !== 'ALL') {
     result = result.filter(s => s.direction === filterForm.direction)
   }
   pagination.total = result.length
   return result
 })
 
+// Frontend pagination: slice data by current page
+const pagedSignals = computed(() => {
+  const start = (pagination.page - 1) * pagination.size
+  const end = start + pagination.size
+  return filteredSignals.value.slice(start, end)
+})
+
+// Handle page size change: reset to first page
+function onSizeChange(size: number) {
+  pagination.size = size
+  pagination.page = 1
+}
+
 async function fetchSignals() {
   loading.value = true
   try {
-    signalList.value = await signalApi.getSignalHistory({
-      strategyType: filterForm.strategyType || 'MODERATE',
-      startDate: dateRange.value?.[0] || dayjs().subtract(30, 'day').format('YYYY-MM-DD'),
-      endDate: dateRange.value?.[1] || dayjs().format('YYYY-MM-DD'),
-    })
+    const startDate = dateRange.value?.[0] || dayjs().subtract(30, 'day').format('YYYY-MM-DD')
+    const endDate = dateRange.value?.[1] || dayjs().format('YYYY-MM-DD')
+
+    if (!filterForm.strategyType || filterForm.strategyType === 'ALL') {
+      // "全部"：分别查询三种策略并合并
+      const types: ('AGGRESSIVE' | 'MODERATE' | 'CONSERVATIVE')[] = ['AGGRESSIVE', 'MODERATE', 'CONSERVATIVE']
+      const results = await Promise.all(
+        types.map(t => signalApi.getSignalHistory({ strategyType: t, startDate, endDate }))
+      )
+      // 合并并按日期倒序排列
+      const merged = results.flat()
+      merged.sort((a, b) => (b.signal_date || '').localeCompare(a.signal_date || ''))
+      signalList.value = merged
+    } else {
+      signalList.value = await signalApi.getSignalHistory({
+        strategyType: filterForm.strategyType,
+        startDate,
+        endDate,
+      })
+    }
+    pagination.page = 1 // 重置到第一页
   } catch (e: any) {
     ElMessage.error(e?.message || '查询信号失败')
   } finally {
