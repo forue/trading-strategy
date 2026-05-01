@@ -1,23 +1,33 @@
 """信号通知服务 - FastAPI主应用 (WebSocket + RabbitMQ消费 + 外部推送通道)"""
+import sys
+import os
 import json
-import pika
-import redis as redis_lib
+import asyncio
 import threading
 from datetime import datetime
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException
 from loguru import logger
 
+# 添加共享库路径
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
 from .config import settings
 from .ws_manager import ws_manager
 from .notify_channels import notify_manager
+from shared import RabbitMQManager, RedisManager
 
-app = FastAPI(title="信号通知服务", version="1.1.0")
+# 配置日志
+logger.remove()
+logger.add(sys.stderr, level=settings.log_level)
 
-# Redis客户端
-redis_client = redis_lib.Redis(
-    host=settings.redis_host, port=settings.redis_port,
-    password=settings.redis_password, db=settings.redis_db, decode_responses=True,
-)
+app = FastAPI(title="信号通知服务", version="1.2.0")
+
+# 初始化连接管理器
+rmq = RabbitMQManager()
+redis_mgr = RedisManager()
+
+# 主事件循环引用（供 RabbitMQ 消费线程使用）
+_main_loop: asyncio.AbstractEventLoop = None
 
 # 推送配置在 Redis 中的 key
 NOTIFY_CONFIG_KEY = "notify_channels_config"
@@ -25,15 +35,36 @@ NOTIFY_CONFIG_KEY = "notify_channels_config"
 
 @app.on_event("startup")
 async def startup_event():
-    """应用启动事件 - 加载推送通道配置"""
+    """应用启动事件 - 初始化连接和加载配置"""
+    global _main_loop
+    _main_loop = asyncio.get_event_loop()
+    rmq.connect(
+        host=settings.rabbitmq_host,
+        port=settings.rabbitmq_port,
+        user=settings.rabbitmq_user,
+        password=settings.rabbitmq_password,
+    )
+    redis_mgr.connect(
+        host=settings.redis_host,
+        port=settings.redis_port,
+        password=settings.redis_password,
+        db=settings.redis_db,
+    )
     _load_notify_config()
     logger.info("推送通道配置已加载")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """应用关闭事件"""
+    rmq.close()
+    redis_mgr.close()
 
 
 def _load_notify_config():
     """从 Redis 加载推送通道配置，覆盖环境变量默认值"""
     try:
-        raw = redis_client.get(NOTIFY_CONFIG_KEY)
+        raw = redis_mgr.get(NOTIFY_CONFIG_KEY)
         if raw:
             config = json.loads(raw)
             notify_manager.load_config(config)
@@ -59,7 +90,7 @@ def _load_notify_config():
 def _save_notify_config_to_redis(config: dict):
     """将推送通道配置持久化到 Redis"""
     try:
-        redis_client.set(NOTIFY_CONFIG_KEY, json.dumps(config, ensure_ascii=False))
+        redis_mgr.set(NOTIFY_CONFIG_KEY, json.dumps(config, ensure_ascii=False))
         logger.info("推送通道配置已保存到Redis")
     except Exception as e:
         logger.error(f"保存推送通道配置到Redis失败: {e}")
@@ -78,19 +109,29 @@ def start_rabbitmq_consumer():
                 strategy_type = message.get("strategy_type", "")
                 signal_date = message.get("signal_date", datetime.now().strftime("%Y-%m-%d"))
 
-                # 1. 通过WebSocket广播信号
-                import asyncio
-                for signal in signals:
-                    asyncio.run(ws_manager.broadcast_signal(signal, strategy_type))
+                # 1. 通过WebSocket广播信号（在主事件循环上执行）
+                if _main_loop and not _main_loop.is_closed():
+                    for signal in signals:
+                        future = asyncio.run_coroutine_threadsafe(
+                            ws_manager.broadcast_signal(signal, strategy_type), _main_loop
+                        )
+                        try:
+                            future.result(timeout=5)
+                        except Exception as e:
+                            logger.error(f"WebSocket广播失败: {e}")
 
                 # 2. 外部推送通道（钉钉、企业微信）
                 try:
-                    asyncio.run(notify_manager.push_signal(signals, strategy_type, signal_date))
+                    if _main_loop and not _main_loop.is_closed():
+                        future = asyncio.run_coroutine_threadsafe(
+                            notify_manager.push_signal(signals, strategy_type, signal_date), _main_loop
+                        )
+                        future.result(timeout=10)
                 except Exception as e:
                     logger.error(f"外部推送失败: {e}")
 
                 # 3. 缓存信号到Redis
-                redis_client.setex(
+                redis_mgr.setex(
                     f"signals:{strategy_type}:{signal_date}",
                     86400 * 7,
                     json.dumps(signals, ensure_ascii=False),
@@ -101,19 +142,11 @@ def start_rabbitmq_consumer():
             logger.error(f"消息处理失败: {e}")
 
     try:
-        connection = pika.BlockingConnection(
-            pika.ConnectionParameters(
-                host=settings.rabbitmq_host, port=settings.rabbitmq_port,
-                credentials=pika.PlainCredentials(settings.rabbitmq_user, settings.rabbitmq_password),
-            )
+        rmq.consume(
+            queue="signal_notification",
+            callback=callback,
+            routing_key="signal.#",
         )
-        channel = connection.channel()
-        channel.exchange_declare(exchange="rotation", exchange_type="topic", durable=True)
-        result = channel.queue_declare(queue="signal_notification", durable=True)
-        channel.queue_bind(exchange="rotation", queue=result.method.queue, routing_key="signal.#")
-        channel.basic_consume(queue=result.method.queue, on_message_callback=callback, auto_ack=True)
-        logger.info("RabbitMQ消费者启动成功，等待消息...")
-        channel.start_consuming()
     except Exception as e:
         logger.error(f"RabbitMQ消费者启动失败: {e}")
 
@@ -179,7 +212,6 @@ async def get_notify_config():
         masked_cfg = {**cfg}
         if cfg.get("webhook_url"):
             url = cfg["webhook_url"]
-            # 只显示前30个字符和后10个字符
             if len(url) > 45:
                 masked_cfg["webhook_url_display"] = url[:30] + "..." + url[-10:]
             else:
@@ -192,23 +224,8 @@ async def get_notify_config():
 
 @app.put("/signals/notify/config")
 async def update_notify_config(config_body: dict):
-    """更新推送通道配置
-
-    Body:
-    {
-        "dingtalk": {
-            "enabled": true,
-            "webhook_url": "https://oapi.dingtalk.com/robot/send?access_token=xxx",
-            "secret": "SEC..."
-        },
-        "wecom": {
-            "enabled": true,
-            "webhook_url": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx"
-        }
-    }
-    """
+    """更新推送通道配置"""
     try:
-        # 合并当前配置与新配置（部分更新）
         current = notify_manager.get_config()
         for channel in ["dingtalk", "wecom"]:
             if channel in config_body:
@@ -216,10 +233,7 @@ async def update_notify_config(config_body: dict):
                     if key in current[channel]:
                         current[channel][key] = value
 
-        # 更新内存中的配置
         notify_manager.load_config(current)
-
-        # 持久化到 Redis
         _save_notify_config_to_redis(current)
 
         return {"code": 200, "message": "推送通道配置已更新", "data": notify_manager.get_config()}
@@ -230,16 +244,10 @@ async def update_notify_config(config_body: dict):
 
 @app.post("/signals/notify/test/{channel}")
 async def test_notify_channel(channel: str, strategy_type: str = "MODERATE"):
-    """测试推送通道
-
-    Args:
-        channel: dingtalk 或 wecom
-        strategy_type: 测试信号的策略类型
-    """
+    """测试推送通道"""
     if channel not in ("dingtalk", "wecom"):
         raise HTTPException(status_code=400, detail="不支持的通道类型，可选: dingtalk, wecom")
 
-    # 构造测试信号
     test_signals = [
         {
             "signal_date": datetime.now().strftime("%Y-%m-%d"),
@@ -291,7 +299,7 @@ async def test_notify_channel(channel: str, strategy_type: str = "MODERATE"):
 async def get_today_signals(strategy_type: str):
     """获取今日信号（REST接口）"""
     today = datetime.now().strftime("%Y-%m-%d")
-    cached = redis_client.get(f"signals:{strategy_type}:{today}")
+    cached = redis_mgr.get(f"signals:{strategy_type}:{today}")
     if cached:
         return {"code": 200, "data": json.loads(cached)}
     return {"code": 200, "data": []}
@@ -306,7 +314,7 @@ async def get_signal_history(strategy_type: str, start_date: str, end_date: str)
     end = datetime.strptime(end_date, "%Y-%m-%d")
     while current <= end:
         date_str = current.strftime("%Y-%m-%d")
-        cached = redis_client.get(f"signals:{strategy_type}:{date_str}")
+        cached = redis_mgr.get(f"signals:{strategy_type}:{date_str}")
         if cached:
             signals.extend(json.loads(cached))
         current += timedelta(days=1)
@@ -316,8 +324,8 @@ async def get_signal_history(strategy_type: str, start_date: str, end_date: str)
 @app.get("/signals/calendar")
 async def get_signal_calendar(strategy_type: str, month: str):
     """获取信号日历数据"""
-    start = f"{month}-01"
     import calendar
+    start = f"{month}-01"
     year, m = month.split("-")
     last_day = calendar.monthrange(int(year), int(m))[1]
     end = f"{month}-{last_day:02d}"

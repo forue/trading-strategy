@@ -264,7 +264,8 @@ class RotationScoringModel:
         优先级：
         1. 直接从传入的sector_data获取 etf_code/etf_name
         2. 用sector_code精确匹配（SECTOR_ETF_MAP同时支持THS/SW前缀）
-        3. 用sector_name模糊匹配中文名称
+        3. 用sector_name精确匹配中文名称
+        4. 用sector_name模糊匹配（去除"THS"/"SW"前缀后对比）
         """
         if sector_data and (sector_data.get("etf_code") or sector_data.get("etf_name")):
             return {
@@ -274,16 +275,27 @@ class RotationScoringModel:
 
         etf = SECTOR_ETF_MAP.get(sector_code)
         if etf:
-            return {
-                "etf_code": etf["code"],
-                "etf_name": etf["name"]
-            }
+            return {"etf_code": etf["code"], "etf_name": etf["name"]}
 
         if sector_name:
+            # 精确匹配中文名
             for key, val in SECTOR_ETF_MAP.items():
                 name_part = key.replace("THS", "").replace("SW", "")
-                if name_part == sector_name or sector_name.startswith(name_part[:4]):
+                if name_part == sector_name:
                     return {"etf_code": val["code"], "etf_name": val["name"]}
+
+            # 名称模糊匹配（取前4个字符）
+            for key, val in SECTOR_ETF_MAP.items():
+                name_part = key.replace("THS", "").replace("SW", "")
+                if sector_name.startswith(name_part[:4]) or name_part.startswith(sector_name[:4]):
+                    return {"etf_code": val["code"], "etf_name": val["name"]}
+
+            # 从SECTOR_MAP反查THS/SW前缀代码再匹配ETF
+            for ths_code, ths_name in SECTOR_MAP.items():
+                if ths_name == sector_name:
+                    etf = SECTOR_ETF_MAP.get(ths_code)
+                    if etf:
+                        return {"etf_code": etf["code"], "etf_name": etf["name"]}
 
         return {"etf_code": None, "etf_name": None}
 
