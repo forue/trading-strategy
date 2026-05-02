@@ -2,7 +2,7 @@
 
 ## Architecture
 
-A-share sector rotation trading system with 6 microservices:
+A-share sector rotation trading system with 7 microservices:
 
 | Service | Tech | Port | Entry |
 |---------|------|------|-------|
@@ -12,6 +12,7 @@ A-share sector rotation trading system with 6 microservices:
 | signal-notification | Python + FastAPI + WebSocket | 8004 | `services/signal-notification/app/main.py` |
 | fund-management | Spring Boot + JPA | 8005 | `services/fund-management/` |
 | scheduler | Python + FastAPI + APScheduler | 8006 | `services/scheduler/app/main.py` |
+| ai-decision | Python + FastAPI + LLM | 8007 | `services/ai-decision/app/main.py` |
 
 Frontend: Vue 3 + TypeScript + ECharts + Element Plus at `frontend/`.
 

@@ -106,7 +106,8 @@ async def job_collect_data():
 
 ```python
 async def job_calculate_strategy():
-    """交易日15:05执行，依次计算三档策略"""
+    """定时任务：策略计算（作为采集链路的备用触发，正常由采集任务链式触发）"""
+    # 采集成功后立即触发，无需等待固定5分钟
     async with httpx.AsyncClient(timeout=120) as client:
         for strategy in ["AGGRESSIVE", "MODERATE", "CONSERVATIVE"]:
             resp = await client.post(
@@ -125,7 +126,7 @@ async def job_calculate_strategy():
           │
           ▼ RabbitMQ发布 data.updated.sector_flow
           │
-15:05  策略引擎服务触发
+          ▼ 采集成功后立即触发策略计算（无需等待15:05）
           │
           ▼ 读取InfluxDB/Redis最新数据
           │
@@ -135,7 +136,7 @@ async def job_calculate_strategy():
           │
           ▼ 信号缓存到Redis
           │
-          ▼ RabbitMQ发布 signal.generated
+          ▼ RabbitMQ发布 signals_generated
           │
           ▼ 信号通知服务消费 → WebSocket推送前端
           │
@@ -151,7 +152,9 @@ async def job_calculate_strategy():
 ### 5.1 触发数据采集
 
 ```
-POST /api/scheduler/trigger/collect
+POST /trigger/collect
+
+逻辑: 采集成功后立即链式触发策略计算
 
 响应:
 {
@@ -163,7 +166,7 @@ POST /api/scheduler/trigger/collect
 ### 5.2 触发策略计算
 
 ```
-POST /api/scheduler/trigger/strategy
+POST /trigger/strategy
 
 响应:
 {
@@ -175,9 +178,9 @@ POST /api/scheduler/trigger/strategy
 ### 5.3 触发全流程
 
 ```
-POST /api/scheduler/trigger/all
+POST /trigger/all
 
-逻辑: 先采集数据，再计算策略（串行执行）
+逻辑: 先采集数据，再链式触发策略计算
 
 响应:
 {
@@ -189,7 +192,7 @@ POST /api/scheduler/trigger/all
 ### 5.4 查看任务列表
 
 ```
-GET /api/scheduler/jobs
+GET /jobs
 
 响应:
 {
@@ -198,20 +201,17 @@ GET /api/scheduler/jobs
     {
       "id": "collect_data",
       "name": "板块资金流数据采集",
-      "next_run": "2026-04-21T15:00:00",
-      "trigger": "cron[day_of_week='mon-fri', hour='15', minute='0']"
+      "next_run": "2026-04-21T15:00:00"
     },
     {
       "id": "calculate_strategy",
       "name": "三档轮动策略计算",
-      "next_run": "2026-04-21T15:05:00",
-      "trigger": "cron[day_of_week='mon-fri', hour='15', minute='5']"
+      "next_run": "2026-04-21T15:05:00"
     },
     {
       "id": "collect_north_bound",
       "name": "北向资金数据采集",
-      "next_run": "2026-04-21T16:00:00",
-      "trigger": "cron[day_of_week='mon-fri', hour='16', minute='0']"
+      "next_run": "2026-04-21T16:00:00"
     }
   ]
 }

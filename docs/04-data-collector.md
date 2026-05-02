@@ -28,8 +28,11 @@
 │  POST /collect/sector-flow      ← 触发板块资金流采集  │
 │  POST /collect/history          ← 批量历史数据采集    │
 │  POST /collect/north-bound      ← 北向资金采集        │
+│  POST /collect/kline           ← 采集板块K线数据    │
 │  GET  /query/sector-data        ← 查询板块历史数据    │
 │  GET  /query/all-sectors        ← 查询全板块数据      │
+│  GET  /trade-dates             ← 获取交易日历        │
+│  GET  /sectors                 ← 获取板块列表        │
 └──────────┬──────────────────────────┬───────────────┘
            │                          │
     ┌──────▼──────┐           ┌───────▼───────┐

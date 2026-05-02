@@ -73,23 +73,29 @@
 目标: 追求最大收益，高频率满仓轮换
 
 参数:
-  top_n = 2           # 仅取前2名
-  max_position = 100% # 满仓
-  hold_days = 3       # 持有1-3日
-  stop_loss = 5%      # 止损5%
-  capital_pct = 50%   # 资金使用比例
+  top_n = 2              # 仅取前2名
+  max_position = 100%     # 满仓
+  hold_days = 3           # 持有1-3日
+  stop_loss = 12%         # 止损12%
+  capital_pct = 50%      # 资金使用比例
+  min_score_threshold = 2.0   # 最小评分阈值
+  score_gap_threshold = 1.0   # 评分差距阈值
+  cooldown_days = 2       # 调仓冷却期
+  keep_overlap = true     # 保持重叠持仓
+  allow_empty = true     # 允许空仓
+  min_score_keep = 3.0   # 保持持仓的最小评分
   commission_rate = 0.3‰ # 佣金费率（万三）
   stamp_tax_rate = 1.0‰  # 印花税率（千一，仅卖出）
   slippage_rate = 1.0‰   # 滑点费率（千一）
 
 买入逻辑:
   1. 按综合评分排序所有板块
-  2. 选取评分最高的前2名
+  2. 选取评分最高的前2名（需满足min_score_threshold）
   3. 等分仓位(各50%)买入
   4. 生成BUY信号
 
 卖出逻辑:
-  1. 综合评分 < 4.0 的板块
+  1. 综合评分 < min_score_keep 的板块
   2. 生成SELL信号
 
 信号示例:
@@ -103,22 +109,28 @@
 目标: 平衡收益与风险，半仓分散持有
 
 参数:
-  top_n = 3           # 取前3名
-  max_position = 50%  # 半仓
-  hold_days = 5       # 持有5日
-  stop_loss = 3%      # 止损3%
-  capital_pct = 30%   # 资金使用比例
+  top_n = 3              # 取前3名
+  max_position = 50%     # 半仓
+  hold_days = 5           # 持有5日
+  stop_loss = 10%        # 止损10%
+  capital_pct = 30%      # 资金使用比例
+  min_score_threshold = 2.0   # 最小评分阈值
+  score_gap_threshold = 1.0   # 评分差距阈值
+  cooldown_days = 2       # 调仓冷却期
+  keep_overlap = true     # 保持重叠持仓
+  allow_empty = true     # 允许空仓
+  min_score_keep = 3.0   # 保持持仓的最小评分
   commission_rate = 0.3‰ # 佣金费率（万三）
   stamp_tax_rate = 1.0‰  # 印花税率（千一，仅卖出）
   slippage_rate = 1.0‰   # 滑点费率（千一）
 
 买入逻辑:
   1. 按综合评分排序
-  2. 选取前3名
+  2. 选取前3名（需满足min_score_threshold）
   3. 等分仓位(各16.7%，总计50%)买入
 
 卖出逻辑:
-  1. 综合评分 < 3.0 的板块
+  1. 综合评分 < min_score_keep 的板块
   2. 建议减仓
 
 信号示例:
@@ -128,6 +140,39 @@
 
 ### 3.3 保守轮动策略
 
+```
+目标: 注重安全边际，低仓位配置
+
+参数:
+  top_n = 5                # 取满足条件的前5名
+  max_position = 30%       # 仓位上限30%
+  hold_days = 10           # 持有10日
+  stop_loss = 8%           # 止损8%
+  capital_pct = 20%        # 资金使用比例
+  valuation_pct_max = 50   # 估值分位≤50%
+  min_score_threshold = 2.0   # 最小评分阈值
+  score_gap_threshold = 1.0   # 评分差距阈值
+  cooldown_days = 3       # 调仓冷却期
+  keep_overlap = true     # 保持重叠持仓
+  allow_empty = true     # 允许空仓
+  min_score_keep = 3.0   # 保持持仓的最小评分
+  commission_rate = 0.3‰ # 佣金费率（万三）
+  stamp_tax_rate = 1.0‰  # 印花税率（千一，仅卖出）
+  slippage_rate = 1.0‰     # 滑点费率（千一）
+
+买入逻辑:
+  1. 按综合评分排序
+  2. 筛选评分 ≥ min_score_threshold 的板块
+  3. 选取前5名
+  4. 单板块仓位上限30%，总仓位不超过100%
+
+卖出逻辑:
+  1. 综合评分 < min_score_keep 的板块
+  2. 不满足安全边际
+
+信号示例:
+  { direction: "BUY", sector: "银行", score: 6.12, position: 0.2,
+    reason: "保守轮动: 综合评分6.12, 估值分位≤50%, 仓位上限30%" }
 ```
 目标: 注重安全边际，低仓位配置
 
@@ -165,32 +210,41 @@
 
 ```
 触发方式: 
-  1. 定时触发: 任务调度中心 15:05 调用 POST /calculate
-  2. 手动触发: 前端策略管理页触发
+  1. 定时触发: 任务调度中心 15:00 数据采集后链式触发（或15:05备用触发）
+  2. 手动触发: 前端策略管理页触发 /calculate
+  3. 登录触发: 认证服务登录成功后触发 /collect + /calculate
 
 计算流程:
-  1. 从Redis获取最新板块数据 (sector_capital_flow:latest)
-     └─ 无缓存时，返回空信号（无数据）
+  1. 非交易日检查: 使用AkShare交易日历判断，非交易日不生成信号
 
-  2. 遍历每个板块数据，计算四维评分:
-     a. 资金强度得分 (normalize main_flow + north_flow)
-     b. 资金斜率得分 (趋势方向判断)
-     c. 相对强弱得分 (涨跌幅映射)
-     d. 估值得分 (历史分位)
+  2. 从Redis获取最新板块数据 (sector_capital_flow:latest)
+      └─ 无缓存时，从InfluxDB读取最近3天数据
+      └─ 仍无数据时，尝试读取最近30天数据
 
-  3. 按策略权重计算综合评分:
-     AGGRESSIVE: strength*0.6 + slope*0.3 + rs*0.1
-     MODERATE:   strength*0.4 + slope*0.25 + rs*0.25 + val*0.1
-     CONSERVATIVE: strength*0.3 + slope*0.2 + rs*0.2 + val*0.3
+  3. 从Redis读取当前持仓 (positions:{strategy_type})
 
-  4. 按评分排序，根据策略类型生成信号:
-     - 买入: 选取前N名，计算仓位比例
-     - 卖出: 低于阈值的板块
+  4. 遍历每个板块数据，计算四维评分:
+      a. 资金强度得分 (normalize main_flow + north_flow)
+      b. 资金斜率得分 (趋势方向判断)
+      c. 相对强弱得分 (涨跌幅映射)
+      d. 估值得分 (历史分位)
 
-  5. 信号处理:
-     a. 写入Redis缓存 (key: signals:{type}:{date}, TTL: 24h)
-     b. 通过RabbitMQ发布 signal.generated 事件
-     c. 信号通知服务消费事件 → WebSocket推送给前端
+  5. 按策略权重计算综合评分:
+      AGGRESSIVE: strength*0.6 + slope*0.3 + rs*0.1
+      MODERATE:   strength*0.4 + slope*0.25 + rs*0.25 + val*0.1
+      CONSERVATIVE: strength*0.3 + slope*0.2 + rs*0.2 + val*0.3
+
+  6. 按评分排序，根据策略类型生成信号:
+      - 买入: 选取前N名（需满足min_score_threshold），计算仓位比例
+      - 卖出: 评分 < min_score_keep 的板块
+      - 冷却期: 止损后cooldown_days内不建仓
+      - 重叠持仓: keep_overlap=true时保留已持仓
+
+  7. 信号处理:
+      a. 更新持仓到Redis (positions:{type}, TTL: 7天)
+      b. 写入Redis缓存 (key: signals:{type}:{date}, TTL: 24h)
+      c. 通过RabbitMQ发布 signals_generated 事件
+      d. 信号通知服务消费事件 → WebSocket推送给前端
 ```
 
 ### 4.2 消息发布格式
@@ -217,6 +271,25 @@
 }
 ```
 
+### 4.3 系统设置与缓存管理
+
+```
+系统设置 (Redis key: settings:*):
+  - ws_push_enabled: WebSocket推送开关
+  - ws_push_strategy_types: 推送的策略类型列表
+  - data_source: 数据源类型 (akshare_ths)
+  - cache_ttl_days: 缓存有效期天数
+  - scheduler_enabled: 调度器开关
+  - scheduler_times: 调度时间配置
+
+缓存统计 (GET /cache/stats):
+  - 返回Redis内存使用、key数量、各类数据计数
+
+缓存清理:
+  - DELETE /cache/clear: 清空所有缓存
+  - DELETE /cache/expired: 为无TTL的key设置7天过期
+```
+
 ---
 
 ## 五、接口设计
@@ -224,7 +297,7 @@
 ### 5.1 触发策略计算
 
 ```
-POST /api/strategy/calculate?strategy_type=AGGRESSIVE&signal_date=2026-04-18
+POST /calculate?strategy_type=AGGRESSIVE&signal_date=2026-04-18
 
 响应:
 {
@@ -237,7 +310,7 @@ POST /api/strategy/calculate?strategy_type=AGGRESSIVE&signal_date=2026-04-18
 ### 5.2 获取策略配置
 
 ```
-GET /api/strategy/configs
+GET /configs
 
 响应:
 {
@@ -258,29 +331,38 @@ GET /api/strategy/configs
 ### 5.3 更新策略配置
 
 ```
-PUT /api/strategy/configs/{id}
+PUT /configs/{config_id}
 Content-Type: application/json
 
 请求:
 {
   "strategy_type": "AGGRESSIVE",
   "name": "激进轮动策略",
-  "params": { "top_n": 3, "max_position": 0.8, ... }
+  "params": { "top_n": 3, "max_position": 0.8, ... },
+  "is_active": true
 }
 ```
 
 ### 5.4 获取今日信号
 
 ```
-GET /api/strategy/signals/today?strategy_type=AGGRESSIVE
+GET /signals/today?strategy_type=AGGRESSIVE
 
 响应: 从Redis缓存读取，无则返回空数组
 ```
 
-### 5.5 策略回测
+### 5.5 获取信号日历
 
 ```
-POST /api/strategy/backtest
+GET /signals/calendar?strategy_type=AGGRESSIVE&month=2026-04
+
+响应: 从Redis缓存读取当月所有信号
+```
+
+### 5.6 策略回测
+
+```
+POST /backtest
 Content-Type: application/json
 
 请求:
@@ -288,7 +370,8 @@ Content-Type: application/json
   "strategy_type": "MODERATE",
   "start_date": "2025-04-18",
   "end_date": "2026-04-18",
-  "initial_capital": 1000000
+  "initial_capital": 1000000,
+  "params": { ... }  // 可选，覆盖默认参数
 }
 
 响应:
@@ -301,18 +384,90 @@ Content-Type: application/json
     "sharpe_ratio": 1.23,
     "win_rate": 0.56,
     "trade_count": 48,
+    "buy_count": 20,
+    "sell_count": 18,
     // 交易成本统计
     "total_commission": 1250.50,
     "total_stamp_tax": 850.20,
     "total_slippage_cost": 420.30,
     "total_trade_cost": 2521.00,
     "trade_count_actual": 52,
+    "params": { "top_n": 3, ... },
     "nav_curve": [
       { "date": "2025-04-18", "nav": 1000000, "benchmark": 1000000, "stop_loss": false },
       ...
-    ]
+    ],
+    "daily_signals": [ ... ]
   }
 }
+```
+
+### 5.7 回测历史
+
+```
+GET /backtest/history?strategy_type=MODERATE
+
+响应: 返回最近的回测记录列表（最多20条）
+```
+
+### 5.8 回测详情
+
+```
+GET /backtest/{bt_id}
+
+响应: 返回指定回测ID的完整结果
+```
+
+### 5.9 交易日检查
+
+```
+GET /trade-day/check?date=2026-04-18
+
+响应:
+{
+  "code": 200,
+  "data": {
+    "date": "2026-04-18",
+    "is_trade_day": true,
+    "message": "2026-04-18 是交易日"
+  }
+}
+```
+
+### 5.10 数据可用性查询
+
+```
+GET /data/availability
+
+响应:
+{
+  "code": 200,
+  "data": {
+    "has_data": true,
+    "min_date": "2025-01-02",
+    "max_date": "2026-04-18"
+  }
+}
+```
+
+### 5.11 系统设置
+
+```
+GET /settings
+PUT /settings
+
+获取/更新系统设置（WebSocket推送、数据源配置等）
+```
+
+### 5.12 数据回放接口
+
+```
+GET /data/replay/dates           - 获取可回放日期列表
+GET /data/replay/sectors        - 获取板块列表
+GET /data/replay/sector/{code}  - 获取板块历史数据
+GET /data/replay/day/{date}     - 获取某天数据
+POST /data/replay/strategy-optimize  - 策略参数自动寻优（Optuna）
+POST /data/replay/strategy-overlay  - 策略叠加回放
 ```
 
 ---

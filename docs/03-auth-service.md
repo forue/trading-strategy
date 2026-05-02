@@ -229,10 +229,26 @@ Authorization: Bearer {token}
 **退出流程**:
 
 ```
-1. 提取Token
+1. 提取Token（从Authorization头）
 2. 将Token写入Redis黑名单: token:blacklist:{token} = "1"
 3. 设置TTL为24小时（与JWT过期时间一致）
 4. 后续请求携带此Token时，getUserInfo接口会检查黑名单
+```
+
+### 4.5 健康检查
+
+```
+GET /api/auth/health
+
+响应:
+{
+  "code": 200,
+  "data": {
+    "status": "healthy",
+    "service": "auth",
+    "timestamp": 1713408000000
+  }
+}
 ```
 
 ---

@@ -24,11 +24,16 @@
 ┌─────────────────────────────────────────────────────────┐
 │                 FundController (:8005)                    │
 │                                                         │
-│  GET /positions          - 当前持仓查询                   │
-│  GET /nav-curve          - 净值曲线                       │
-│  GET /attribution        - 收益归因                       │
-│  GET /summary            - 账户概览                       │
-│  GET /health             - 健康检查                       │
+│  GET /api/fund/positions   - 当前持仓查询                │
+│  GET /api/fund/nav-curve  - 净值曲线                    │
+│  GET /api/fund/attribution - 收益归因                    │
+│  GET /api/fund/summary    - 账户概览                    │
+│  GET /api/fund/daily-pnl  - 每日盈亏                    │
+│  GET /api/fund/profit-curve - 收益曲线                  │
+│  POST /api/fund/transfer  - 银行转账                    │
+│  GET /api/fund/transfers  - 转账记录                    │
+│  DELETE /api/fund/transfer/{id} - 删除转账              │
+│  GET /api/fund/health     - 健康检查                    │
 └──────────┬──────────────────────────┬───────────────────┘
            │                          │
     ┌──────▼──────┐          ┌───────▼───────┐
@@ -251,7 +256,8 @@ Header: X-User-Id: 1
     "cash": 500000.00,
     "market_value": 652300.00,
     "today_pnl": 3200.00,
-    "cumulative_return": 0.1523
+    "cumulative_return": 0.1523,
+    "net_deposit": 1000000.00
   }
 }
 ```
@@ -259,9 +265,101 @@ Header: X-User-Id: 1
 **计算逻辑**:
 
 ```
+净入金 = Σ(入金) - Σ(出金)
+现金 = 净入金 - 持仓市值
 总资产 = 现金 + Σ(OPEN持仓的 数量×当前价)
 今日盈亏 = 昨日总资产 × 当日收益率
 累计收益率 = (总资产 / 初始资金) - 1
+```
+
+### 5.5 每日盈亏
+
+```
+GET /api/fund/daily-pnl?month=2026-04
+Header: X-User-Id: 1
+
+响应: 返回当月每日盈亏和收益率
+```
+
+### 5.6 收益曲线（按月统计）
+
+```
+GET /api/fund/profit-curve?months=3
+Header: X-User-Id: 1
+
+响应: 返回近N个月的收益曲线、月度收益率和统计指标
+```
+
+### 5.7 银行转账
+
+```
+POST /api/fund/transfer
+Header: X-User-Id: 1
+Body: { "transfer_date": "2026-04-18", "direction": "DEPOSIT", "amount": 100000, "remark": "入金" }
+
+GET /api/fund/transfers?start_date=2026-04-01&end_date=2026-04-30
+Header: X-User-Id: 1
+
+DELETE /api/fund/transfer/{id}
+Header: X-User-Id: 1
+```
+GET /api/fund/summary
+Header: X-User-Id: 1
+
+响应:
+{
+  "code": 200,
+  "data": {
+    "total_assets": 1152300.00,
+    "cash": 500000.00,
+    "market_value": 652300.00,
+    "today_pnl": 3200.00,
+    "cumulative_return": 0.1523,
+    "net_deposit": 1000000.00
+  }
+}
+```
+
+**计算逻辑**:
+
+```
+净入金 = Σ(入金) - Σ(出金)
+现金 = 净入金 - 持仓市值
+总资产 = 现金 + Σ(OPEN持仓的 数量×当前价)
+今日盈亏 = 昨日总资产 × 当日收益率
+累计收益率 = (总资产 / 初始资金) - 1
+```
+
+### 5.5 每日盈亏
+
+```
+GET /api/fund/daily-pnl?month=2026-04
+Header: X-User-Id: 1
+
+响应: 返回当月每日盈亏和收益率
+```
+
+### 5.6 收益曲线（按月统计）
+
+```
+GET /api/fund/profit-curve?months=3
+Header: X-User-Id: 1
+
+响应: 返回近N个月的收益曲线和月度收益率
+```
+
+### 5.7 银行转账
+
+```
+POST /api/fund/transfer
+Header: X-User-Id: 1
+Body: { "transfer_date": "2026-04-18", "direction": "DEPOSIT", "amount": 100000, "remark": "入金" }
+
+GET /api/fund/transfers?start_date=2026-04-01&end_date=2026-04-30
+Header: X-User-Id: 1
+
+DELETE /api/fund/transfer/{id}
+Header: X-User-Id: 1
 ```
 
 ---

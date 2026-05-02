@@ -84,24 +84,24 @@ A股市场存在显著的板块轮动效应，资金在不同行业板块间流�
 
 ```
 任务调度中心 ──触发──▶ 数据采集服务
-                          │
-                    写入InfluxDB
-                          │
-                   发布 data.updated.sector_flow
-                          │
-                          ▼
-                    策略引擎服务 ──消费──▶ 计算三档信号
-                          │
-                    写入Redis缓存
-                          │
-                   发布 signal.generated
-                          │
-                          ▼
-                    信号通知服务 ──消费──▶ WebSocket推送前端
-                                            │
-                                      写入Redis缓存
-                                            │
-                                      资金管理服务 ──消费──▶ 更新持仓/净值
+                           │
+                     写入InfluxDB
+                           │
+                    发布 data.updated.sector_flow
+                           │
+                           ▼
+                     策略引擎服务 ──消费──▶ 计算三档信号
+                           │
+                     写入Redis缓存
+                           │
+                    发布 signals_generated
+                           │
+                           ▼
+                     信号通知服务 ──消费──▶ WebSocket推送前端
+                                             │
+                                       写入Redis缓存
+                                             │
+                                       外部推送通道(DingTalk/WeCom)
 ```
 
 ### 2.4 数据流向

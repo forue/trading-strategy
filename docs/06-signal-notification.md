@@ -159,14 +159,21 @@ def callback(ch, method, properties, body):
     if event == "signals_generated":
         signals = message["signals"]
         strategy_type = message["strategy_type"]
+        signal_date = message.get("signal_date", datetime.now().strftime("%Y-%m-%d"))
 
-        # 1. 通过WebSocket广播信号
+        # 1. 通过WebSocket广播信号（在主事件循环上执行）
         for signal in signals:
-            asyncio.run(ws_manager.broadcast_signal(signal, strategy_type))
+            asyncio.run_coroutine_threadsafe(
+                ws_manager.broadcast_signal(signal, strategy_type), _main_loop
+            )
 
-        # 2. 缓存信号到Redis
-        signal_date = message["signal_date"]
-        redis_client.setex(
+        # 2. 外部推送通道（钉钉、企业微信）
+        asyncio.run_coroutine_threadsafe(
+            notify_manager.push_signal(signals, strategy_type, signal_date), _main_loop
+        )
+
+        # 3. 缓存信号到Redis
+        redis_mgr.setex(
             f"signals:{strategy_type}:{signal_date}",
             86400 * 7,  # 7天过期
             json.dumps(signals)
@@ -190,7 +197,7 @@ mq_thread.start()
 ### 5.1 获取今日信号
 
 ```
-GET /api/signals/today?strategy_type=AGGRESSIVE
+GET /signals/today?strategy_type=AGGRESSIVE
 
 响应:
 {
@@ -212,7 +219,7 @@ GET /api/signals/today?strategy_type=AGGRESSIVE
 ### 5.2 获取历史信号
 
 ```
-GET /api/signals/history?strategy_type=MODERATE&start_date=2026-04-01&end_date=2026-04-18
+GET /signals/history?strategy_type=MODERATE&start_date=2026-04-01&end_date=2026-04-18
 
 逻辑:
   1. 遍历日期范围
@@ -223,12 +230,46 @@ GET /api/signals/history?strategy_type=MODERATE&start_date=2026-04-01&end_date=2
 ### 5.3 获取信号日历
 
 ```
-GET /api/signals/calendar?strategy_type=AGGRESSIVE&month=2026-04
+GET /signals/calendar?strategy_type=AGGRESSIVE&month=2026-04
 
 逻辑:
   1. 计算月份起止日期
   2. 调用历史信号查询
   3. 返回当月所有信号
+```
+
+### 5.4 推送通道配置
+
+```
+GET /signals/notify/config
+  - 获取推送通道配置（webhook URL会脱敏显示）
+
+PUT /signals/notify/config
+Content-Type: application/json
+  - 更新推送通道配置（钉钉/企业微信）
+  - 配置持久化到Redis (key: notify_channels_config)
+
+POST /signals/notify/test/{channel}?strategy_type=MODERATE
+  - 测试推送通道（channel: dingtalk/wecom）
+  - 发送测试消息验证配置是否正确
+```
+
+### 5.5 健康检查
+
+```
+GET /health
+
+响应:
+{
+  "status": "healthy",
+  "service": "signal-notification",
+  "ws_connections": 3,
+  "notify_channels": {
+    "dingtalk": true,
+    "wecom": false
+  },
+  "timestamp": "2026-04-18T15:00:21"
+}
 ```
 
 ---
