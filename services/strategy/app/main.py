@@ -1203,7 +1203,16 @@ async def replay_strategy_overlay(request_body: dict):
 
         result_data = _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_capital, return_full=True)
 
-        return {"code": 200, "data": result_data}
+        # 转换为前端期望的嵌套格式
+        nav_curve = result_data.pop("nav_curve", [])
+        daily_signals = result_data.pop("daily_signals", [])
+        response_data = {
+            "summary": result_data,
+            "nav_curve": nav_curve,
+            "daily_signals": daily_signals,
+        }
+
+        return {"code": 200, "data": response_data}
     except HTTPException:
         raise
     except Exception as e:
