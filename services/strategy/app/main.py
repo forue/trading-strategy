@@ -719,6 +719,85 @@ def _empty_backtest_result(strategy_type, initial_capital, return_full):
     return result
 
 
+@app.post("/strategy/factors/analyze")
+async def analyze_factors(request_body: dict):
+    """因子分析 - 计算单个板块的所有因子得分"""
+    try:
+        sector_code = request_body.get("sector_code", "")
+        strategy_type_str = request_body.get("strategy_type", "MODERATE")
+        date = request_body.get("date", datetime.now().strftime("%Y-%m-%d"))
+
+        if not sector_code:
+            raise HTTPException(status_code=400, detail="必须提供 sector_code")
+
+        try:
+            strategy_type = StrategyType(strategy_type_str)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"未知策略类型: {strategy_type_str}")
+
+        # 查询板块数据
+        daily_data = influx_query.query_daily_sectors(date, date)
+        if not daily_data or date not in daily_data:
+            raise HTTPException(status_code=404, detail=f"{date} 无数据")
+
+        sector_data = None
+        for s in daily_data[date]:
+            if s.get("sector_code") == sector_code:
+                sector_data = s
+                break
+
+        if not sector_data:
+            raise HTTPException(status_code=404, detail=f"板块 {sector_code} 无数据")
+
+        # 查询历史数据（用于技术指标计算）
+        start_date = (datetime.strptime(date, "%Y-%m-%d") - timedelta(days=60)).strftime("%Y-%m-%d")
+        history_data = influx_query.query_sector_history(sector_code, start_date, date)
+        if history_data:
+            sector_data["_history"] = history_data
+
+        # 计算所有因子
+        from .factors import FactorRegistry
+        from .combiner import FactorCombiner, DEFAULT_WEIGHTS
+
+        factor_results = FactorRegistry.calculate_all(sector_data, history_data)
+
+        # 获取策略权重
+        weights = DEFAULT_WEIGHTS.get(strategy_type.value, DEFAULT_WEIGHTS["MODERATE"])
+
+        # 加权合成
+        combiner = FactorCombiner()
+        composite_score, category_detail = combiner.combine_weighted(factor_results, weights)
+
+        # 构建响应
+        factors = []
+        for r in factor_results:
+            factors.append({
+                "name": r.name,
+                "category": r.category.value,
+                "raw_value": r.raw_value,
+                "score": r.score,
+                "weight": r.weight,
+                "confidence": r.confidence,
+                "detail": r.detail,
+            })
+
+        return success_response(data={
+            "sector_code": sector_code,
+            "sector_name": sector_data.get("sector_name", ""),
+            "date": date,
+            "strategy_type": strategy_type.value,
+            "composite_score": composite_score,
+            "factors": factors,
+            "category_scores": category_detail,
+            "strategy_weights": weights.model_dump(),
+        })
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"因子分析失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/backtest/history")
 async def get_backtest_history(strategy_type: StrategyType = None):
     """获取回测历史记录"""
