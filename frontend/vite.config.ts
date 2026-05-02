@@ -108,6 +108,10 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api\/scheduler/, ''),
       },
+      '/api/ai': {
+        target: 'http://localhost:8007',
+        changeOrigin: true,
+      },
       '/ws': {
         target: 'ws://localhost:8004',
         ws: true,

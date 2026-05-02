@@ -318,6 +318,11 @@
           </el-form>
         </div>
       </el-tab-pane>
+
+      <!-- AI 模型配置 -->
+      <el-tab-pane label="AI 配置" name="ai">
+        <AiSettings />
+      </el-tab-pane>
     </el-tabs>
   </div>
 </template>
@@ -328,6 +333,7 @@ import { ElMessage } from 'element-plus'
 import { settingsApi } from '@/api/settings'
 import { strategyApi } from '@/api/strategy'
 import { useSignalStore } from '@/stores/signal'
+import AiSettings from '@/components/AiSettings.vue'
 import type { NotifyConfig } from '@/api/settings'
 
 const signalStore = useSignalStore()

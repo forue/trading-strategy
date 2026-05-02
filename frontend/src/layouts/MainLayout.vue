@@ -54,6 +54,9 @@
           <el-badge :is-dot="signalStore.currentSignals.length > 0" class="signal-badge">
             <el-icon :size="20"><Bell /></el-icon>
           </el-badge>
+          <el-tooltip content="AI 投研助手" placement="bottom">
+            <el-button :icon="ChatDotRound" circle size="small" @click="toggleAiSidebar" />
+          </el-tooltip>
           <el-dropdown @command="handleCommand">
             <span class="user-info">
               <el-icon><User /></el-icon>
@@ -71,14 +74,30 @@
         <router-view />
       </div>
     </div>
+
+    <!-- AI 助手侧边栏 -->
+    <div class="ai-sidebar" :class="{ open: aiSidebarOpen }">
+      <div class="ai-sidebar-header">
+        <span>AI 投研助手</span>
+        <el-button :icon="Close" circle size="small" @click="aiSidebarOpen = false" />
+      </div>
+      <div class="ai-sidebar-content">
+        <ChatAssistant />
+      </div>
+    </div>
+
+    <!-- AI 侧边栏遮罩 -->
+    <div class="ai-sidebar-mask" :class="{ visible: aiSidebarOpen }" @click="aiSidebarOpen = false" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { ChatDotRound, Close } from '@element-plus/icons-vue'
 import { useUserStore } from '@/stores/user'
 import { useSignalStore } from '@/stores/signal'
+import ChatAssistant from '@/components/ChatAssistant.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -87,6 +106,12 @@ const signalStore = useSignalStore()
 
 const currentRoute = computed(() => route.path)
 const currentPageTitle = computed(() => (route.meta.title as string) || '仪表盘')
+
+const aiSidebarOpen = ref(false)
+
+function toggleAiSidebar() {
+  aiSidebarOpen.value = !aiSidebarOpen.value
+}
 
 function handleCommand(command: string) {
   if (command === 'logout') {
@@ -98,7 +123,6 @@ function handleCommand(command: string) {
 
 onMounted(() => {
   signalStore.connectWebSocket()
-  // 请求浏览器通知权限
   if ('Notification' in window && Notification.permission === 'default') {
     Notification.requestPermission()
   }
@@ -114,6 +138,7 @@ onUnmounted(() => {
   display: flex;
   height: 100vh;
   overflow: hidden;
+  position: relative;
 }
 
 .sidebar {
@@ -145,11 +170,77 @@ onUnmounted(() => {
   flex-shrink: 0;
 }
 
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
 .page-content {
   flex: 1;
   padding: 16px;
   overflow-y: auto;
   background: #f5f7fa;
+}
+
+// AI 助手侧边栏
+.ai-sidebar {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: 420px;
+  height: 100vh;
+  background: #fff;
+  box-shadow: -4px 0 20px rgba(0, 0, 0, 0.08);
+  z-index: 1001;
+  display: flex;
+  flex-direction: column;
+  transform: translateX(100%);
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  will-change: transform;
+
+  &.open {
+    transform: translateX(0);
+  }
+
+  .ai-sidebar-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    border-bottom: 1px solid #e4e7ed;
+    font-weight: 600;
+    font-size: 15px;
+    background: #f5f7fa;
+  }
+
+  .ai-sidebar-content {
+    flex: 1;
+    overflow: hidden;
+
+    .chat-assistant {
+      height: 100%;
+      border: none;
+      border-radius: 0;
+    }
+  }
+}
+
+.ai-sidebar-mask {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0, 0, 0, 0);
+  z-index: 1000;
+  pointer-events: none;
+  transition: background 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+
+  &.visible {
+    background: rgba(0, 0, 0, 0.35);
+    pointer-events: auto;
+  }
 }
 
 @media (max-width: 768px) {
@@ -158,6 +249,11 @@ onUnmounted(() => {
     min-width: 60px;
     .logo span { display: none; }
     .el-menu-item span { display: none; }
+  }
+
+  .ai-sidebar {
+    width: 100%;
+    right: -100%;
   }
 }
 

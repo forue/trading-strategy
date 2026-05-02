@@ -74,6 +74,16 @@
       <v-chart :option="calendarOption" style="height: 300px" autoresize @click="handleCalendarClick" />
     </div>
 
+    <!-- AI 分析面板 -->
+    <el-row :gutter="20" style="margin-top: 20px">
+      <el-col :xs="24" :sm="24" :md="14" :lg="14">
+        <AiAnalysisPanel :strategy-type="currentStrategy" />
+      </el-col>
+      <el-col :xs="24" :sm="24" :md="10" :lg="10">
+        <RiskAlertPanel ref="riskPanel" />
+      </el-col>
+    </el-row>
+
     <!-- 信号详情对话框 -->
     <el-dialog v-model="signalDialogVisible" :title="`${selectedDate} 信号详情`" width="600px">
       <el-table :data="selectedDateSignals" max-height="400">
@@ -112,6 +122,8 @@ import dayjs from 'dayjs'
 import { signalApi } from '@/api/signal'
 import { fundApi } from '@/api/fund'
 import { settingsApi } from '@/api/settings'
+import AiAnalysisPanel from '@/components/AiAnalysisPanel.vue'
+import RiskAlertPanel from '@/components/RiskAlertPanel.vue'
 import type { TradeSignal } from '@/api/signal'
 
 use([HeatmapChart, ScatterChart, GridComponent, TooltipComponent, VisualMapComponent, CalendarComponent, LegendComponent, CanvasRenderer])
