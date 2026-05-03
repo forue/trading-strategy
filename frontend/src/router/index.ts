@@ -50,6 +50,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '数据回放', icon: 'VideoPlay' },
       },
       {
+        path: 'factor-analysis',
+        name: 'FactorAnalysis',
+        component: () => import('@/views/FactorAnalysis.vue'),
+        meta: { title: '因子分析', icon: 'Histogram' },
+      },
+      {
         path: 'settings',
         name: 'Settings',
         component: () => import('@/views/Settings.vue'),

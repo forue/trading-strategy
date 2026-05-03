@@ -13,6 +13,7 @@ A-share sector rotation trading system with 7 microservices:
 | fund-management | Spring Boot + JPA | 8005 | `services/fund-management/` |
 | scheduler | Python + FastAPI + APScheduler | 8006 | `services/scheduler/app/main.py` |
 | ai-decision | Python + FastAPI + LLM | 8007 | `services/ai-decision/app/main.py` |
+| mcp-agent | Python + FastAPI + MCP | 8008 | `services/mcp-agent/app/main.py` |
 
 Frontend: Vue 3 + TypeScript + ECharts + Element Plus at `frontend/`.
 

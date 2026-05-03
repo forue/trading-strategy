@@ -33,19 +33,44 @@ export interface BacktestHistoryItem {
 }
 
 export const strategyApi = {
-  getConfigs(): Promise<StrategyConfig[]> {
-    return request.get('/strategy/configs')
+  checkTradeDay(date: string): Promise<{ date: string; is_trade_day: boolean }> {
+    return request.get('/strategy/trade-day/check', { params: { date } })
   },
 
-  updateConfig(id: number, params: Partial<StrategyConfig>): Promise<StrategyConfig> {
-    return request.put(`/strategy/configs/${id}`, params)
+  calculateSignals(strategyType: string, signalDate?: string): Promise<any[]> {
+    return request.post('/strategy/calculate', null, {
+      params: { strategy_type: strategyType, signal_date: signalDate },
+    })
   },
 
-  calculateSignals(strategyType: string): Promise<any> {
-    return request.post('/strategy/calculate', null, { params: { strategy_type: strategyType } })
+  getDataAvailability(): Promise<{ has_data: boolean; min_date: string; max_date: string }> {
+    return request.get('/strategy/data/availability')
   },
 
-  runBacktest(params: {
+  collectHistory(days: number): Promise<any> {
+    return request.post('/strategy/data/collect/history', null, { params: { days }, timeout: 180000 })
+  },
+
+  getReplayDates(startDate?: string, endDate?: string): Promise<string[]> {
+    const params: any = {}
+    if (startDate) params.start_date = startDate
+    if (endDate) params.end_date = endDate
+    return request.get('/strategy/data/replay/dates', { params })
+  },
+
+  getReplaySectors(): Promise<{ sector_code: string; sector_name: string }[]> {
+    return request.get('/strategy/data/replay/sectors')
+  },
+
+  analyzeFactors(data: {
+    sector_code: string
+    strategy_type?: string
+    date?: string
+  }): Promise<any> {
+    return request.post('/strategy/factors/analyze', data)
+  },
+
+  runBacktest(data: {
     strategyType: string
     startDate: string
     endDate: string
@@ -53,13 +78,13 @@ export const strategyApi = {
     strategyParams?: Record<string, any>
   }): Promise<any> {
     const body: any = {
-      strategy_type: params.strategyType,
-      start_date: params.startDate,
-      end_date: params.endDate,
-      initial_capital: params.initialCapital,
+      strategy_type: data.strategyType,
+      start_date: data.startDate,
+      end_date: data.endDate,
+      initial_capital: data.initialCapital,
     }
-    if (params.strategyParams) {
-      body.params = params.strategyParams
+    if (data.strategyParams) {
+      body.params = data.strategyParams
     }
     return request.post('/strategy/backtest', body)
   },
@@ -74,15 +99,11 @@ export const strategyApi = {
     return request.get(`/strategy/backtest/${btId}`)
   },
 
-  getDataAvailability(): Promise<{ has_data: boolean; min_date: string; max_date: string }> {
-    return request.get('/strategy/data/availability')
+  getConfigs(): Promise<StrategyConfig[]> {
+    return request.get('/strategy/configs')
   },
 
-  checkTradeDay(date: string, strategyType: string): Promise<{ is_trade_day: boolean }> {
-    return request.get('/strategy/trade-day/check', { params: { date, strategy_type: strategyType } })
-  },
-
-  collectHistory(days: number): Promise<any> {
-    return request.post('/data/collect/history', null, { params: { days }, timeout: 180000 })
+  updateConfig(configId: number, config: Partial<StrategyConfig>): Promise<any> {
+    return request.put(`/strategy/configs/${configId}`, config)
   },
 }

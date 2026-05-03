@@ -7,6 +7,10 @@ from typing import Optional
 
 from .models import StrategyType, StrategyParams, TradeSignal, SignalDirection
 
+# 导入因子引擎
+from .factors import FactorRegistry, FactorResult, FactorCategory
+from .combiner import FactorCombiner, StrategyWeights, DEFAULT_WEIGHTS
+
 
 # 同花顺行业板块代码（动态获取，此处为备用映射）
 # 数据源统一使用同花顺板块代码，格式: THS{code} 或 THS_{板块名}
@@ -128,7 +132,9 @@ class RotationScoringModel:
         # 计算综合评分
         scored_sectors = []
         for item in sector_data:
-            score, valuation_score = self._calculate_composite_score(item, strategy_type, params)
+            # 获取该板块的历史数据（如果有）
+            history = item.get("_history", None)
+            score, valuation_score = self._calculate_composite_score(item, strategy_type, params, history)
             main_flow = item.get("main_net_inflow", 0)
             display_flow = main_flow if main_flow != 0 else self._simulate_flow_from_kline(item)
             scored_sectors.append({
@@ -164,14 +170,44 @@ class RotationScoringModel:
         logger.info(f"策略 {strategy_type.value} 生成 {len(signals)} 条信号")
         return signals
 
-    def _calculate_composite_score(self, item: dict, strategy_type: StrategyType, params: StrategyParams) -> tuple[float, float]:
-        """计算综合评分 - 简化版，历史数据只靠涨跌幅
-        
-        评分公式（简化）:
-        - 激进: 动量90% + 资金10%
-        - 稳健: 动量60% + 资金20% + 估值20%
-        - 保守: 动量30% + 估值50% + 资金20%
+    def _calculate_composite_score(self, item: dict, strategy_type: StrategyType, params: StrategyParams, history: list = None) -> tuple[float, float]:
+        """计算综合评分 - 使用因子引擎
+
+        评分流程:
+        1. 计算所有已注册因子
+        2. 按策略类型选择权重
+        3. 加权合成综合评分
         """
+        try:
+            # 计算所有因子
+            factor_results = FactorRegistry.calculate_all(item, history)
+
+            if not factor_results:
+                # 回退到简化计算
+                return self._calculate_composite_score_fallback(item, strategy_type, params)
+
+            # 获取策略权重
+            weights = DEFAULT_WEIGHTS.get(strategy_type.value, DEFAULT_WEIGHTS["MODERATE"])
+
+            # 加权合成
+            combiner = FactorCombiner()
+            composite_score, detail = combiner.combine_weighted(factor_results, weights)
+
+            # 估值因子单独提取（兼容保守策略）
+            valuation_score = 5.0
+            for r in factor_results:
+                if r.category == FactorCategory.VALUATION:
+                    valuation_score = r.score
+                    break
+
+            return composite_score, valuation_score
+
+        except Exception as e:
+            logger.warning(f"因子引擎计算失败，回退到简化计算: {e}")
+            return self._calculate_composite_score_fallback(item, strategy_type, params)
+
+    def _calculate_composite_score_fallback(self, item: dict, strategy_type: StrategyType, params: StrategyParams) -> tuple[float, float]:
+        """简化评分（因子引擎不可用时的回退方案）"""
         main_flow = item.get("main_net_inflow", 0)
         north_flow = item.get("north_net_inflow", 0)
         change_pct = item.get("index_change_pct", 0)

@@ -1,6 +1,6 @@
 # A股轮动策略交易系统
 
-基于板块资金流向的A股三档轮动策略交易应用，支持激进/稳健/保守三种策略，包含实时信号推送、资金管理和Web可视化。
+基于板块资金流向的A股三档轮动策略交易应用，支持激进/稳健/保守三种策略，包含实时信号推送、资金管理、AI辅助决策和Web可视化。
 
 ---
 
@@ -14,18 +14,18 @@
                              │ HTTPS / WebSocket
 ┌────────────────────────────▼────────────────────────────────────┐
 │                     Nginx 反向代理 (负载均衡)                      │
-└──┬──────┬──────┬──────┬──────┬──────────────────────────────────┘
-   │      │      │      │      │
-┌──▼──┐┌──▼──┐┌──▼──┐┌──▼──┐┌──▼──┐
-│认证  ││策略  ││数据  ││信号  ││资金  │  微服务集群
-│中心  ││引擎  ││采集  ││通知  ││管理  │
-│8001  ││8002  ││8003  ││8004  ││8005  │
-└──┬──┘└──┬──┘└──┬──┘└──┬──┘└──┬──┘
-   │       │       │       │       │
-┌──▼───────▼───────▼───────▼───────▼──┐
-│  PostgreSQL  │  InfluxDB  │  Redis  │  数据存储层
-│  (关系数据)   │  (时序数据)  │  (缓存)  │
-└─────────────────────────────────────┘
+└──┬──────┬──────┬──────┬──────┬──────┬──────┬────────────────────┘
+   │      │      │      │      │      │      │
+┌──▼──┐┌──▼──┐┌──▼──┐┌──▼──┐┌──▼──┐┌──▼──┐┌──▼──┐
+│认证  ││策略  ││数据  ││信号  ││资金  ││调度  ││ AI  │  微服务集群
+│中心  ││引擎  ││采集  ││通知  ││管理  ││中心  ││决策  │
+│8001  ││8002  ││8003  ││8004  ││8005  ││8006  ││8007  │
+└──┬──┘└──┬──┘└──┬──┘└──┬──┘└──┬──┘└──┬──┘└──┬──┘
+   │       │       │       │       │       │       │
+┌──▼───────▼───────▼───────▼───────▼───────▼───────▼──┐
+│  PostgreSQL  │  InfluxDB  │  Redis  │  RabbitMQ      │  数据存储层
+│  (关系数据)   │  (时序数据)  │  (缓存)  │  (消息队列)   │
+└──────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -36,11 +36,13 @@
 |------|------|
 | **前端** | Vue3 + TypeScript + ECharts + Element Plus |
 | **认证中心** | Spring Boot 3 + Spring Security + JWT |
-| **策略引擎** | Python + FastAPI + Pandas + 自定义评分模型 |
+| **策略引擎** | Python + FastAPI + Pandas + 多因子评分模型 |
 | **数据采集** | Python + FastAPI + AkShare |
 | **信号通知** | Python + FastAPI + WebSocket + RabbitMQ |
 | **资金管理** | Spring Boot 3 + JPA + PostgreSQL |
 | **任务调度** | Python + FastAPI + APScheduler |
+| **AI 决策** | Python + FastAPI + OpenAI/Ollama + 因子分析 |
+| **MCP Agent** | Python + FastAPI + MCP协议 |
 | **数据库** | PostgreSQL 15 + InfluxDB 2.7 + Redis 7 |
 | **消息队列** | RabbitMQ 3 |
 | **部署** | Docker Compose + Nginx |
@@ -196,6 +198,8 @@ curl http://localhost:8006/health
 | 信号通知 API | http://localhost:8004 | 实时信号推送 |
 | 资金管理 API | http://localhost:8005 | 持仓/收益管理 |
 | 任务调度 API | http://localhost:8006 | 定时任务管理 |
+| AI 决策服务 API | http://localhost:8007 | AI分析/风险预警 |
+| MCP 金融 Agent | http://localhost:8008 | MCP协议/Agent对话 |
 | InfluxDB 管理面板 | http://localhost:8086 | 时序数据库管理 |
 | RabbitMQ 管理面板 | http://localhost:15672 | 消息队列管理 |
 
@@ -367,31 +371,50 @@ GET  /api/auth/user/info   - 获取用户信息
 POST /api/auth/logout      - 退出登录
 ```
 
-### 策略
+### 策略引擎
 
 ```
-POST /api/strategy/calculate?strategy_type=AGGRESSIVE  - 触发策略计算
-GET  /api/strategy/configs                              - 获取策略配置
-PUT  /api/strategy/configs/{id}                         - 更新策略配置
-GET  /api/strategy/signals/today?strategy_type=MODERATE - 获取今日信号
-POST /api/strategy/backtest                             - 运行回测
+POST /api/strategy/calculate?strategy_type=AGGRESSIVE    - 触发策略计算
+GET  /api/strategy/configs                                - 获取策略配置
+PUT  /api/strategy/configs/{id}                           - 更新策略配置
+GET  /api/strategy/signals/today?strategy_type=MODERATE   - 获取今日信号
+GET  /api/strategy/signals/calendar?strategy_type=MODERATE&month=2026-05 - 信号日历
+POST /api/strategy/backtest                               - 运行回测
+GET  /api/strategy/backtest/history                       - 回测历史
+GET  /api/strategy/backtest/{id}                          - 回测详情
+GET  /api/strategy/trade-day/check?date=2026-05-01        - 检查交易日
+GET  /api/strategy/data/availability                      - 数据可用范围
+```
+
+### 因子分析
+
+```
+POST /api/strategy/factors/analyze   - 单板块因子分析
+POST /api/strategy/factors/batch     - 批量因子分析（排名）
+GET  /api/strategy/factors/config    - 获取因子配置
 ```
 
 ### 数据采集
 
 ```
-POST /api/data/collect/sector-flow   - 采集板块资金流
+POST /api/data/collect/sector-flow     - 采集板块资金流
 POST /api/data/collect/history?days=30 - 采集历史数据
-GET  /api/data/query/all-sectors     - 查询所有板块数据
+POST /api/data/collect/north-bound     - 采集北向资金
+GET  /api/data/query/all-sectors       - 查询所有板块数据
+GET  /api/data/trade-dates             - 交易日历
+GET  /api/data/sectors                 - 板块列表
 ```
 
 ### 信号通知
 
 ```
 GET  /api/signals/today?strategy_type=AGGRESSIVE  - 今日信号
-GET  /api/signals/history                          - 历史信号
-GET  /api/signals/calendar?month=2026-04           - 信号日历
-WS   /ws/signals?token=xxx                         - WebSocket推送
+GET  /api/signals/history?strategy_type=MODERATE&start_date=2026-05-01&end_date=2026-05-03 - 历史信号
+GET  /api/signals/calendar?strategy_type=MODERATE&month=2026-05 - 信号日历
+GET  /api/signals/notify/config         - 推送通道配置
+PUT  /api/signals/notify/config         - 更新推送通道配置
+POST /api/signals/notify/test/{channel} - 测试推送通道
+WS   /ws/signals?token=xxx              - WebSocket推送
 ```
 
 ### 资金管理
@@ -401,6 +424,37 @@ GET /api/fund/positions              - 当前持仓
 GET /api/fund/nav-curve              - 净值曲线
 GET /api/fund/attribution            - 收益归因
 GET /api/fund/summary                - 账户概览
+```
+
+### AI 决策服务
+
+```
+POST /api/ai/analyze-signal          - 信号解读（自动调用因子分析）
+POST /api/ai/risk-check              - 风险检查
+POST /api/ai/daily-review            - 生成每日复盘报告
+POST /api/ai/chat                    - AI 对话（多轮）
+GET  /api/ai/config                  - 获取 AI 配置
+PUT  /api/ai/config                  - 更新 AI 配置
+GET  /api/ai/models?base_url=...     - 获取 Ollama 模型列表
+GET  /api/ai/providers               - 获取提供商列表
+POST /api/ai/providers               - 保存提供商配置
+GET  /api/ai/providers/{id}          - 获取单个提供商
+DELETE /api/ai/providers/{id}        - 删除提供商
+POST /api/ai/providers/{id}/test     - 测试提供商连接
+GET  /api/ai/conversations           - 对话列表
+GET  /api/ai/conversations/{id}      - 对话详情
+DELETE /api/ai/conversations/{id}    - 删除对话
+GET  /api/ai/conversations/{id}/export?fmt=markdown - 导出对话
+```
+
+### MCP 金融 Agent
+
+```
+POST /api/mcp/chat                   - Agent 对话（自动路由）
+GET  /api/mcp/tools                  - 列出 MCP 工具
+GET  /api/mcp/agents                 - 列出 Agent
+POST /api/mcp/call                   - 直接调用 MCP 工具
+GET  /mcp/sse                        - MCP SSE 连接端点
 ```
 
 ---
@@ -422,10 +476,21 @@ GET /api/fund/summary                - 账户概览
 ├── services/
 │   ├── auth/                   # 认证中心 (Spring Boot)
 │   ├── strategy/               # 策略引擎 (Python)
+│   │   └── app/
+│   │       ├── factors/        # 因子引擎 (RSI/MACD/布林带/KDJ等)
+│   │       └── combiner/       # 因子合成引擎
 │   ├── data-collector/         # 数据采集 (Python)
 │   ├── signal-notification/    # 信号通知 (Python)
 │   ├── fund-management/        # 资金管理 (Spring Boot)
-│   └── scheduler/              # 任务调度 (Python)
+│   ├── scheduler/              # 任务调度 (Python)
+│   ├── ai-decision/            # AI 决策服务 (Python)
+│   │   └── app/
+│   │       └── providers/      # 模型提供商管理
+│   ├── mcp-agent/              # MCP 金融 Agent (Python)
+│   │   └── app/
+│   │       ├── tools/          # MCP 工具
+│   │       └── agents/         # 金融 Agent
+│   └── shared/                 # 共享库
 ├── nginx/
 │   └── default.conf            # Nginx配置
 ├── scripts/
@@ -433,14 +498,18 @@ GET /api/fund/summary                - 账户概览
 │   ├── stop.ps1                # 停止脚本
 │   └── init-db.sql             # 数据库初始化
 ├── docs/                       # 设计文档
-│   ├── 01-overview.md          # 总览设计
-│   ├── 02-frontend.md          # 前端设计
-│   ├── 03-auth-service.md      # 认证中心设计
-│   ├── 04-data-collector.md    # 数据采集设计
-│   ├── 05-strategy-engine.md   # 策略引擎设计
-│   ├── 06-signal-notification.md # 信号通知设计
-│   ├── 07-fund-management.md   # 资金管理设计
-│   └── 08-scheduler.md         # 调度中心设计
+│   ├── 01-overview.md
+│   ├── 02-frontend.md
+│   ├── 03-auth-service.md
+│   ├── 04-data-collector.md
+│   ├── 05-strategy-engine.md
+│   ├── 06-signal-notification.md
+│   ├── 07-fund-management.md
+│   ├── 08-scheduler.md
+│   ├── 09-ai-decision.md
+│   ├── 10-factor-engine.md
+│   ├── 11-factor-algorithms.md
+│   └── 12-mcp-agent.md
 ├── docker-compose.yml
 ├── .env
 └── README.md

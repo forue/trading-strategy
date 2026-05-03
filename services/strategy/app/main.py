@@ -7,10 +7,13 @@ import numpy as np
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 from loguru import logger
 
 # 添加共享库路径
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from shared import success_response
 
 # 常量定义
 TRADING_DAYS_PER_YEAR = 252  # 年化交易日天数
@@ -19,6 +22,7 @@ from .config import settings
 from .models import (
     StrategyType, StrategyParams, StrategyConfig,
     TradeSignal, BacktestRequest, BacktestResult,
+    FactorAnalyzeRequest,
 )
 from .scoring import scoring_model
 from .influx_query import influx_query
@@ -719,13 +723,13 @@ def _empty_backtest_result(strategy_type, initial_capital, return_full):
     return result
 
 
-@app.post("/strategy/factors/analyze")
-async def analyze_factors(request_body: dict):
+@app.post("/factors/analyze")
+async def analyze_factors(request: FactorAnalyzeRequest):
     """因子分析 - 计算单个板块的所有因子得分"""
     try:
-        sector_code = request_body.get("sector_code", "")
-        strategy_type_str = request_body.get("strategy_type", "MODERATE")
-        date = request_body.get("date", datetime.now().strftime("%Y-%m-%d"))
+        sector_code = request.sector_code
+        strategy_type_str = request.strategy_type
+        date = request.date
 
         if not sector_code:
             raise HTTPException(status_code=400, detail="必须提供 sector_code")
@@ -735,13 +739,26 @@ async def analyze_factors(request_body: dict):
         except ValueError:
             raise HTTPException(status_code=400, detail=f"未知策略类型: {strategy_type_str}")
 
-        # 查询板块数据
-        daily_data = influx_query.query_daily_sectors(date, date)
-        if not daily_data or date not in daily_data:
-            raise HTTPException(status_code=404, detail=f"{date} 无数据")
+        # 查询板块数据（自动回退到最近有数据的日期）
+        daily_data = None
+        actual_date = date
+        if date:
+            daily_data = influx_query.query_daily_sectors(date, date)
+            if not daily_data or date not in daily_data:
+                daily_data = None
+
+        if not daily_data:
+            # 自动查找最近有数据的日期
+            min_range, max_range = influx_query.get_available_date_range()
+            if max_range:
+                actual_date = max_range
+                daily_data = influx_query.query_daily_sectors(actual_date, actual_date)
+
+        if not daily_data or actual_date not in daily_data:
+            raise HTTPException(status_code=404, detail="无可用数据，请先采集历史数据")
 
         sector_data = None
-        for s in daily_data[date]:
+        for s in daily_data[actual_date]:
             if s.get("sector_code") == sector_code:
                 sector_data = s
                 break
@@ -750,8 +767,8 @@ async def analyze_factors(request_body: dict):
             raise HTTPException(status_code=404, detail=f"板块 {sector_code} 无数据")
 
         # 查询历史数据（用于技术指标计算）
-        start_date = (datetime.strptime(date, "%Y-%m-%d") - timedelta(days=60)).strftime("%Y-%m-%d")
-        history_data = influx_query.query_sector_history(sector_code, start_date, date)
+        start_date = (datetime.strptime(actual_date, "%Y-%m-%d") - timedelta(days=60)).strftime("%Y-%m-%d")
+        history_data = influx_query.query_sector_history(sector_code, start_date, actual_date)
         if history_data:
             sector_data["_history"] = history_data
 
@@ -784,7 +801,7 @@ async def analyze_factors(request_body: dict):
         return success_response(data={
             "sector_code": sector_code,
             "sector_name": sector_data.get("sector_name", ""),
-            "date": date,
+            "date": actual_date,
             "strategy_type": strategy_type.value,
             "composite_score": composite_score,
             "factors": factors,
@@ -795,6 +812,91 @@ async def analyze_factors(request_body: dict):
         raise
     except Exception as e:
         logger.error(f"因子分析失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class FactorBatchRequest(BaseModel):
+    """批量因子分析请求"""
+    date: str = ""
+    strategy_type: str = "MODERATE"
+    sector_codes: list[str] = []
+
+
+@app.post("/factors/batch")
+async def analyze_factors_batch(request_body: FactorBatchRequest):
+    """批量因子分析 - 计算多个板块的因子得分并排名"""
+    try:
+        date = request_body.date
+        strategy_type = StrategyType(request_body.strategy_type)
+
+        # 查询数据（自动回退到最近有数据的日期）
+        daily_data = None
+        actual_date = date
+        if date:
+            daily_data = influx_query.query_daily_sectors(date, date)
+            if not daily_data or date not in daily_data:
+                daily_data = None
+
+        if not daily_data:
+            min_range, max_range = influx_query.get_available_date_range()
+            if max_range:
+                actual_date = max_range
+                daily_data = influx_query.query_daily_sectors(actual_date, actual_date)
+
+        if not daily_data or actual_date not in daily_data:
+            raise HTTPException(status_code=404, detail="无可用数据")
+
+        from .factors import FactorRegistry
+        from .combiner import FactorCombiner, DEFAULT_WEIGHTS
+
+        weights = DEFAULT_WEIGHTS.get(strategy_type.value, DEFAULT_WEIGHTS["MODERATE"])
+        combiner = FactorCombiner()
+
+        # 筛选板块
+        sectors = daily_data[actual_date]
+        if request_body.sector_codes:
+            sectors = [s for s in sectors if s.get("sector_code") in request_body.sector_codes]
+
+        results = []
+        for sector in sectors:
+            try:
+                factor_results = FactorRegistry.calculate_all(sector, None)
+                score, _ = combiner.combine_weighted(factor_results, weights)
+                results.append({
+                    "sector_code": sector.get("sector_code", ""),
+                    "sector_name": sector.get("sector_name", ""),
+                    "composite_score": round(score, 2),
+                })
+            except Exception:
+                continue
+
+        results.sort(key=lambda x: x["composite_score"], reverse=True)
+        for i, r in enumerate(results):
+            r["rank"] = i + 1
+
+        return success_response(data={"date": actual_date, "strategy_type": strategy_type.value, "rankings": results})
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"批量因子分析失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/factors/config")
+async def get_factor_config():
+    """获取因子配置"""
+    try:
+        from .factors import FactorRegistry
+        from .combiner import DEFAULT_WEIGHTS
+        return success_response(data={
+            "weights": {k: v.model_dump() for k, v in DEFAULT_WEIGHTS.items()},
+            "factors": [
+                {"name": f.name, "category": f.category.value, "default_weight": f.default_weight}
+                for f in FactorRegistry.get_all().values()
+            ],
+        })
+    except Exception as e:
+        logger.error(f"获取因子配置失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

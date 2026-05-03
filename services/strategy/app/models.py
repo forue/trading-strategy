@@ -89,3 +89,10 @@ class BacktestResult(BaseModel):
     trade_count_actual: int = 0
     nav_curve: list = []
     created_at: Optional[str] = None
+
+
+class FactorAnalyzeRequest(BaseModel):
+    """因子分析请求"""
+    sector_code: str
+    strategy_type: str = "MODERATE"
+    date: Optional[str] = None

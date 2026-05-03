@@ -37,6 +37,10 @@
           <el-icon><VideoPlay /></el-icon>
           <span>数据回放</span>
         </el-menu-item>
+        <el-menu-item index="/factor-analysis">
+          <el-icon><Histogram /></el-icon>
+          <span>因子分析</span>
+        </el-menu-item>
         <el-menu-item index="/settings">
           <el-icon><Tools /></el-icon>
           <span>系统设置</span>
