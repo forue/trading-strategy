@@ -2,7 +2,7 @@
 
 ## Architecture
 
-A-share sector rotation trading system with 7 microservices:
+A-share sector rotation trading system with 8 microservices:
 
 | Service | Tech | Port | Entry |
 |---------|------|------|-------|
@@ -12,7 +12,7 @@ A-share sector rotation trading system with 7 microservices:
 | signal-notification | Python + FastAPI + WebSocket | 8004 | `services/signal-notification/app/main.py` |
 | fund-management | Spring Boot + JPA | 8005 | `services/fund-management/` |
 | scheduler | Python + FastAPI + APScheduler | 8006 | `services/scheduler/app/main.py` |
-| ai-decision | Python + FastAPI + LLM | 8007 | `services/ai-decision/app/main.py` |
+| ai-decision | Python + FastAPI + LLM + ReAct Agent | 8007 | `services/ai-decision/app/main.py` |
 | mcp-agent | Python + FastAPI + MCP | 8008 | `services/mcp-agent/app/main.py` |
 
 Frontend: Vue 3 + TypeScript + ECharts + Element Plus at `frontend/`.
@@ -80,6 +80,19 @@ pytest tests/
 - **Logs**: All Python services use `loguru`, configured via `LOG_LEVEL` env var.
 - **RabbitMQ**: Exchange is `topic` type named `rotation`. Python services share a singleton `RabbitMQManager`.
 
+## AI Decision Service
+
+Key files in `services/ai-decision/app/`:
+- `agent.py` — ReAct Agent with tool calling loop (max 5 iterations, 10 tool calls, 120s timeout)
+- `tools.py` — MCPToolExecutor with 7 financial tools, auto-fallback for non-trading days
+- `model_adapter.py` — LLM adapter (OpenAI/Ollama), Ollama capability probing, `<think>` tag parsing
+- `chat_manager.py` — Conversation persistence with thinking field
+- `provider_manager.py` — Dynamic provider CRUD
+
+**Ollama models**: System auto-probes native `tools`/`think` support at first request. Models that don't support native APIs get text-based parsing (XML `<think>` tags, function call patterns).
+
+**Streaming**: SSE endpoint `/api/ai/chat/stream` yields `thinking`, `content`, `tool_call`, `tool_result`, `done` events.
+
 ## Common Pitfalls
 
 - `.gitignore` has `**/config.py` rule — ensure service `config.py` files are tracked (rule was relaxed to only ignore `config.py.example`).
@@ -87,3 +100,5 @@ pytest tests/
 - `python:3.11-slim` doesn't include `curl` — Dockerfiles install it for HEALTHCHECK.
 - Local dev requires different host values than Docker (e.g., `localhost` vs `redis`). See README env table.
 - Java services (auth, fund-management) have their own build context (`./services/auth`, `./services/fund-management`), not `./services`.
+- InfluxDB queries require RFC3339 time format (`2026-04-30T00:00:00Z`), not `YYYY-MM-DD`.
+- DeepSeek API requires `reasoning_content` to be passed back in assistant messages after tool calls.
