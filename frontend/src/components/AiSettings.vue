@@ -99,8 +99,10 @@ import { ref, reactive, onMounted } from 'vue'
 import { Delete } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { aiApi } from '@/api/ai'
+import { useAiStore } from '@/stores/ai'
 import type { ProviderConfig, ModelInfo } from '@/api/ai'
 
+const aiStore = useAiStore()
 const providers = ref<ProviderConfig[]>([])
 const dialogVisible = ref(false)
 const isEdit = ref(false)
@@ -174,6 +176,7 @@ async function saveProviderForm() {
     ElMessage.success('提供商已保存')
     dialogVisible.value = false
     await loadProviders()
+    await aiStore.loadProviders()  // 同步到全局 store
   } catch (e: any) {
     ElMessage.error('保存失败: ' + (e?.message || '未知错误'))
   } finally {
@@ -187,6 +190,7 @@ async function deleteProvider(provider: ProviderConfig) {
     await aiApi.deleteProvider(provider.id)
     ElMessage.success('已删除')
     await loadProviders()
+    await aiStore.loadProviders()  // 同步到全局 store
   } catch {}
 }
 
