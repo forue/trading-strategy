@@ -4,9 +4,22 @@
 """
 import json
 import httpx
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from loguru import logger
+
+
+def _get_latest_trading_day() -> str:
+    """获取最近交易日（周一到周五），非交易日自动回退"""
+    today = datetime.now()
+    # 周六=5, 周日=6
+    if today.weekday() == 5:  # 周六
+        target = today - timedelta(days=1)
+    elif today.weekday() == 6:  # 周日
+        target = today - timedelta(days=2)
+    else:
+        target = today
+    return target.strftime("%Y-%m-%d")
 
 
 # 工具定义（OpenAI function calling 格式）
@@ -151,7 +164,7 @@ class MCPToolExecutor:
             return {"error": str(e)}
 
     async def _get_market_overview(self, args: dict) -> dict:
-        date = args.get("date") or datetime.now().strftime("%Y-%m-%d")
+        date = args.get("date") or _get_latest_trading_day()
         try:
             resp = await self._client.get(f"{self.data_collector_url}/query/all-sectors", params={"start_date": date, "end_date": date})
             data = resp.json()
@@ -175,7 +188,7 @@ class MCPToolExecutor:
             return {"error": str(e)}
 
     async def _get_sector_ranking(self, args: dict) -> dict:
-        date = args.get("date") or datetime.now().strftime("%Y-%m-%d")
+        date = args.get("date") or _get_latest_trading_day()
         metric = args.get("metric", "change")
         limit = args.get("limit", 10)
         try:
@@ -206,7 +219,7 @@ class MCPToolExecutor:
 
     async def _analyze_sector(self, args: dict) -> dict:
         sector_code = args.get("sector_code", "")
-        date = args.get("date") or datetime.now().strftime("%Y-%m-%d")
+        date = args.get("date") or _get_latest_trading_day()
         try:
             resp = await self._client.get(f"{self.data_collector_url}/query/sector-data", params={"sector_code": sector_code, "start_date": date, "end_date": date})
             data = resp.json()
@@ -240,7 +253,7 @@ class MCPToolExecutor:
             return {"error": str(e)}
 
     async def _get_north_bound(self, args: dict) -> dict:
-        date = args.get("date") or datetime.now().strftime("%Y-%m-%d")
+        date = args.get("date") or _get_latest_trading_day()
         try:
             resp = await self._client.get(f"{self.data_collector_url}/query/all-sectors", params={"start_date": date, "end_date": date})
             data = resp.json()
@@ -263,8 +276,7 @@ class MCPToolExecutor:
         sector_code = args.get("sector_code", "")
         days = args.get("days", 20)
         try:
-            end = datetime.now().strftime("%Y-%m-%d")
-            from datetime import timedelta
+            end = _get_latest_trading_day()
             start = (datetime.now() - timedelta(days=days * 2)).strftime("%Y-%m-%d")
             resp = await self._client.get(f"{self.data_collector_url}/query/sector-data", params={"sector_code": sector_code, "start_date": start, "end_date": end})
             data = resp.json()
