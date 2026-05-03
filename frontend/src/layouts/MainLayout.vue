@@ -192,7 +192,7 @@ onUnmounted(() => {
   position: fixed;
   top: 0;
   right: 0;
-  width: 420px;
+  width: 520px;
   height: 100vh;
   background: #fff;
   box-shadow: -4px 0 20px rgba(0, 0, 0, 0.08);

@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     influxdb_org: str = "rotation"
     influxdb_bucket: str = "market_data"
 
+    # 内部服务地址
+    strategy_url: str = "http://backend-strategy:8002"
+    data_collector_url: str = "http://backend-data-collector:8003"
+    signal_url: str = "http://backend-signal:8004"
+
     # Service
     service_port: int = 8007
 

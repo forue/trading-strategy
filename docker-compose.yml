@@ -352,6 +352,9 @@ services:
       INFLUXDB_TOKEN: ${INFLUXDB_TOKEN}
       INFLUXDB_ORG: ${INFLUXDB_ORG:-rotation}
       INFLUXDB_BUCKET: ${INFLUXDB_BUCKET:-market_data}
+      STRATEGY_URL: http://backend-strategy:8002
+      DATA_COLLECTOR_URL: http://backend-data-collector:8003
+      SIGNAL_URL: http://backend-signal:8004
     depends_on:
       redis:
         condition: service_healthy
