@@ -276,6 +276,156 @@ docker compose exec backend-data-collector curl -X POST "http://localhost:8003/c
 
 ---
 
+## 停止与清理
+
+### 停止所有服务
+
+```powershell
+# 一键停止
+.\scripts\stop.ps1
+
+# 或手动停止
+docker compose down
+```
+
+### 完全清理（删除数据）
+
+```powershell
+# 停止服务并删除数据卷（慎用！会清除所有历史数据）
+docker compose down -v
+
+# 删除所有相关镜像
+docker compose down --rmi all
+```
+
+---
+
+## 本地开发（不使用Docker）
+
+如果想在本地直接运行各服务进行开发调试：
+
+### 第1步：仅启动基础设施
+
+```powershell
+# 只启动数据库、缓存、消息队列
+docker compose up -d postgres redis influxdb rabbitmq
+```
+
+### 第2步：前端开发
+
+```powershell
+cd frontend
+
+# 安装依赖（需 Node.js 18+）
+npm install
+
+# 启动开发服务器（带热更新）
+npm run dev
+
+# 前端默认运行在 http://localhost:5173
+# API请求会代理到后端服务
+```
+
+> 前端开发时，需在 `vite.config.ts` 中配置 `proxy` 将 `/api` 请求转发到后端地址。
+
+### 第3步：Python 服务
+
+```powershell
+# 策略引擎
+cd services/strategy
+pip install -r requirements.txt
+uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload
+
+# 数据采集
+cd services/data-collector
+pip install -r requirements.txt
+uvicorn app.main:app --host 0.0.0.0 --port 8003 --reload
+
+# 信号通知
+cd services/signal-notification
+pip install -r requirements.txt
+uvicorn app.main:app --host 0.0.0.0 --port 8004 --reload
+
+# 任务调度
+cd services/scheduler
+pip install -r requirements.txt
+uvicorn app.main:app --host 0.0.0.0 --port 8006 --reload
+
+# AI 决策
+cd services/ai-decision
+pip install -r requirements.txt
+uvicorn app.main:app --host 0.0.0.0 --port 8007 --reload
+```
+
+> Python 需 3.10+，建议使用虚拟环境：`python -m venv venv`
+
+### 第4步：Java 服务
+
+```powershell
+# 认证中心（需 JDK 17 + Maven 3.9+）
+cd services/auth
+mvn spring-boot:run
+
+# 资金管理
+cd services/fund-management
+mvn spring-boot:run
+```
+
+### 本地开发环境变量
+
+本地运行服务时，需要将服务地址指向 `localhost` 而非容器名：
+
+| 环境变量 | 本地开发值 | Docker内值 |
+|----------|-----------|-----------|
+| `INFLUXDB_URL` | `http://localhost:8086` | `http://influxdb:8086` |
+| `SPRING_DATASOURCE_URL` | `jdbc:postgresql://localhost:5432/rotation_db` | `jdbc:postgresql://postgres:5432/rotation_db` |
+| `SPRING_REDIS_HOST` | `localhost` | `redis` |
+| `RABBITMQ_HOST` | `localhost` | `rabbitmq` |
+
+---
+
+## 轮动策略算法
+
+### 板块资金轮动评分模型
+
+**数据源**: 申万一级行业指数、北向资金行业持股变化、主力资金净流入额
+
+**评分维度**:
+
+| 维度 | 权重(激进) | 权重(稳健) | 权重(保守) |
+|------|-----------|-----------|-----------|
+| 资金强度 | 60% | 40% | 30% |
+| 资金斜率 | 30% | 25% | 20% |
+| 相对强弱 | 10% | 25% | 20% |
+| 估值分位 | - | 10% | 30% |
+
+### 三档策略差异化
+
+| 特征 | 激进轮动 | 稳健轮动 | 保守轮动 |
+|------|---------|---------|---------|
+| 选取数量 | 资金强度前2名 | 综合3名 | 满足条件5名内 |
+| 仓位上限 | 100% (满仓) | 50% (半仓) | 30% |
+| 持有周期 | 1-3日 | 5日 | 10日 |
+| 止损比例 | 5% | 3% | 2% |
+| 估值限制 | 无 | 无 | 分位≤50% |
+
+### 每日输出
+
+```json
+{
+  "signal_date": "2026-04-18",
+  "strategy_type": "AGGRESSIVE",
+  "sector_code": "SW801780",
+  "sector_name": "银行",
+  "direction": "BUY",
+  "position_ratio": 0.5000,
+  "score": 8.23,
+  "reason": "激进轮动: 资金强度排名#1, 综合评分8.23, 建议满仓轮换持有3日"
+}
+```
+
+---
+
 ## API 接口
 
 ### 认证
