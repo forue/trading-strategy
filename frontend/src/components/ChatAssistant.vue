@@ -504,7 +504,27 @@ async function shareAsImage() {
     const { default: html2canvas } = await import('html2canvas')
     const el = messagesRef.value
     if (!el) return
-    const canvas = await html2canvas(el, { backgroundColor: '#fff', scale: 2 })
+
+    // 保存原始样式
+    const origStyle = el.style.cssText
+    const origScrollTop = el.scrollTop
+
+    // 临时展开到完整高度，让 html2canvas 能截取全部内容
+    el.style.height = el.scrollHeight + 'px'
+    el.style.overflow = 'visible'
+    el.scrollTop = 0
+
+    const canvas = await html2canvas(el, {
+      backgroundColor: '#fff',
+      scale: 2,
+      height: el.scrollHeight,
+      windowHeight: el.scrollHeight,
+    })
+
+    // 恢复原始样式
+    el.style.cssText = origStyle
+    el.scrollTop = origScrollTop
+
     canvas.toBlob(async (blob) => {
       if (!blob) return
       try {
