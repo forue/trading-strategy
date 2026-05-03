@@ -9,24 +9,38 @@
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                        用户终端 (Web浏览器)                        │
-│                  Vue3 + TypeScript + ECharts                     │
+│            Vue3 + TypeScript + ECharts + Element Plus            │
 └────────────────────────────┬────────────────────────────────────┘
-                             │ HTTPS / WebSocket
+                             │ HTTPS / WebSocket / SSE
 ┌────────────────────────────▼────────────────────────────────────┐
 │                     Nginx 反向代理 (负载均衡)                      │
-└──┬──────┬──────┬──────┬──────┬──────┬──────┬────────────────────┘
-   │      │      │      │      │      │      │
-┌──▼──┐┌──▼──┐┌──▼──┐┌──▼──┐┌──▼──┐┌──▼──┐┌──▼──┐
-│认证  ││策略  ││数据  ││信号  ││资金  ││调度  ││ AI  │  微服务集群
-│中心  ││引擎  ││采集  ││通知  ││管理  ││中心  ││决策  │
-│8001  ││8002  ││8003  ││8004  ││8005  ││8006  ││8007  │
-└──┬──┘└──┬──┘└──┬──┘└──┬──┘└──┬──┘└──┬──┘└──┬──┘
-   │       │       │       │       │       │       │
-┌──▼───────▼───────▼───────▼───────▼───────▼───────▼──┐
-│  PostgreSQL  │  InfluxDB  │  Redis  │  RabbitMQ      │  数据存储层
-│  (关系数据)   │  (时序数据)  │  (缓存)  │  (消息队列)   │
-└──────────────────────────────────────────────────────┘
+└──┬──────┬──────┬──────┬──────┬──────┬──────┬──────┬─────────────┘
+   │      │      │      │      │      │      │      │
+┌──▼──┐┌──▼──┐┌──▼──┐┌──▼──┐┌──▼──┐┌──▼──┐┌──▼──┐┌──▼──┐
+│认证  ││策略  ││数据  ││信号  ││资金  ││调度  ││ AI  ││MCP  │  微服务集群
+│中心  ││引擎  ││采集  ││通知  ││管理  ││中心  ││决策  ││Agent│
+│8001  ││8002  ││8003  ││8004  ││8005  ││8006  ││8007  ││8008 │
+└──┬──┘└──┬──┘└──┬──┘└──┬──┘└──┬──┘└──┬──┘└──┬──┘└──┬──┘
+   │       │       │       │       │       │       │       │
+┌──▼───────▼───────▼───────▼───────▼───────▼───────▼───────▼──┐
+│  PostgreSQL  │  InfluxDB  │  Redis  │  RabbitMQ              │  数据存储层
+│  (关系数据)   │  (时序数据)  │  (缓存)  │  (消息队列)           │
+└──────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## 核心功能
+
+| 功能 | 说明 |
+|------|------|
+| **轮动策略** | 三档策略（激进/稳健/保守），基于资金强度、资金斜率、相对强弱、估值分位多因子评分 |
+| **因子分析** | 15+ 因子（RSI/MACD/布林带/KDJ/资金流/动量/情绪/估值/轮动），支持加权/排名合成 |
+| **AI 决策** | ReAct Agent 循环，支持工具调用获取实时市场数据，流式输出 thinking 过程 |
+| **MCP Agent** | MCP 协议金融 Agent，支持板块分析、信号解读、风险评估 |
+| **信号推送** | WebSocket 实时推送交易信号，支持邮件/钉钉通知 |
+| **策略回测** | 历史回测、自动优化（Optuna）、策略参数调优 |
+| **数据采集** | AkShare 板块资金流、K线、北向资金，非交易日自动回退 |
 
 ---
 
@@ -34,15 +48,15 @@
 
 | 层级 | 技术 |
 |------|------|
-| **前端** | Vue3 + TypeScript + ECharts + Element Plus |
+| **前端** | Vue3 + TypeScript + ECharts + Element Plus + Pinia |
 | **认证中心** | Spring Boot 3 + Spring Security + JWT |
 | **策略引擎** | Python + FastAPI + Pandas + 多因子评分模型 |
 | **数据采集** | Python + FastAPI + AkShare |
 | **信号通知** | Python + FastAPI + WebSocket + RabbitMQ |
 | **资金管理** | Spring Boot 3 + JPA + PostgreSQL |
 | **任务调度** | Python + FastAPI + APScheduler |
-| **AI 决策** | Python + FastAPI + OpenAI/Ollama + 因子分析 |
-| **MCP Agent** | Python + FastAPI + MCP协议 |
+| **AI 决策** | Python + FastAPI + OpenAI/Ollama + ReAct Agent + MCP 工具 |
+| **MCP Agent** | Python + FastAPI + MCP 协议 + SSE 传输 |
 | **数据库** | PostgreSQL 15 + InfluxDB 2.7 + Redis 7 |
 | **消息队列** | RabbitMQ 3 |
 | **部署** | Docker Compose + Nginx |
@@ -113,8 +127,8 @@ docker compose up -d --build backend-auth backend-data-collector backend-strateg
 # 5. 等待后端服务启动（约20秒）
 Start-Sleep -Seconds 20
 
-# 6. 启动调度中心
-docker compose up -d --build backend-scheduler
+# 6. 启动调度中心和 AI 服务
+docker compose up -d --build backend-scheduler backend-ai-decision backend-mcp-agent
 
 # 7. 构建并启动前端
 docker compose up -d --build frontend
@@ -157,6 +171,7 @@ docker compose ps
 # 查看某服务日志
 docker compose logs -f backend-auth
 docker compose logs -f backend-strategy
+docker compose logs -f backend-ai-decision
 ```
 
 ### 健康检查接口
@@ -179,6 +194,21 @@ curl http://localhost:8005/api/fund/health
 
 # 任务调度
 curl http://localhost:8006/health
+
+# AI 决策
+curl http://localhost:8007/health
+```
+
+### 初始化数据
+
+首次启动后需要采集历史数据：
+
+```powershell
+# 采集 30 天历史数据
+docker compose exec backend-data-collector curl -X POST "http://localhost:8003/collect/history?days=30"
+
+# 采集北向资金
+docker compose exec backend-data-collector curl -X POST "http://localhost:8003/collect/north-bound"
 ```
 
 ### 访问前端
@@ -198,7 +228,7 @@ curl http://localhost:8006/health
 | 信号通知 API | http://localhost:8004 | 实时信号推送 |
 | 资金管理 API | http://localhost:8005 | 持仓/收益管理 |
 | 任务调度 API | http://localhost:8006 | 定时任务管理 |
-| AI 决策服务 API | http://localhost:8007 | AI分析/风险预警 |
+| AI 决策服务 API | http://localhost:8007 | AI分析/风险预警/Agent对话 |
 | MCP 金融 Agent | http://localhost:8008 | MCP协议/Agent对话 |
 | InfluxDB 管理面板 | http://localhost:8086 | 时序数据库管理 |
 | RabbitMQ 管理面板 | http://localhost:15672 | 消息队列管理 |
@@ -215,148 +245,34 @@ curl http://localhost:8006/health
 
 ---
 
-## 停止与清理
+## AI 决策服务
 
-### 停止所有服务
+### 功能特性
 
-```powershell
-# 一键停止
-.\scripts\stop.ps1
+- **ReAct Agent**: 推理+行动循环，自动调用工具获取实时数据
+- **流式输出**: SSE 流式输出 thinking 过程和回复内容
+- **工具调用**: 7 个金融数据工具（市场概览、板块排行、信号查询等）
+- **多模型支持**: OpenAI / DeepSeek / Qwen / Ollama 本地模型
+- **提供商管理**: 动态添加/删除/测试 AI 模型提供商
+- **对话管理**: 多轮对话、历史记录、导出 Markdown
 
-# 或手动停止
-docker compose down
-```
+### 内置工具
 
-### 完全清理（删除数据）
+| 工具 | 说明 |
+|------|------|
+| `get_market_overview` | 获取当日市场概览（涨跌家数、情绪、北向资金） |
+| `get_sector_ranking` | 板块涨跌排行（涨跌幅、主力净流入） |
+| `analyze_sector` | 分析单个板块（资金流向、技术指标） |
+| `get_today_signals` | 获取今日交易信号 |
+| `get_north_bound` | 获取北向资金流入流出 |
+| `get_sector_history` | 获取板块历史数据 |
+| `run_backtest` | 运行策略回测 |
 
-```powershell
-# 停止服务并删除数据卷（慎用！会清除所有历史数据）
-docker compose down -v
+### 非交易日处理
 
-# 删除所有相关镜像
-docker compose down --rmi all
-```
-
----
-
-## 本地开发（不使用Docker）
-
-如果想在本地直接运行各服务进行开发调试：
-
-### 第1步：仅启动基础设施
-
-```powershell
-# 只启动数据库、缓存、消息队列
-docker compose up -d postgres redis influxdb rabbitmq
-```
-
-### 第2步：前端开发
-
-```powershell
-cd frontend
-
-# 安装依赖（需 Node.js 18+）
-npm install
-
-# 启动开发服务器（带热更新）
-npm run dev
-
-# 前端默认运行在 http://localhost:5173
-# API请求会代理到后端服务
-```
-
-> 前端开发时，需在 `vite.config.ts` 中配置 `proxy` 将 `/api` 请求转发到后端地址。
-
-### 第3步：Python 服务
-
-```powershell
-# 策略引擎
-cd services/strategy
-pip install -r requirements.txt
-uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload
-
-# 数据采集
-cd services/data-collector
-pip install -r requirements.txt
-uvicorn app.main:app --host 0.0.0.0 --port 8003 --reload
-
-# 信号通知
-cd services/signal-notification
-pip install -r requirements.txt
-uvicorn app.main:app --host 0.0.0.0 --port 8004 --reload
-
-# 任务调度
-cd services/scheduler
-pip install -r requirements.txt
-uvicorn app.main:app --host 0.0.0.0 --port 8006 --reload
-```
-
-> Python 需 3.10+，建议使用虚拟环境：`python -m venv venv`
-
-### 第4步：Java 服务
-
-```powershell
-# 认证中心（需 JDK 17 + Maven 3.9+）
-cd services/auth
-mvn spring-boot:run
-
-# 资金管理
-cd services/fund-management
-mvn spring-boot:run
-```
-
-### 本地开发环境变量
-
-本地运行服务时，需要将服务地址指向 `localhost` 而非容器名：
-
-| 环境变量 | 本地开发值 | Docker内值 |
-|----------|-----------|-----------|
-| `INFLUXDB_URL` | `http://localhost:8086` | `http://influxdb:8086` |
-| `SPRING_DATASOURCE_URL` | `jdbc:postgresql://localhost:5432/rotation_db` | `jdbc:postgresql://postgres:5432/rotation_db` |
-| `SPRING_REDIS_HOST` | `localhost` | `redis` |
-| `RABBITMQ_HOST` | `localhost` | `rabbitmq` |
-
----
-
-## 轮动策略算法
-
-### 板块资金轮动评分模型
-
-**数据源**: 申万一级行业指数、北向资金行业持股变化、主力资金净流入额
-
-**评分维度**:
-
-| 维度 | 权重(激进) | 权重(稳健) | 权重(保守) |
-|------|-----------|-----------|-----------|
-| 资金强度 | 60% | 40% | 30% |
-| 资金斜率 | 30% | 25% | 20% |
-| 相对强弱 | 10% | 25% | 20% |
-| 估值分位 | - | 10% | 30% |
-
-### 三档策略差异化
-
-| 特征 | 激进轮动 | 稳健轮动 | 保守轮动 |
-|------|---------|---------|---------|
-| 选取数量 | 资金强度前2名 | 综合3名 | 满足条件5名内 |
-| 仓位上限 | 100% (满仓) | 50% (半仓) | 30% |
-| 持有周期 | 1-3日 | 5日 | 10日 |
-| 止损比例 | 5% | 3% | 2% |
-| 估值限制 | 无 | 无 | 分位≤50% |
-
-### 每日输出
-
-```json
-{
-  "signal_date": "2026-04-18",
-  "strategy_type": "AGGRESSIVE",
-  "sector_code": "SW801780",
-  "sector_name": "银行",
-  "direction": "BUY",
-  "position_ratio": 0.5000,
-  "score": 8.23,
-  "reason": "激进轮动: 资金强度排名#1, 综合评分8.23, 建议满仓轮换持有3日"
-}
-```
+- 周六/周日自动回退到最近交易日（周五）
+- 法定节假日（春节/国庆等）自动回退到最近有数据的交易日
+- 最多回退 7 天，返回结果中包含 `note` 字段说明实际使用的日期
 
 ---
 
@@ -429,10 +345,11 @@ GET /api/fund/summary                - 账户概览
 ### AI 决策服务
 
 ```
-POST /api/ai/analyze-signal          - 信号解读（自动调用因子分析）
+POST /api/ai/chat                    - AI 对话（非流式）
+POST /api/ai/chat/stream             - AI 对话（SSE 流式，支持 Agent 工具调用）
+POST /api/ai/analyze-signal          - 信号解读
 POST /api/ai/risk-check              - 风险检查
 POST /api/ai/daily-review            - 生成每日复盘报告
-POST /api/ai/chat                    - AI 对话（多轮）
 GET  /api/ai/config                  - 获取 AI 配置
 PUT  /api/ai/config                  - 更新 AI 配置
 GET  /api/ai/models?base_url=...     - 获取 Ollama 模型列表
@@ -480,17 +397,24 @@ GET  /mcp/sse                        - MCP SSE 连接端点
 │   │       ├── factors/        # 因子引擎 (RSI/MACD/布林带/KDJ等)
 │   │       └── combiner/       # 因子合成引擎
 │   ├── data-collector/         # 数据采集 (Python)
+│   │   └── app/
+│   │       └── collector.py    # 数据采集器（AkShare）
+│   │       └── influx_client.py # InfluxDB 读写封装
 │   ├── signal-notification/    # 信号通知 (Python)
 │   ├── fund-management/        # 资金管理 (Spring Boot)
 │   ├── scheduler/              # 任务调度 (Python)
 │   ├── ai-decision/            # AI 决策服务 (Python)
 │   │   └── app/
-│   │       └── providers/      # 模型提供商管理
+│   │       ├── agent.py        # ReAct Agent 循环
+│   │       ├── tools.py        # MCP 工具执行器
+│   │       ├── model_adapter.py # LLM 适配器（OpenAI/Ollama）
+│   │       ├── chat_manager.py # 对话管理
+│   │       └── provider_manager.py # 提供商管理
 │   ├── mcp-agent/              # MCP 金融 Agent (Python)
 │   │   └── app/
 │   │       ├── tools/          # MCP 工具
 │   │       └── agents/         # 金融 Agent
-│   └── shared/                 # 共享库
+│   └── shared/                 # 共享库（RabbitMQ/Redis/ApiResponse）
 ├── nginx/
 │   └── default.conf            # Nginx配置
 ├── scripts/
@@ -547,6 +471,18 @@ pip install -r requirements.txt
 2. 检查前端构建日志: `docker compose logs frontend`
 3. 确认后端 API 可访问: 浏览器打开 http://localhost:8002/health
 
+### Q: AI 对话返回"无数据"
+
+1. 确认已采集历史数据: `docker compose exec backend-data-collector curl -X POST "http://localhost:8003/collect/history?days=30"`
+2. 非交易日（周末/节假日）会自动回退到最近交易日
+3. 检查 InfluxDB 是否有数据: 访问 http://localhost:8086
+
+### Q: Ollama 本地模型报 400 错误
+
+部分 Ollama 模型不支持原生 tools/think 参数。系统会自动探测模型能力并降级处理：
+- 不支持原生 tools → 从文本中解析工具调用
+- 不支持原生 think → 从 `<think>` 标签中解析 thinking
+
 ### Q: 如何查看某个服务的日志
 
 ```powershell
@@ -560,7 +496,11 @@ docker compose logs --tail 100 backend-auth
 ### Q: 如何重启单个服务
 
 ```powershell
+# 重启服务（不重新构建）
 docker compose restart backend-strategy
+
+# 重新构建并重启（代码有变更时）
+docker compose up -d --build backend-strategy
 ```
 
 ---
