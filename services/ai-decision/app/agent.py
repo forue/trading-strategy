@@ -72,10 +72,8 @@ class ReActAgent:
 
             logger.info(f"Agent 迭代 {iteration + 1}/{self.MAX_ITERATIONS}")
 
-            # 只有支持 function calling 的模型才发送工具定义
-            # 当消息中有 tool_calls 结果时，不再发送 tools 参数
-            has_tool_calls = any("tool_calls" in m for m in messages)
-            tools_to_use = MCP_TOOLS if (self._supports_tools and not has_tool_calls) else None
+            # 支持原生 function calling 的模型每轮都发送工具定义
+            tools_to_use = MCP_TOOLS if self._supports_tools else None
 
             try:
                 logger.info(f"发送消息数量: {len(messages)}, 工具: {tools_to_use is not None}")
