@@ -128,9 +128,12 @@ class InfluxDBManager:
 
     def query_sector_data(self, sector_code: str, start_date: str, end_date: str) -> list[dict]:
         """查询板块资金流数据"""
+        # 转换为 RFC3339 格式
+        start = f"{start_date}T00:00:00Z"
+        stop = f"{end_date}T23:59:59Z"
         query = f'''
         from(bucket: "{self.bucket}")
-          |> range(start: {start_date}, stop: {end_date})
+          |> range(start: {start}, stop: {stop})
           |> filter(fn: (r) => r._measurement == "sector_capital_flow")
           |> filter(fn: (r) => r.sector_code == "{sector_code}")
           |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
@@ -142,9 +145,12 @@ class InfluxDBManager:
 
     def query_all_sectors_data(self, start_date: str, end_date: str) -> list[dict]:
         """查询所有板块资金流数据"""
+        # 转换为 RFC3339 格式
+        start = f"{start_date}T00:00:00Z"
+        stop = f"{end_date}T23:59:59Z"
         query = f'''
         from(bucket: "{self.bucket}")
-          |> range(start: {start_date}, stop: {end_date})
+          |> range(start: {start}, stop: {stop})
           |> filter(fn: (r) => r._measurement == "sector_capital_flow")
           |> pivot(rowKey: ["_time", "sector_code"], columnKey: ["_field"], valueColumn: "_value")
         '''
