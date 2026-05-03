@@ -36,7 +36,10 @@
 - `fund` - 资金管理服务
 - `data` - 数据采集服务
 - `scheduler` - 调度服务
+- `ai` - AI决策服务
+- `mcp` - MCP金融Agent服务
 - `docker` - Docker相关
+- `shared` - 共享库
 
 ### 描述规则
 
