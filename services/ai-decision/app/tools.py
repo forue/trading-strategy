@@ -1,6 +1,7 @@
 """AI 决策服务 - MCP Agent 工具定义
 
 定义 AI 可调用的工具，用于获取实时交易数据。
+支持非交易日自动回退：周末、节假日等无数据时，自动回退到最近有数据的交易日。
 """
 import json
 import httpx
@@ -9,10 +10,12 @@ from typing import Any
 from loguru import logger
 
 
+MAX_FALLBACK_DAYS = 7  # 最多回退天数
+
+
 def _get_latest_trading_day() -> str:
-    """获取最近交易日（周一到周五），非交易日自动回退"""
+    """获取最近交易日（周一到周五），仅处理周末回退"""
     today = datetime.now()
-    # 周六=5, 周日=6
     if today.weekday() == 5:  # 周六
         target = today - timedelta(days=1)
     elif today.weekday() == 6:  # 周日
@@ -140,6 +143,36 @@ class MCPToolExecutor:
         self.signal_url = signal_url.rstrip("/")
         self._client = httpx.AsyncClient(timeout=30)
 
+    async def _query_with_fallback(self, url: str, params: dict, date_key: str = "date") -> tuple[dict, str]:
+        """带自动回退的数据查询
+
+        如果指定日期无数据，自动往前推一天重试，最多回退 MAX_FALLBACK_DAYS 天。
+        返回 (响应数据, 实际查询日期)。
+        """
+        start_date = params.get("start_date", "")
+        if not start_date:
+            start_date = _get_latest_trading_day()
+            params["start_date"] = start_date
+            params["end_date"] = start_date
+
+        current = datetime.strptime(start_date, "%Y-%m-%d")
+        for i in range(MAX_FALLBACK_DAYS + 1):
+            try_date = (current - timedelta(days=i)).strftime("%Y-%m-%d")
+            params["start_date"] = try_date
+            params["end_date"] = try_date
+
+            try:
+                resp = await self._client.get(url, params=params)
+                data = resp.json()
+                if data.get("code") == 200 and data.get("data"):
+                    if i > 0:
+                        logger.info(f"数据回退: {start_date} 无数据，使用 {try_date}")
+                    return data, try_date
+            except Exception:
+                continue
+
+        return None, start_date
+
     async def execute(self, tool_name: str, arguments: dict) -> dict:
         """执行工具调用"""
         try:
@@ -166,16 +199,18 @@ class MCPToolExecutor:
     async def _get_market_overview(self, args: dict) -> dict:
         date = args.get("date") or _get_latest_trading_day()
         try:
-            resp = await self._client.get(f"{self.data_collector_url}/query/all-sectors", params={"start_date": date, "end_date": date})
-            data = resp.json()
-            if data.get("code") == 200 and data.get("data"):
+            data, actual_date = await self._query_with_fallback(
+                f"{self.data_collector_url}/query/all-sectors",
+                {"start_date": date, "end_date": date},
+            )
+            if data and data.get("data"):
                 sectors = data["data"]
                 up = sum(1 for s in sectors if s.get("index_change_pct", 0) > 0)
                 down = sum(1 for s in sectors if s.get("index_change_pct", 0) < 0)
                 avg = sum(s.get("index_change_pct", 0) for s in sectors) / max(len(sectors), 1)
                 total_inflow = sum(s.get("main_net_inflow", 0) for s in sectors) / 1e8
-                return {
-                    "date": date,
+                result = {
+                    "date": actual_date,
                     "total_sectors": len(sectors),
                     "up_count": up,
                     "down_count": down,
@@ -183,7 +218,10 @@ class MCPToolExecutor:
                     "total_main_inflow_yi": round(total_inflow, 2),
                     "sentiment": "强势" if avg > 1 else "偏强" if avg > 0 else "偏弱" if avg > -1 else "弱势"
                 }
-            return {"error": f"{date} 无数据"}
+                if actual_date != date:
+                    result["note"] = f"{date} 无数据，已回退到最近交易日 {actual_date}"
+                return result
+            return {"error": f"近 {MAX_FALLBACK_DAYS} 天均无数据"}
         except Exception as e:
             return {"error": str(e)}
 
@@ -192,16 +230,18 @@ class MCPToolExecutor:
         metric = args.get("metric", "change")
         limit = args.get("limit", 10)
         try:
-            resp = await self._client.get(f"{self.data_collector_url}/query/all-sectors", params={"start_date": date, "end_date": date})
-            data = resp.json()
-            if data.get("code") == 200 and data.get("data"):
+            data, actual_date = await self._query_with_fallback(
+                f"{self.data_collector_url}/query/all-sectors",
+                {"start_date": date, "end_date": date},
+            )
+            if data and data.get("data"):
                 sectors = data["data"]
                 if metric == "inflow":
                     sectors.sort(key=lambda x: x.get("main_net_inflow", 0), reverse=True)
                 else:
                     sectors.sort(key=lambda x: x.get("index_change_pct", 0), reverse=True)
-                return {
-                    "date": date,
+                result = {
+                    "date": actual_date,
                     "ranking": [
                         {
                             "rank": i + 1,
@@ -213,7 +253,10 @@ class MCPToolExecutor:
                         for i, s in enumerate(sectors[:limit])
                     ]
                 }
-            return {"error": f"{date} 无数据"}
+                if actual_date != date:
+                    result["note"] = f"{date} 无数据，已回退到最近交易日 {actual_date}"
+                return result
+            return {"error": f"近 {MAX_FALLBACK_DAYS} 天均无数据"}
         except Exception as e:
             return {"error": str(e)}
 
@@ -221,14 +264,16 @@ class MCPToolExecutor:
         sector_code = args.get("sector_code", "")
         date = args.get("date") or _get_latest_trading_day()
         try:
-            resp = await self._client.get(f"{self.data_collector_url}/query/sector-data", params={"sector_code": sector_code, "start_date": date, "end_date": date})
-            data = resp.json()
-            if data.get("code") == 200 and data.get("data"):
+            data, actual_date = await self._query_with_fallback(
+                f"{self.data_collector_url}/query/sector-data",
+                {"sector_code": sector_code, "start_date": date, "end_date": date},
+            )
+            if data and data.get("data"):
                 sector = data["data"][0] if data["data"] else {}
-                return {
+                result = {
                     "sector_code": sector_code,
                     "sector_name": sector.get("sector_name", ""),
-                    "date": date,
+                    "date": actual_date,
                     "change_pct": round(sector.get("index_change_pct", 0), 2),
                     "main_inflow_yi": round(sector.get("main_net_inflow", 0) / 1e8, 2),
                     "north_inflow_yi": round(sector.get("north_net_inflow", 0) / 1e8, 2),
@@ -237,7 +282,10 @@ class MCPToolExecutor:
                     "low": sector.get("index_low", 0),
                     "close": sector.get("index_close", 0),
                 }
-            return {"error": f"{date} 无数据"}
+                if actual_date != date:
+                    result["note"] = f"{date} 无数据，已回退到最近交易日 {actual_date}"
+                return result
+            return {"error": f"近 {MAX_FALLBACK_DAYS} 天均无数据"}
         except Exception as e:
             return {"error": str(e)}
 
@@ -255,20 +303,25 @@ class MCPToolExecutor:
     async def _get_north_bound(self, args: dict) -> dict:
         date = args.get("date") or _get_latest_trading_day()
         try:
-            resp = await self._client.get(f"{self.data_collector_url}/query/all-sectors", params={"start_date": date, "end_date": date})
-            data = resp.json()
-            if data.get("code") == 200 and data.get("data"):
+            data, actual_date = await self._query_with_fallback(
+                f"{self.data_collector_url}/query/all-sectors",
+                {"start_date": date, "end_date": date},
+            )
+            if data and data.get("data"):
                 sectors = data["data"]
                 total = sum(s.get("north_net_inflow", 0) for s in sectors) / 1e8
                 top_in = sorted(sectors, key=lambda x: x.get("north_net_inflow", 0), reverse=True)[:5]
                 top_out = sorted(sectors, key=lambda x: x.get("north_net_inflow", 0))[:5]
-                return {
-                    "date": date,
+                result = {
+                    "date": actual_date,
                     "total_north_inflow_yi": round(total, 2),
                     "top_inflow": [{"name": s["sector_name"], "yi": round(s.get("north_net_inflow", 0) / 1e8, 2)} for s in top_in],
                     "top_outflow": [{"name": s["sector_name"], "yi": round(s.get("north_net_inflow", 0) / 1e8, 2)} for s in top_out],
                 }
-            return {"error": f"{date} 无数据"}
+                if actual_date != date:
+                    result["note"] = f"{date} 无数据，已回退到最近交易日 {actual_date}"
+                return result
+            return {"error": f"近 {MAX_FALLBACK_DAYS} 天均无数据"}
         except Exception as e:
             return {"error": str(e)}
 
