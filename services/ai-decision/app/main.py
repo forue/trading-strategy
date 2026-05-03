@@ -291,6 +291,11 @@ def _load_ai_config() -> dict:
             defaults.update(saved)
     except Exception as e:
         logger.warning(f"加载 AI 配置失败: {e}")
+
+    # 修复 Ollama URL：Docker 容器内不能用 localhost
+    if "localhost:11434" in defaults.get("ollama_base_url", ""):
+        defaults["ollama_base_url"] = "http://host.docker.internal:11434"
+
     return defaults
 
 
@@ -333,6 +338,11 @@ async def update_config(request: UpdateConfigRequest):
     global llm_client, analyzer
     try:
         config = request.model_dump()
+
+        # 修复 Ollama URL
+        if "localhost:11434" in config.get("ollama_base_url", ""):
+            config["ollama_base_url"] = "http://host.docker.internal:11434"
+
         _save_ai_config(config)
 
         # 重新初始化 LLM 客户端
@@ -573,6 +583,27 @@ def _get_chat_mgr():
     return chat_mgr
 
 
+# MCP 工具执行器
+tool_executor = None
+agent = None
+
+def _get_agent(provider: str = "", model: str = ""):
+    """获取 Agent 实例"""
+    global agent, tool_executor
+    client = _get_llm_client(provider, model)
+    if not client:
+        return None
+    if tool_executor is None:
+        from .tools import MCPToolExecutor
+        tool_executor = MCPToolExecutor(
+            strategy_url=settings.strategy_url,
+            data_collector_url=settings.data_collector_url,
+            signal_url=settings.signal_url,
+        )
+    from .agent import ReActAgent
+    return ReActAgent(client, tool_executor)
+
+
 class ChatRequest(BaseModel):
     message: str
     conversation_id: str = ""
@@ -653,6 +684,7 @@ async def chat(request: ChatRequest):
         return success_response(data={
             "conversation_id": conv_id,
             "reply": response.content,
+            "thinking": response.thinking,
             "model": response.model,
             "tokens_used": response.tokens_used,
         })
@@ -661,6 +693,90 @@ async def chat(request: ChatRequest):
     except Exception as e:
         logger.error(f"对话失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ai/chat/stream")
+async def chat_stream(request: ChatRequest):
+    """流式对话（SSE）- 支持 Agent 工具调用"""
+    from fastapi.responses import StreamingResponse
+
+    async def generate():
+        try:
+            # 获取 Agent
+            agent = _get_agent(request.provider, request.model)
+            if not agent:
+                yield f"data: {json.dumps({'type': 'error', 'data': 'AI 服务未就绪，请先配置模型提供商'})}\n\n"
+                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                return
+
+            mgr = _get_chat_mgr()
+            conv_id = request.conversation_id
+            save = not request.no_save
+
+            if save:
+                if not conv_id:
+                    conv = mgr.create_conversation(
+                        provider=request.provider or settings.ai_provider,
+                        model=request.model or settings.ai_model,
+                    )
+                    conv_id = conv.id
+                else:
+                    conv = mgr.get_conversation(conv_id)
+                    if not conv:
+                        conv = mgr.create_conversation(
+                            provider=request.provider or settings.ai_provider,
+                            model=request.model or settings.ai_model,
+                        )
+                        conv_id = conv.id
+
+                from .chat_manager import ChatMessage
+                mgr.add_message(conv_id, ChatMessage(role="user", content=request.message))
+
+                context_messages = []
+                if conv and conv.messages:
+                    for msg in conv.messages[-10:]:
+                        context_messages.append({"role": msg.role, "content": msg.content})
+            else:
+                context_messages = []
+
+            # 发送 conversation_id
+            yield f"data: {json.dumps({'type': 'conversation_id', 'data': conv_id})}\n\n"
+
+            # 执行 Agent
+            full_content = ""
+            full_thinking = ""
+            async for chunk in agent.run(request.message, context_messages):
+                if chunk["type"] == "thinking":
+                    full_thinking += chunk["data"]
+                    yield f"data: {json.dumps({'type': 'thinking', 'data': chunk['data']})}\n\n"
+                elif chunk["type"] == "content":
+                    full_content += chunk["data"]
+                    yield f"data: {json.dumps({'type': 'content', 'data': chunk['data']})}\n\n"
+                elif chunk["type"] == "tool_call":
+                    yield f"data: {json.dumps({'type': 'tool_call', 'data': chunk['data']})}\n\n"
+                elif chunk["type"] == "tool_result":
+                    yield f"data: {json.dumps({'type': 'tool_result', 'data': chunk['data']})}\n\n"
+                elif chunk["type"] == "error":
+                    yield f"data: {json.dumps({'type': 'error', 'data': chunk['data']})}\n\n"
+
+            # 保存 AI 回复
+            if save and full_content:
+                from .chat_manager import ChatMessage
+                mgr.add_message(conv_id, ChatMessage(
+                    role="assistant",
+                    content=full_content,
+                    thinking=full_thinking,
+                    model=request.model or settings.ai_model,
+                ))
+
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+        except Exception as e:
+            logger.error(f"Agent 对话失败: {e}")
+            yield f"data: {json.dumps({'type': 'error', 'data': str(e)})}\n\n"
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 @app.get("/api/ai/conversations")
