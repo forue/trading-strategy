@@ -140,33 +140,47 @@ async def collect_data():
 _trade_dates_cache = {"dates": set(), "update_time": None}
 TRADE_DATES_CACHE_TTL = 86400  # 24小时
 
+# 2026 年 A 股法定节假日（休市日）
+_HOLIDAYS_2026 = {
+    # 元旦
+    "20260101", "20260102", "20260103",
+    # 春节
+    "20260215", "20260216", "20260217", "20260218", "20260219", "20260220", "20260221",
+    # 清明节
+    "20260404", "20260405", "20260406",
+    # 劳动节
+    "20260501", "20260502", "20260503", "20260504", "20260505",
+    # 端午节
+    "20260619", "20260620", "20260621",
+    # 中秋节
+    "20260925", "20260926", "20260927",
+    # 国庆节
+    "20261001", "20261002", "20261003", "20261004", "20261005", "20261006", "20261007",
+}
+
 
 def _is_trade_day(date_str: str) -> bool:
-    """检查是否为交易日（带缓存）"""
-    now = datetime.now()
-    # 检查缓存是否过期
-    if _trade_dates_cache["update_time"] is None or \
-       (now - _trade_dates_cache["update_time"]).total_seconds() > TRADE_DATES_CACHE_TTL:
-        try:
-            import akshare as ak
-            df = ak.tool_trade_date_hist_sina()
-            if df is not None and not df.empty:
-                dates = df.iloc[:, 0].tolist()
-                _trade_dates_cache["dates"] = {d.strftime("%Y%m%d") if hasattr(d, "strftime") else str(d) for d in dates}
-                _trade_dates_cache["update_time"] = now
-        except Exception as e:
-            logger.warning(f"获取交易日历失败，使用周末回退: {e}")
+    """检查是否为交易日
 
-    # 使用缓存
-    if _trade_dates_cache["dates"]:
-        return date_str.replace("-", "") in _trade_dates_cache["dates"]
-
-    # 回退：简单跳过周末
+    判断逻辑：
+    1. 周末（周六、周日）不是交易日
+    2. 法定节假日不是交易日
+    """
     try:
         d = datetime.strptime(date_str.replace("-", ""), "%Y%m%d")
-        return d.weekday() < 5
     except ValueError:
         return False
+
+    # 周末不是交易日
+    if d.weekday() >= 5:
+        return False
+
+    # 法定节假日不是交易日
+    date_compact = d.strftime("%Y%m%d")
+    if date_compact in _HOLIDAYS_2026:
+        return False
+
+    return True
 
 
 @app.post("/calculate")
