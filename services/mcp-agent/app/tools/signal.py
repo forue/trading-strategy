@@ -58,3 +58,6 @@ class SignalTools:
         except Exception as e:
             logger.error(f"获取信号历史失败: {e}")
             return {"error": str(e)}
+
+    async def close(self):
+        await self._client.aclose()

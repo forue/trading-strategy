@@ -63,6 +63,10 @@ async def handle_mcp_sse(request: Request):
 async def lifespan(app: FastAPI):
     logger.info("MCP 金融 Agent 服务启动")
     yield
+    # 关闭所有 httpx 客户端
+    for tools in [market_tools, strategy_tools, signal_tools, data_tools]:
+        if hasattr(tools, 'close'):
+            await tools.close()
     logger.info("MCP 金融 Agent 服务关闭")
 
 

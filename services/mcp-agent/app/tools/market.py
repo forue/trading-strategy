@@ -118,3 +118,6 @@ class MarketTools:
         except Exception as e:
             logger.error(f"获取北向资金失败: {e}")
             return {"error": str(e)}
+
+    async def close(self):
+        await self._client.aclose()
