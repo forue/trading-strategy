@@ -271,6 +271,9 @@ class OpenAIClient(BaseLLMClient):
             except Exception:
                 return False
 
+    async def close(self):
+        await self._client.aclose()
+
     async def chat_stream(self, messages: list[dict], temperature: float = 0.7, max_tokens: int = 2000, **kwargs) -> AsyncGenerator[dict, None]:
         try:
             payload = self._build_payload(messages, temperature, max_tokens, stream=True)
@@ -568,6 +571,9 @@ class OllamaClient(BaseLLMClient):
         except Exception as e:
             logger.error(f"获取 Ollama 模型列表失败: {e}")
             return []
+
+    async def close(self):
+        await self._client.aclose()
 
 
 class ModelAdapterFactory:

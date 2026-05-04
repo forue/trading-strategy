@@ -68,6 +68,15 @@ async def lifespan(app: FastAPI):
     mq_thread = threading.Thread(target=_start_consumer, daemon=True)
     mq_thread.start()
     yield
+    # 关闭所有 httpx 客户端，避免连接泄漏
+    if llm_client and hasattr(llm_client, 'close'):
+        await llm_client.close()
+    for client in _client_cache.values():
+        if hasattr(client, 'close'):
+            await client.close()
+    _client_cache.clear()
+    if tool_executor and hasattr(tool_executor, 'close'):
+        await tool_executor.close()
     rmq.close()
     redis_mgr.close()
 
@@ -152,8 +161,8 @@ async def health_check():
     if llm_client:
         try:
             llm_ok = await llm_client.health_check()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"LLM 健康检查失败: {e}")
     return {
         "status": "healthy",
         "service": "ai-decision",
@@ -308,16 +317,23 @@ def _save_ai_config(config: dict):
 async def get_config():
     """获取 AI 配置"""
     config = _load_ai_config()
+    api_key = config.get("api_key", "")
+    masked_key = ""
+    if api_key:
+        if len(api_key) <= 8:
+            masked_key = api_key[:2] + "***"
+        else:
+            masked_key = api_key[:4] + "***" + api_key[-4:]
     return success_response(data={
         "provider": config.get("provider", "openai"),
-        "api_key": config.get("api_key", ""),
+        "api_key": masked_key,
         "base_url": config.get("base_url", ""),
         "model": config.get("model", ""),
         "temperature": config.get("temperature", 0.7),
         "max_tokens": config.get("max_tokens", 2000),
         "ollama_base_url": config.get("ollama_base_url", ""),
         "ollama_model": config.get("ollama_model", ""),
-        "has_api_key": bool(config.get("api_key")),
+        "has_api_key": bool(api_key),
     })
 
 
@@ -360,7 +376,15 @@ async def update_config(request: UpdateConfigRequest):
         except Exception as e:
             logger.warning(f"LLM 客户端更新失败: {e}")
 
-        return success_response(data=config, message="AI 配置已更新")
+        api_key = config.get("api_key", "")
+        masked_key = ""
+        if api_key:
+            if len(api_key) <= 8:
+                masked_key = api_key[:2] + "***"
+            else:
+                masked_key = api_key[:4] + "***" + api_key[-4:]
+        resp = {**config, "api_key": masked_key, "has_api_key": bool(api_key)}
+        return success_response(data=resp, message="AI 配置已更新")
     except Exception as e:
         logger.error(f"更新 AI 配置失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -504,6 +528,7 @@ async def test_provider(provider_id: str):
 # ============================================================
 
 # 客户端缓存（避免每次请求都创建新客户端）
+_CLIENT_CACHE_MAX = 20  # 最大缓存客户端数
 _client_cache: dict[str, BaseLLMClient] = {}
 
 
@@ -550,6 +575,12 @@ def _get_llm_client(provider: str = "", model: str = "") -> BaseLLMClient:
         )
 
         _client_cache[cache_key] = client
+        # 缓存淘汰：超过上限时移除最早的条目
+        if len(_client_cache) > _CLIENT_CACHE_MAX:
+            oldest_key = next(iter(_client_cache))
+            old_client = _client_cache.pop(oldest_key)
+            if hasattr(old_client, 'close'):
+                asyncio.create_task(old_client.close())
         return client
     except Exception as e:
         logger.error(f"创建 LLM 客户端失败: {e}")

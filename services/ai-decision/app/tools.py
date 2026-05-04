@@ -143,6 +143,10 @@ class MCPToolExecutor:
         self.signal_url = signal_url.rstrip("/")
         self._client = httpx.AsyncClient(timeout=30)
 
+    async def close(self):
+        """关闭 HTTP 客户端"""
+        await self._client.aclose()
+
     async def _query_with_fallback(self, url: str, params: dict, date_key: str = "date") -> tuple[dict, str]:
         """带自动回退的数据查询
 
