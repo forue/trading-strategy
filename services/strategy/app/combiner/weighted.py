@@ -15,16 +15,16 @@ class StrategyWeights(BaseModel):
     rotation: float = 0.0
 
 
-# 三档策略默认权重
+# 三档策略默认权重（rotation 全档参与，避免轮动类因子仅保守档生效）
 DEFAULT_WEIGHTS = {
     "AGGRESSIVE": StrategyWeights(
-        capital_flow=0.50, momentum=0.35, technical=0.10, sentiment=0.05, valuation=0.0, rotation=0.0,
+        capital_flow=0.48, momentum=0.33, technical=0.10, sentiment=0.05, valuation=0.0, rotation=0.04,
     ),
     "MODERATE": StrategyWeights(
-        capital_flow=0.35, momentum=0.25, technical=0.25, sentiment=0.10, valuation=0.05, rotation=0.0,
+        capital_flow=0.33, momentum=0.23, technical=0.24, sentiment=0.10, valuation=0.05, rotation=0.05,
     ),
     "CONSERVATIVE": StrategyWeights(
-        capital_flow=0.25, momentum=0.15, technical=0.25, sentiment=0.15, valuation=0.15, rotation=0.05,
+        capital_flow=0.29, momentum=0.14, technical=0.24, sentiment=0.14, valuation=0.14, rotation=0.05,
     ),
 }
 
@@ -56,15 +56,17 @@ class FactorCombiner:
                 category_scores[cat] = []
             category_scores[cat].append(r)
 
-        # 类别内加权合成
+        # 类别内加权合成（因子置信度参与权重，全为 0 的类别不参与类间合成）
         category_avg: dict[str, float] = {}
         category_detail: dict[str, dict] = {}
         for cat, factors in category_scores.items():
-            total_weight = sum(f.weight for f in factors)
-            if total_weight > 0:
-                avg_score = sum(f.score * f.weight for f in factors) / total_weight
+            eff_denom = sum(f.weight * max(f.confidence, 0.0) for f in factors)
+            if eff_denom > 1e-12:
+                avg_score = sum(
+                    f.score * f.weight * max(f.confidence, 0.0) for f in factors
+                ) / eff_denom
             else:
-                avg_score = sum(f.score for f in factors) / len(factors) if factors else 0
+                continue
             category_avg[cat] = avg_score
             category_detail[cat] = {
                 "score": round(avg_score, 2),
@@ -80,9 +82,11 @@ class FactorCombiner:
             composite_score += score * w
             total_category_weight += w
 
-        # 归一化
+        # 归一化（全部因子置信度为 0 时无可用类别）
         if total_category_weight > 0:
             composite_score /= total_category_weight
+        else:
+            composite_score = 5.0
 
         return round(composite_score, 2), category_detail
 
@@ -134,13 +138,15 @@ class FactorCombiner:
         if weights is None:
             weights = DEFAULT_WEIGHTS["MODERATE"]
 
-        # 构建因子权重映射 (使用类别权重)
-        factor_weight_map = {}
-        for results in list(all_sector_results.values()):
+        # 构建因子权重映射 (使用类别权重 × 因子权重；合并多板块样本避免仅用首板块)
+        factor_weight_map: dict[str, float] = {}
+        for results in all_sector_results.values():
             for r in results:
                 cat_weight = getattr(weights, r.category.value, 0)
-                factor_weight_map[r.name] = r.weight * cat_weight
-            break  # 只需遍历一次获取因子结构
+                w = r.weight * cat_weight
+                prev = factor_weight_map.get(r.name, 0.0)
+                if w > prev:
+                    factor_weight_map[r.name] = w
 
         # 计算每个板块的综合排名得分
         final_scores = {}

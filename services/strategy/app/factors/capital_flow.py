@@ -13,7 +13,7 @@ class MainFlowFactor(BaseFactor):
     category = FactorCategory.CAPITAL_FLOW
     default_weight = 0.25
 
-    def calculate(self, sector_data: dict, history: list = None) -> FactorResult:
+    def calculate(self, sector_data: dict, history: list = None, context: dict = None) -> FactorResult:
         main_flow = sector_data.get("main_net_inflow", 0)
         turnover = sector_data.get("turnover", 0)
 
@@ -59,7 +59,7 @@ class NorthFlowFactor(BaseFactor):
     category = FactorCategory.CAPITAL_FLOW
     default_weight = 0.10
 
-    def calculate(self, sector_data: dict, history: list = None) -> FactorResult:
+    def calculate(self, sector_data: dict, history: list = None, context: dict = None) -> FactorResult:
         north_flow = sector_data.get("north_net_inflow", 0)
 
         # 北向资金强度 (亿元)

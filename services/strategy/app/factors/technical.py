@@ -19,7 +19,7 @@ class RSIFactor(BaseFactor):
     def __init__(self, period: int = 14):
         self.period = period
 
-    def calculate(self, sector_data: dict, history: list = None) -> FactorResult:
+    def calculate(self, sector_data: dict, history: list = None, context: dict = None) -> FactorResult:
         closes = [h.get("index_close", 0) for h in history]
         rsi = self._calc_rsi(closes, self.period)
 
@@ -94,7 +94,7 @@ class MACDFactor(BaseFactor):
         self.slow = slow
         self.signal = signal
 
-    def calculate(self, sector_data: dict, history: list = None) -> FactorResult:
+    def calculate(self, sector_data: dict, history: list = None, context: dict = None) -> FactorResult:
         closes = [h.get("index_close", 0) for h in history]
         dif, dea, macd_bar = self._calc_macd(closes, self.fast, self.slow, self.signal)
 
@@ -181,7 +181,7 @@ class BollingerFactor(BaseFactor):
         self.period = period
         self.multiplier = multiplier
 
-    def calculate(self, sector_data: dict, history: list = None) -> FactorResult:
+    def calculate(self, sector_data: dict, history: list = None, context: dict = None) -> FactorResult:
         closes = [h.get("index_close", 0) for h in history[-self.period:]]
         close = closes[-1] if closes else 0
 
@@ -248,7 +248,7 @@ class KDJFactor(BaseFactor):
     def __init__(self, period: int = 9):
         self.period = period
 
-    def calculate(self, sector_data: dict, history: list = None) -> FactorResult:
+    def calculate(self, sector_data: dict, history: list = None, context: dict = None) -> FactorResult:
         k, d, j = self._calc_kdj(history, self.period)
 
         # 评分逻辑

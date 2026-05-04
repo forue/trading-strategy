@@ -572,10 +572,7 @@ def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_
             new_positions = {}
             buy_signals = [s for s in signals if s.direction.value == "BUY"]
             if buy_signals:
-                total_weight = min(params.max_position * params.capital_pct, 1.0)
-                per_weight = total_weight / len(buy_signals)
-                for sig in buy_signals:
-                    new_positions[sig.sector_code] = per_weight
+                new_positions = {sig.sector_code: sig.position_ratio for sig in buy_signals}
 
             for sig in signals:
                 day_signals.append({
@@ -703,6 +700,10 @@ def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_
             "min_score_threshold": params.min_score_threshold,
             "score_gap_threshold": params.score_gap_threshold,
             "cooldown_days": params.cooldown_days,
+            "cross_section_alpha": params.cross_section_alpha,
+            "use_relative_score_gap": params.use_relative_score_gap,
+            "relative_score_gap_ratio": params.relative_score_gap_ratio,
+            "use_inverse_vol_weights": params.use_inverse_vol_weights,
         },
     }
 
@@ -792,38 +793,36 @@ async def analyze_factors(request: FactorAnalyzeRequest):
         if history_data:
             sector_data["_history"] = history_data
 
-        # 计算所有因子
-        from .factors import FactorRegistry
-        from .combiner import FactorCombiner, DEFAULT_WEIGHTS
+        from .combiner import DEFAULT_WEIGHTS
 
-        factor_results = FactorRegistry.calculate_all(sector_data, history_data)
+        abs_score, _val_score, category_detail, engine_fallback, factor_results = scoring_model._calculate_composite_score(
+            sector_data, strategy_type, StrategyParams(), history_data, None
+        )
 
-        # 获取策略权重
         weights = DEFAULT_WEIGHTS.get(strategy_type.value, DEFAULT_WEIGHTS["MODERATE"])
 
-        # 加权合成
-        combiner = FactorCombiner()
-        composite_score, category_detail = combiner.combine_weighted(factor_results, weights)
-
-        # 构建响应
         factors = []
-        for r in factor_results:
-            factors.append({
-                "name": r.name,
-                "category": r.category.value,
-                "raw_value": r.raw_value,
-                "score": r.score,
-                "weight": r.weight,
-                "confidence": r.confidence,
-                "detail": r.detail,
-            })
+        if factor_results:
+            for r in factor_results:
+                factors.append({
+                    "name": r.name,
+                    "category": r.category.value,
+                    "raw_value": r.raw_value,
+                    "score": r.score,
+                    "weight": r.weight,
+                    "confidence": r.confidence,
+                    "detail": r.detail,
+                })
 
         return success_response(data={
             "sector_code": sector_code,
             "sector_name": sector_data.get("sector_name", ""),
             "date": actual_date,
             "strategy_type": strategy_type.value,
-            "composite_score": composite_score,
+            "composite_score": abs_score,
+            "abs_composite_score": abs_score,
+            "rank_composite_score": None,
+            "engine_fallback": engine_fallback,
             "factors": factors,
             "category_scores": category_detail,
             "strategy_weights": weights.model_dump(),
@@ -871,24 +870,48 @@ async def analyze_factors_batch(request_body: FactorBatchRequest):
 
         weights = DEFAULT_WEIGHTS.get(strategy_type.value, DEFAULT_WEIGHTS["MODERATE"])
         combiner = FactorCombiner()
+        alpha = max(0.0, min(1.0, StrategyParams().cross_section_alpha))
 
-        # 筛选板块
         sectors = daily_data[actual_date]
         if request_body.sector_codes:
             sectors = [s for s in sectors if s.get("sector_code") in request_body.sector_codes]
 
-        results = []
+        context = scoring_model._build_cross_section_context(sectors)
+        all_fr: dict = {}
+        abs_by_code: dict[str, float] = {}
+        meta_by_code: dict[str, dict] = {}
+
         for sector in sectors:
+            code = sector.get("sector_code")
+            if not code:
+                continue
             try:
-                factor_results = FactorRegistry.calculate_all(sector, None)
-                score, _ = combiner.combine_weighted(factor_results, weights)
-                results.append({
-                    "sector_code": sector.get("sector_code", ""),
+                factor_results = FactorRegistry.calculate_all(sector, None, context)
+                abs_score, _ = combiner.combine_weighted(factor_results, weights)
+                all_fr[str(code)] = factor_results
+                abs_by_code[str(code)] = abs_score
+                meta_by_code[str(code)] = {
+                    "sector_code": code,
                     "sector_name": sector.get("sector_name", ""),
-                    "composite_score": round(score, 2),
-                })
+                }
             except Exception:
                 continue
+
+        rank_by_code: dict[str, float] = {}
+        if len(all_fr) >= 3:
+            rank_by_code = combiner.combine_ranking(all_fr, weights)
+
+        results = []
+        for code, meta in meta_by_code.items():
+            abs_s = abs_by_code[code]
+            rk = rank_by_code.get(code, abs_s)
+            final = round((1 - alpha) * abs_s + alpha * rk, 2) if rank_by_code else round(abs_s, 2)
+            results.append({
+                **meta,
+                "composite_score": final,
+                "abs_composite_score": round(abs_s, 2),
+                "rank_composite_score": round(rk, 2) if rank_by_code else None,
+            })
 
         results.sort(key=lambda x: x["composite_score"], reverse=True)
         for i, r in enumerate(results):

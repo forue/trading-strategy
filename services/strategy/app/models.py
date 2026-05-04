@@ -33,6 +33,14 @@ class StrategyParams(BaseModel):
     keep_overlap: bool = True               # 是否保留重叠持仓
     allow_empty: bool = True               # 市场不景气时是否允许空仓
     min_score_keep: float = 5.0            # 持仓保留阈值，评分高于此值可保留
+    # 截面与合成
+    cross_section_alpha: float = 0.35   # 综合分 = (1-α)*绝对分 + α*截面排名分；0 表示纯绝对分
+    # 调仓阈值：相对缺口与绝对缺口取较大，抑制分数整体漂移时的噪声交易
+    use_relative_score_gap: bool = True
+    relative_score_gap_ratio: float = 0.06  # 相对基准：max(ε, |当前|, |新建议|) 的比例
+    score_gap_epsilon: float = 1e-6
+    # 仓位：在入选标的中按波动率倒数分配（无波动数据时回退等权）
+    use_inverse_vol_weights: bool = True
 
 
 class TradeSignal(BaseModel):

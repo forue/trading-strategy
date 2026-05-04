@@ -13,7 +13,7 @@ class PEPercentileFactor(BaseFactor):
     category = FactorCategory.VALUATION
     default_weight = 0.05
 
-    def calculate(self, sector_data: dict, history: list = None) -> FactorResult:
+    def calculate(self, sector_data: dict, history: list = None, context: dict = None) -> FactorResult:
         pe_percentile = sector_data.get("pe_percentile")
 
         if pe_percentile is None:
@@ -57,7 +57,7 @@ class PBPercentileFactor(BaseFactor):
     category = FactorCategory.VALUATION
     default_weight = 0.05
 
-    def calculate(self, sector_data: dict, history: list = None) -> FactorResult:
+    def calculate(self, sector_data: dict, history: list = None, context: dict = None) -> FactorResult:
         pb_percentile = sector_data.get("pb_percentile")
 
         if pb_percentile is None:

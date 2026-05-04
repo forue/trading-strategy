@@ -16,7 +16,7 @@ class PriceMomentumFactor(BaseFactor):
     default_weight = 0.15
     min_history_days = 5
 
-    def calculate(self, sector_data: dict, history: list = None) -> FactorResult:
+    def calculate(self, sector_data: dict, history: list = None, context: dict = None) -> FactorResult:
         # 当日涨跌幅
         change_pct = sector_data.get("index_change_pct", 0)
 
@@ -70,7 +70,7 @@ class RelativeStrengthFactor(BaseFactor):
     category = FactorCategory.MOMENTUM
     default_weight = 0.10
 
-    def calculate(self, sector_data: dict, history: list = None) -> FactorResult:
+    def calculate(self, sector_data: dict, history: list = None, context: dict = None) -> FactorResult:
         change_pct = sector_data.get("index_change_pct", 0)
 
         # 市场平均涨跌幅 (从历史数据计算)

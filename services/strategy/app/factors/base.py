@@ -1,7 +1,7 @@
 """因子引擎 - 基类与注册中心"""
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 from pydantic import BaseModel
 from loguru import logger
 
@@ -36,12 +36,18 @@ class BaseFactor(ABC):
     min_history_days: int = 0
 
     @abstractmethod
-    def calculate(self, sector_data: dict, history: list[dict] = None) -> FactorResult:
+    def calculate(
+        self,
+        sector_data: dict,
+        history: list[dict] = None,
+        context: Optional[dict[str, Any]] = None,
+    ) -> FactorResult:
         """计算因子得分
 
         Args:
             sector_data: 当日板块数据
             history: 历史K线数据序列 (按日期升序)
+            context: 可选截面上下文，如 {"changes_by_date": {date: {sector_code: change_pct}}}
 
         Returns:
             FactorResult
@@ -101,13 +107,18 @@ class FactorRegistry:
         return [f for f in cls._factors.values() if f.category == category]
 
     @classmethod
-    def calculate_all(cls, sector_data: dict, history: list[dict] = None) -> list[FactorResult]:
+    def calculate_all(
+        cls,
+        sector_data: dict,
+        history: list[dict] = None,
+        context: Optional[dict[str, Any]] = None,
+    ) -> list[FactorResult]:
         """计算所有已注册因子"""
         results = []
         for factor in cls._factors.values():
             try:
                 if factor.validate_data(sector_data, history):
-                    result = factor.calculate(sector_data, history)
+                    result = factor.calculate(sector_data, history, context)
                     results.append(result)
                 else:
                     results.append(FactorResult(

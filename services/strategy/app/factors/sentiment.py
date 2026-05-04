@@ -18,7 +18,7 @@ class VolumeRatioFactor(BaseFactor):
     def __init__(self, period: int = 5):
         self.period = period
 
-    def calculate(self, sector_data: dict, history: list = None) -> FactorResult:
+    def calculate(self, sector_data: dict, history: list = None, context: dict = None) -> FactorResult:
         turnover = sector_data.get("turnover", 0)
 
         # 计算近N日平均成交量
@@ -83,7 +83,7 @@ class VolatilityFactor(BaseFactor):
     def __init__(self, period: int = 20):
         self.period = period
 
-    def calculate(self, sector_data: dict, history: list = None) -> FactorResult:
+    def calculate(self, sector_data: dict, history: list = None, context: dict = None) -> FactorResult:
         closes = [h.get("index_close", 0) for h in history[-self.period - 1:]]
 
         # 日收益率
@@ -142,7 +142,7 @@ class MarketBreadthFactor(BaseFactor):
     category = FactorCategory.SENTIMENT
     default_weight = 0.05
 
-    def calculate(self, sector_data: dict, history: list = None) -> FactorResult:
+    def calculate(self, sector_data: dict, history: list = None, context: dict = None) -> FactorResult:
         # 从sector_data获取预计算的市场广度
         breadth = sector_data.get("market_breadth", 0.5)
 
