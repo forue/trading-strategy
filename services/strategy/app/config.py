@@ -15,6 +15,12 @@ class Settings(BaseSettings):
     redis_password: str = ""
     redis_db: int = 1
 
+    # PostgreSQL (用于状态检查)
+    postgres_host: str = "localhost"
+    postgres_db: str = "rotation_db"
+    postgres_user: str = "admin"
+    postgres_password: str = ""
+
     # RabbitMQ
     rabbitmq_host: str = "localhost"
     rabbitmq_port: int = 5672

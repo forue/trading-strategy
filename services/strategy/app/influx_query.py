@@ -142,13 +142,66 @@ class InfluxDBQuery:
         return daily_data
 
     def get_available_date_range(self) -> tuple[str, str]:
-        """获取InfluxDB中数据的可用日期范围（结果缓存5分钟）"""
+        """获取InfluxDB中数据的可用日期范围（结果缓存5分钟）
+
+        使用单次查询获取 first 和 last 时间，避免两次查询。
+        """
         now = datetime.now()
         if self._date_range_cache is not None and self._date_range_cache_time is not None:
             if (now - self._date_range_cache_time).total_seconds() < self.CACHE_TTL:
                 return self._date_range_cache
 
-        # 查最早日期
+        # 单次查询获取最早和最新日期
+        query = f'''
+        import "experimental"
+        first_row = from(bucket: "{self.bucket}")
+          |> range(start: -730d)
+          |> filter(fn: (r) => r._measurement == "sector_capital_flow")
+          |> group()
+          |> sort(columns: ["_time"])
+          |> limit(n: 1)
+          |> findRecord(fn: (key) => true, idx: 0)
+
+        last_row = from(bucket: "{self.bucket}")
+          |> range(start: -730d)
+          |> filter(fn: (r) => r._measurement == "sector_capital_flow")
+          |> group()
+          |> sort(columns: ["_time"], desc: true)
+          |> limit(n: 1)
+          |> findRecord(fn: (key) => true, idx: 0)
+
+        union(tables: [first_row, last_row])
+        '''
+        try:
+            tables = self.query_api.query_data_frame(query)
+            if isinstance(tables, list) and len(tables) == 0:
+                return "", ""
+            if hasattr(tables, "empty") and tables.empty:
+                return "", ""
+
+            records = tables.to_dict("records") if hasattr(tables, "to_dict") else []
+            times = sorted([str(r.get("_time", "")) for r in records if r.get("_time")])
+            if len(times) >= 2:
+                min_date = datetime.fromisoformat(times[0].replace("Z", "+00:00")).strftime("%Y-%m-%d")
+                max_date = datetime.fromisoformat(times[-1].replace("Z", "+00:00")).strftime("%Y-%m-%d")
+                self._date_range_cache = (min_date, max_date)
+                self._date_range_cache_time = now
+                return min_date, max_date
+            elif len(times) == 1:
+                date = datetime.fromisoformat(times[0].replace("Z", "+00:00")).strftime("%Y-%m-%d")
+                self._date_range_cache = (date, date)
+                self._date_range_cache_time = now
+                return date, date
+        except Exception as e:
+            logger.error(f"获取日期范围失败: {e}")
+            # 回退到两次查询
+            return self._get_date_range_fallback()
+
+        return "", ""
+
+    def _get_date_range_fallback(self) -> tuple[str, str]:
+        """回退方案：两次查询获取日期范围"""
+        now = datetime.now()
         query_min = f'''
         from(bucket: "{self.bucket}")
           |> range(start: -730d)
@@ -176,7 +229,6 @@ class InfluxDBQuery:
 
         min_date = datetime.fromisoformat(times[0].replace("Z", "+00:00")).strftime("%Y-%m-%d")
 
-        # 查最新日期
         query_max = f'''
         from(bucket: "{self.bucket}")
           |> range(start: -730d)
