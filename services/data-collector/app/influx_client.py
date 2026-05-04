@@ -107,6 +107,34 @@ class InfluxDBManager:
             self.write_api.write(bucket=self.bucket, org=self.org, record=points)
             logger.info(f"写入板块K线数据 {len(points)} 条")
 
+    def write_north_bound_flow(self, data: list[dict]):
+        """写入北向资金数据
+
+        Args:
+            data: [{date, north_net_inflow}, ...]
+        """
+        points = []
+        for item in data:
+            date_str = item.get("date", "")
+            try:
+                if len(date_str) == 8:  # YYYYMMDD
+                    dt = datetime.strptime(date_str, "%Y%m%d")
+                else:  # YYYY-MM-DD
+                    dt = datetime.strptime(date_str, "%Y-%m-%d")
+            except (ValueError, TypeError):
+                dt = datetime.now()
+
+            point = (
+                Point("north_bound_flow")
+                .field("north_net_inflow", float(item.get("north_net_inflow", 0)))
+                .time(dt, WritePrecision.MS)
+            )
+            points.append(point)
+
+        if points:
+            self.write_api.write(bucket=self.bucket, org=self.org, record=points)
+            logger.info(f"写入北向资金数据 {len(points)} 条")
+
     def write_minute_capital_flow(self, data: list[dict]):
         """写入分钟级资金流向数据"""
         points = []

@@ -408,15 +408,67 @@ class DataCollector:
         return all_data
 
     def collect_north_bound_flow(self) -> list[dict]:
-        """采集北向资金数据（同花顺无对应接口，返回空列表）
+        """采集北向资金数据
+
+        使用 AkShare 的 stock_hsgt_north_net_flow_in_em() 接口获取北向资金净流入数据。
         非交易日不采集。
         """
         today = datetime.now().strftime("%Y%m%d")
         if not self.is_trade_day(today):
             logger.info(f"{today} 非交易日，跳过北向资金采集")
             return []
-        logger.info("北向资金数据暂无数据源")
-        return []
+
+        try:
+            # 获取北向资金净流入（东方财富源）
+            df = ak.stock_hsgt_north_net_flow_in_em()
+            if df is None or df.empty:
+                logger.warning("北向资金数据为空")
+                return []
+
+            results = []
+            for _, row in df.iterrows():
+                date_val = row.get("date", "")
+                if not date_val:
+                    continue
+                # 日期格式转换
+                if hasattr(date_val, "strftime"):
+                    date_str = date_val.strftime("%Y-%m-%d")
+                else:
+                    date_str = str(date_val)[:10]
+
+                # value 单位是万元，转换为元
+                net_inflow = self._safe_float(row.get("value", 0)) * 1e4
+
+                results.append({
+                    "date": date_str,
+                    "north_net_inflow": net_inflow,
+                })
+
+            # 只保留最近30天的数据
+            cutoff = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+            results = [r for r in results if r["date"] >= cutoff]
+
+            # 写入 InfluxDB
+            if results:
+                influx_manager.write_north_bound_flow(results)
+                logger.info(f"北向资金采集完成: {len(results)} 条")
+
+            return results
+        except Exception as e:
+            logger.error(f"北向资金采集失败: {e}")
+            return []
+
+    @staticmethod
+    def _safe_float(val, default=0.0) -> float:
+        """安全转换为浮点数"""
+        try:
+            if val is None:
+                return default
+            if isinstance(val, float) and (val != val or val == float('inf') or val == float('-inf')):
+                return default
+            return float(val)
+        except (ValueError, TypeError):
+            return default
 
     def calculate_sector_valuation_percentile(self, sector_code: str, trade_date: str = None, current_pe: float = None, current_pb: float = None) -> tuple[float | None, float | None]:
         """计算板块PE/PB历史分位
