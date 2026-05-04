@@ -126,7 +126,7 @@ class RabbitMQManager:
         routing_key: str = "#",
         durable: bool = True,
     ) -> None:
-        """消费消息（阻塞式）"""
+        """消费消息（阻塞式，手动确认）"""
         try:
             channel = self.get_channel()
             if not channel:
@@ -136,7 +136,17 @@ class RabbitMQManager:
             self.declare_exchange(exchange)
             result = channel.queue_declare(queue=queue, durable=durable)
             channel.queue_bind(exchange=exchange, queue=result.method.queue, routing_key=routing_key)
-            channel.basic_consume(queue=result.method.queue, on_message_callback=callback, auto_ack=True)
+
+            def _wrapper(ch, method, properties, body):
+                """包装回调，处理完成后手动确认"""
+                try:
+                    callback(ch, method, properties, body)
+                    ch.basic_ack(delivery_tag=method.delivery_tag)
+                except Exception as e:
+                    logger.error(f"消息处理失败，拒绝重试: {e}")
+                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+
+            channel.basic_consume(queue=result.method.queue, on_message_callback=_wrapper, auto_ack=False)
             logger.info(f"RabbitMQ 消费者启动: queue={queue}, routing_key={routing_key}")
             channel.start_consuming()
         except Exception as e:
