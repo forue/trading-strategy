@@ -226,8 +226,8 @@ function buildHeatmapData(sectors: string[]): any[] {
     })
     return data
   }
-  // 回退到随机数据
-  return generateHeatmapData(sectors)
+  // 无数据时返回空数组，不使用随机数据
+  return []
 }
 
 function generateHeatmapData(sectors: string[]): any[] {
