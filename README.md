@@ -544,6 +544,7 @@ GET  /mcp/sse                        - MCP SSE 连接端点
 │   ├── auth/                   # 认证中心 (Spring Boot)
 │   ├── strategy/               # 策略引擎 (Python)
 │   │   └── app/
+│   │       ├── scoring.py      # 策略引擎核心（评分模型、信号生成、回测）
 │   │       ├── factors/        # 因子引擎 (RSI/MACD/布林带/KDJ等)
 │   │       └── combiner/       # 因子合成引擎
 │   ├── data-collector/         # 数据采集 (Python)
@@ -651,6 +652,18 @@ docker compose restart backend-strategy
 
 # 重新构建并重启（代码有变更时）
 docker compose up -d --build backend-strategy
+```
+
+### Q: 如何重新加载 Nginx 配置
+
+修改 `nginx/default.conf` 后，需要重新加载 Nginx 配置才能生效：
+
+```powershell
+# 方式一：重新加载配置（推荐，不停机）
+docker compose exec frontend nginx -s reload
+
+# 方式二：重建并重启前端容器（配置变更时）
+docker compose up -d --build frontend
 ```
 
 ---

@@ -1,6 +1,6 @@
 # 策略引擎服务设计文档
 
-> 版本: v1.1 | 更新日期: 2026-04-19 | 更新内容: 添加交易成本功能，修复回测算法
+> 版本: v1.2 | 更新日期: 2026-05-04 | 更新内容: 说明架构演进，scoring.py 为核心实现
 
 ---
 
@@ -16,6 +16,21 @@
 | 框架 | FastAPI |
 | 依赖 | InfluxDB(数据源) + Redis(缓存) + RabbitMQ(通知) |
 | 核心算法 | 板块资金轮动评分模型 |
+
+### 架构说明
+
+核心逻辑集中在 `scoring.py`（策略引擎核心），包含评分计算、信号生成、回测引擎。`factors/` 目录实现 15 个量化因子，`combiner/` 实现因子合成引擎。
+
+```
+services/strategy/app/
+├── main.py          # API 端点
+├── scoring.py       # 策略引擎核心（评分、信号、回测）
+├── factors/         # 因子引擎（15个因子）
+├── combiner/        # 因子合成引擎
+├── models.py        # 数据模型
+├── influx_query.py  # InfluxDB 查询
+└── config.py        # 配置
+```
 
 ---
 

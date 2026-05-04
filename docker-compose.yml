@@ -301,6 +301,8 @@ services:
     env_file: .env
     ports:
       - "${SCHEDULER_PORT:-8006}:8006"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
       TZ: Asia/Shanghai
       DATA_COLLECTOR_URL: http://backend-data-collector:8003
