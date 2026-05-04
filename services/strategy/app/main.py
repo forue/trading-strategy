@@ -1,12 +1,13 @@
 ﻿"""策略引擎服务 - FastAPI主应用"""
 import sys
 import os
+import asyncio
 import calendar
 import json
 import numpy as np
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 from loguru import logger
 
@@ -153,8 +154,8 @@ def _is_trade_day(date_str: str) -> bool:
                 dates = df.iloc[:, 0].tolist()
                 _trade_dates_cache["dates"] = {d.strftime("%Y%m%d") if hasattr(d, "strftime") else str(d) for d in dates}
                 _trade_dates_cache["update_time"] = now
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"获取交易日历失败，使用周末回退: {e}")
 
     # 使用缓存
     if _trade_dates_cache["dates"]:
@@ -412,8 +413,13 @@ async def run_backtest(request: BacktestRequest):
         trading_days = len(sorted_dates)
         logger.info(f"回测 {request.strategy_type.value}: {trading_days} 个交易日, {sorted_dates[0]} ~ {sorted_dates[-1]}")
 
-        result_data = _run_backtest_core(
-            daily_data, sorted_dates, request.strategy_type, params, request.initial_capital, return_full=True
+        # 放到线程池执行，避免阻塞事件循环
+        loop = asyncio.get_event_loop()
+        result_data = await loop.run_in_executor(
+            None,
+            lambda: _run_backtest_core(
+                daily_data, sorted_dates, request.strategy_type, params, request.initial_capital, return_full=True
+            ),
         )
 
         bt_id = f"bt_{request.strategy_type.value}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
@@ -988,8 +994,13 @@ async def get_cache_stats():
 
 
 @app.delete("/cache/clear")
-async def clear_all_cache():
-    """清空当前数据库的所有缓存"""
+async def clear_all_cache(x_admin_token: str = Header(default="")):
+    """清空当前数据库的所有缓存（需要管理员令牌）"""
+    admin_token = os.environ.get("ADMIN_TOKEN", "")
+    if not admin_token:
+        raise HTTPException(status_code=403, detail="管理员令牌未配置，拒绝操作")
+    if x_admin_token != admin_token:
+        raise HTTPException(status_code=401, detail="无效的管理员令牌")
     try:
         redis_mgr.flushdb()
         logger.info("缓存已全部清空")
@@ -1024,10 +1035,10 @@ async def get_database_status():
         try:
             import psycopg2
             conn = psycopg2.connect(
-                host="postgres",
-                database="rotation_db",
-                user=os.environ.get("DB_USER", "admin"),
-                password=os.environ.get("DB_PASSWORD", ""),
+                host=settings.postgres_host,
+                database=settings.postgres_db,
+                user=settings.postgres_user,
+                password=settings.postgres_password,
                 connect_timeout=3,
             )
             conn.close()
@@ -1138,10 +1149,24 @@ async def get_system_settings():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+ALLOWED_SETTINGS_KEYS = {
+    "ws_push_enabled",
+    "ws_push_strategy_types",
+    "data_source",
+    "data_source_config",
+    "cache_ttl_days",
+    "scheduler_enabled",
+    "scheduler_times",
+}
+
+
 @app.put("/settings")
 async def update_system_settings(settings_body: dict):
     """更新系统设置"""
     try:
+        invalid_keys = set(settings_body.keys()) - ALLOWED_SETTINGS_KEYS
+        if invalid_keys:
+            raise HTTPException(status_code=400, detail=f"不允许的设置项: {', '.join(invalid_keys)}")
         updated = {}
         for key, value in settings_body.items():
             redis_key = f"settings:{key}"
@@ -1149,6 +1174,8 @@ async def update_system_settings(settings_body: dict):
             updated[key] = value
         logger.info(f"系统设置已更新: {list(updated.keys())}")
         return {"code": 200, "message": "设置已更新", "data": updated}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"更新系统设置失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1214,6 +1241,56 @@ async def get_replay_day_data(date: str, sector_code: str = None):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _run_optimization(daily_data, sorted_dates, strategy_type, initial_capital, n_trials):
+    """执行 Optuna 优化（同步函数，在线程池中运行）"""
+    import optuna
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+    def objective(trial):
+        params_dict = _suggest_params(trial, strategy_type)
+        params = StrategyParams(**params_dict)
+        result = _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_capital)
+        risk_adj = result["total_return"] / max(result["max_drawdown"], 0.01)
+        return risk_adj
+
+    study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=42))
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+
+    all_results = []
+    for trial in study.trials:
+        if trial.state == optuna.trial.TrialState.COMPLETE:
+            params_dict = _suggest_params(trial, strategy_type)
+            params = StrategyParams(**params_dict)
+            result = _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_capital)
+            all_results.append({
+                "params": params_dict,
+                "total_return": result["total_return"],
+                "annual_return": result["annual_return"],
+                "max_drawdown": result["max_drawdown"],
+                "sharpe_ratio": result["sharpe_ratio"],
+                "win_rate": result["win_rate"],
+                "trade_count": result["trade_count_actual"],
+                "risk_adj_score": round(trial.value, 4) if trial.value else 0,
+            })
+
+    all_results.sort(key=lambda x: x["risk_adj_score"], reverse=True)
+
+    best_params_dict = _suggest_params(study.best_trial, strategy_type)
+    best_params = StrategyParams(**best_params_dict)
+    final_result = _run_backtest_core(daily_data, sorted_dates, strategy_type, best_params, initial_capital, return_full=True)
+
+    logger.info(f"自动寻优完成: {len(all_results)} 次有效试验, 最优收益={final_result['total_return']*100:.2f}%, 回撤={final_result['max_drawdown']*100:.2f}%")
+
+    return {
+        "code": 200,
+        "data": {
+            "best_params": best_params_dict,
+            "best_result": final_result,
+            "all_results": all_results,
+        },
+    }
+
+
 @app.post("/data/replay/strategy-optimize")
 async def optimize_strategy_params(request_body: dict):
     """自动寻优 - 使用 Optuna 贝叶斯优化找最优参数"""
@@ -1242,53 +1319,13 @@ async def optimize_strategy_params(request_body: dict):
         sorted_dates = sorted(daily_data.keys())
         logger.info(f"自动寻优: {len(sorted_dates)} 个交易日, 最多 {n_trials} 次试验")
 
-        # Optuna 目标函数
-        def objective(trial):
-            params_dict = _suggest_params(trial, strategy_type)
-            params = StrategyParams(**params_dict)
-            result = _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_capital)
-            # 优化目标：收益/回撤比（越大越好）
-            risk_adj = result["total_return"] / max(result["max_drawdown"], 0.01)
-            return risk_adj
-
-        study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=42))
-        study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
-
-        # 收集所有试验结果
-        all_results = []
-        for trial in study.trials:
-            if trial.state == optuna.trial.TrialState.COMPLETE:
-                params_dict = _suggest_params(trial, strategy_type)
-                params = StrategyParams(**params_dict)
-                result = _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_capital)
-                all_results.append({
-                    "params": params_dict,
-                    "total_return": result["total_return"],
-                    "annual_return": result["annual_return"],
-                    "max_drawdown": result["max_drawdown"],
-                    "sharpe_ratio": result["sharpe_ratio"],
-                    "win_rate": result["win_rate"],
-                    "trade_count": result["trade_count_actual"],
-                    "risk_adj_score": round(trial.value, 4) if trial.value else 0,
-                })
-
-        all_results.sort(key=lambda x: x["risk_adj_score"], reverse=True)
-
-        # 用最优参数跑完整回测
-        best_params_dict = _suggest_params(study.best_trial, strategy_type)
-        best_params = StrategyParams(**best_params_dict)
-        final_result = _run_backtest_core(daily_data, sorted_dates, strategy_type, best_params, initial_capital, return_full=True)
-
-        logger.info(f"自动寻优完成: {len(all_results)} 次有效试验, 最优收益={final_result['total_return']*100:.2f}%, 回撤={final_result['max_drawdown']*100:.2f}%")
-
-        return {
-            "code": 200,
-            "data": {
-                "best_params": best_params_dict,
-                "best_result": final_result,
-                "all_results": all_results,
-            },
-        }
+        # 放到线程池执行，避免阻塞事件循环
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: _run_optimization(daily_data, sorted_dates, strategy_type, initial_capital, n_trials),
+        )
+        return result
     except HTTPException:
         raise
     except Exception as e:
