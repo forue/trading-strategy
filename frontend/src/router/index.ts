@@ -56,6 +56,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '因子分析', icon: 'Histogram' },
       },
       {
+        path: 'factor-ranking',
+        name: 'FactorRanking',
+        component: () => import('@/views/FactorRanking.vue'),
+        meta: { title: '板块因子排名', icon: 'Histogram' },
+      },
+      {
         path: 'settings',
         name: 'Settings',
         component: () => import('@/views/Settings.vue'),

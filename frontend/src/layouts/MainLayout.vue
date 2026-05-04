@@ -41,6 +41,10 @@
           <el-icon><Histogram /></el-icon>
           <span>因子分析</span>
         </el-menu-item>
+        <el-menu-item index="/factor-ranking">
+          <el-icon><Histogram /></el-icon>
+          <span>板块因子排名</span>
+        </el-menu-item>
         <el-menu-item index="/settings">
           <el-icon><Tools /></el-icon>
           <span>系统设置</span>

@@ -906,11 +906,28 @@ async def analyze_factors_batch(request_body: FactorBatchRequest):
             abs_s = abs_by_code[code]
             rk = rank_by_code.get(code, abs_s)
             final = round((1 - alpha) * abs_s + alpha * rk, 2) if rank_by_code else round(abs_s, 2)
+            
+            # 获取板块原始数据
+            sector_data = next((s for s in sectors if s.get("sector_code") == code), {})
+            
+            # 计算类别得分
+            category_scores = {}
+            for fr in all_fr.get(code, []):
+                cat = fr.category.value if hasattr(fr, 'category') else 'unknown'
+                if cat not in category_scores:
+                    category_scores[cat] = {"score": 0, "count": 0}
+                category_scores[cat]["score"] += fr.score * fr.weight
+                category_scores[cat]["count"] += 1
+            
             results.append({
                 **meta,
                 "composite_score": final,
                 "abs_composite_score": round(abs_s, 2),
                 "rank_composite_score": round(rk, 2) if rank_by_code else None,
+                "change_pct": round(sector_data.get("index_change_pct", 0), 2),
+                "main_inflow": round(sector_data.get("main_net_inflow", 0) / 1e8, 2),
+                "north_inflow": round(sector_data.get("north_net_inflow", 0) / 1e8, 2),
+                "category_scores": {k: round(v["score"], 2) for k, v in category_scores.items()},
             })
 
         results.sort(key=lambda x: x["composite_score"], reverse=True)
