@@ -1,5 +1,49 @@
 import request from './request'
 
+/** 与后端 `StrategyWeights` / `strategy_weights` 响应一致（0~1 小数） */
+export interface StrategyWeightsPayload {
+  capital_flow: number
+  momentum: number
+  technical: number
+  sentiment: number
+  valuation: number
+  rotation: number
+}
+
+export interface FactorResultItem {
+  name: string
+  category: string
+  raw_value: number
+  score: number
+  weight: number
+  confidence: number
+  detail: Record<string, unknown>
+}
+
+/** `POST /strategy/factors/analyze` 返回的 data 结构 */
+export interface FactorAnalyzeResult {
+  sector_code: string
+  sector_name: string
+  date: string
+  strategy_type: string
+  composite_score: number
+  abs_composite_score?: number
+  rank_composite_score?: number | null
+  engine_fallback?: boolean
+  factors: FactorResultItem[]
+  category_scores: Record<string, { score: number; factors: FactorResultItem[] }>
+  strategy_weights: StrategyWeightsPayload
+}
+
+export interface FactorBatchRankingItem {
+  sector_code: string
+  sector_name: string
+  composite_score: number
+  abs_composite_score?: number
+  rank_composite_score?: number | null
+  rank: number
+}
+
 export interface StrategyConfig {
   id: number
   strategy_type: 'AGGRESSIVE' | 'MODERATE' | 'CONSERVATIVE'
@@ -14,6 +58,13 @@ export interface StrategyConfig {
     commission_rate?: number
     stamp_tax_rate?: number
     slippage_rate?: number
+    min_score_threshold?: number
+    score_gap_threshold?: number
+    cooldown_days?: number
+    cross_section_alpha?: number
+    use_relative_score_gap?: boolean
+    relative_score_gap_ratio?: number
+    use_inverse_vol_weights?: boolean
   }
   is_active: boolean
 }
@@ -66,8 +117,16 @@ export const strategyApi = {
     sector_code: string
     strategy_type?: string
     date?: string
-  }): Promise<any> {
+  }): Promise<FactorAnalyzeResult> {
     return request.post('/strategy/factors/analyze', data)
+  },
+
+  analyzeFactorsBatch(data: {
+    date?: string
+    strategy_type?: string
+    sector_codes?: string[]
+  }): Promise<{ date: string; strategy_type: string; rankings: FactorBatchRankingItem[] }> {
+    return request.post('/strategy/factors/batch', data)
   },
 
   runBacktest(data: {

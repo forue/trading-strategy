@@ -30,14 +30,29 @@
           </template>
         </el-alert>
 
+        <el-alert
+          v-if="result.engine_fallback"
+          type="warning"
+          :closable="false"
+          show-icon
+          style="margin-bottom: 16px"
+          title="当前使用简化评分回退（因子引擎异常或数据不完整）。综合分仍可用，因子明细可能不完整。"
+        />
+
         <!-- 综合评分 + 类别得分 -->
         <div class="score-section">
+          <div class="score-meta">
+            <span>绝对综合分: <strong>{{ absCompositeDisplay }}</strong></span>
+            <span class="sep">|</span>
+            <span>截面排名综合分: <strong>{{ rankCompositeDisplay }}</strong></span>
+            <span class="hint">（单板块分析不产生全市场截面分，故多为「—」）</span>
+          </div>
           <div class="score-grid">
             <div class="score-box main-score">
               <div class="score-value" :style="{ color: getScoreColor(result.composite_score) }">
                 {{ result.composite_score?.toFixed(2) }}
               </div>
-              <div class="score-label">综合评分</div>
+              <div class="score-label">综合评分（与后端 composite_score 一致）</div>
             </div>
             <div v-for="cat in categoryList" :key="cat.key" class="score-box">
               <div class="score-value" :style="{ color: getScoreColor(cat.score) }">
@@ -92,14 +107,15 @@
 
         <!-- 权重配置 -->
         <div class="card-header" style="margin-top: 16px">
-          <span class="card-title">策略权重配置</span>
+          <span class="card-title">策略类别权重（展示）</span>
           <el-tag size="small" type="info">{{ selectedStrategy === 'AGGRESSIVE' ? '激进' : selectedStrategy === 'CONSERVATIVE' ? '保守' : '稳健' }}</el-tag>
+          <span class="weight-hint">与本次分析接口返回的 `strategy_weights` 同步；调整后仅本地预览，未调用保存接口。</span>
         </div>
 
         <el-row :gutter="12">
           <el-col :span="4" v-for="(weight, key) in strategyWeights" :key="key">
             <div class="weight-item">
-              <div class="weight-label">{{ getCategoryLabel(key) }}</div>
+              <div class="weight-label">{{ getCategoryLabel(String(key)) }}</div>
               <el-slider v-model="strategyWeights[key]" :min="0" :max="100" :step="5" size="small" />
               <div class="weight-value">{{ strategyWeights[key] }}%</div>
             </div>
@@ -115,41 +131,30 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { strategyApi } from '@/api/strategy'
-
-interface FactorResult {
-  name: string
-  category: string
-  raw_value: number
-  score: number
-  weight: number
-  confidence: number
-  detail: Record<string, any>
-}
-
-interface AnalysisResult {
-  sector_code: string
-  sector_name: string
-  date: string
-  composite_score: number
-  factors: FactorResult[]
-  category_scores: Record<string, { score: number; factors: FactorResult[] }>
-}
+import {
+  strategyApi,
+  type FactorAnalyzeResult,
+  type FactorResultItem,
+  type StrategyWeightsPayload,
+} from '@/api/strategy'
 
 const sectors = ref<{ sector_code: string; sector_name: string }[]>([])
 const selectedSector = ref('')
 const selectedStrategy = ref('MODERATE')
 const loading = ref(false)
-const result = ref<AnalysisResult | null>(null)
+const result = ref<FactorAnalyzeResult | null>(null)
 
-const strategyWeights = reactive({
-  capital_flow: 35,
-  momentum: 25,
-  technical: 25,
-  sentiment: 10,
-  valuation: 5,
-  rotation: 0,
-})
+/** 与后端 `combiner/weighted.py` DEFAULT_WEIGHTS 一致的滑块初值（百分比） */
+const DEFAULT_WEIGHTS_SLIDER: Record<
+  'AGGRESSIVE' | 'MODERATE' | 'CONSERVATIVE',
+  Record<'capital_flow' | 'momentum' | 'technical' | 'sentiment' | 'valuation' | 'rotation', number>
+> = {
+  AGGRESSIVE: { capital_flow: 48, momentum: 33, technical: 10, sentiment: 5, valuation: 0, rotation: 4 },
+  MODERATE: { capital_flow: 33, momentum: 23, technical: 24, sentiment: 10, valuation: 5, rotation: 5 },
+  CONSERVATIVE: { capital_flow: 29, momentum: 14, technical: 24, sentiment: 14, valuation: 14, rotation: 5 },
+}
+
+const strategyWeights = reactive({ ...DEFAULT_WEIGHTS_SLIDER.MODERATE })
 
 const categoryList = computed(() => {
   if (!result.value?.category_scores) return []
@@ -168,7 +173,31 @@ const categoryList = computed(() => {
   }))
 })
 
-const factorList = computed(() => result.value?.factors || [])
+const factorList = computed<FactorResultItem[]>(() => result.value?.factors || [])
+
+const absCompositeDisplay = computed(() => {
+  const r = result.value
+  if (!r) return '—'
+  const v = r.abs_composite_score ?? r.composite_score
+  return typeof v === 'number' ? v.toFixed(2) : '—'
+})
+
+const rankCompositeDisplay = computed(() => {
+  const v = result.value?.rank_composite_score
+  if (v === null || v === undefined) return '—'
+  return typeof v === 'number' ? v.toFixed(2) : '—'
+})
+
+function syncStrategyWeightsFromApi(sw?: StrategyWeightsPayload) {
+  if (!sw) return
+  const keys = ['capital_flow', 'momentum', 'technical', 'sentiment', 'valuation', 'rotation'] as const
+  for (const k of keys) {
+    const n = sw[k]
+    if (typeof n === 'number' && !Number.isNaN(n)) {
+      strategyWeights[k] = Math.round(n * 100)
+    }
+  }
+}
 
 async function loadSectors() {
   try {
@@ -187,6 +216,7 @@ async function analyzeSector() {
       strategy_type: selectedStrategy.value,
     })
     result.value = data
+    syncStrategyWeightsFromApi(data.strategy_weights)
   } catch (e: any) {
     ElMessage.error('分析失败: ' + (e?.message || '未知错误'))
     result.value = null
@@ -257,7 +287,8 @@ const factorDescriptions: Record<string, string> = {
   market_breadth: '上涨板块占总板块的比例。>0.7市场强势，<0.3市场弱势。',
   pe_percentile: '市盈率在历史中的百分位。低分位表示估值便宜，适合价值投资。',
   pb_percentile: '市净率在历史中的百分位。低分位表示估值便宜，适合保守投资。',
-  persistence: '板块在近期排名中保持靠前的比例。高持续性表示板块趋势稳定。',
+  persistence:
+    '近若干交易日中，在全市场截面涨幅排名进入前 K 的天数占比（需多板块历史对齐）；无截面数据时退化为正收益日占比。',
   trend_consistency: '板块涨跌方向的一致性。高一致性表示趋势明确。',
 }
 
@@ -269,7 +300,7 @@ function getFactorDescription(name: string): string {
   return factorDescriptions[name] || ''
 }
 
-function formatRawValue(factor: FactorResult): string {
+function formatRawValue(factor: FactorResultItem): string {
   const v = factor.raw_value
   if (factor.name.includes('flow')) return `${(v / 1e8).toFixed(2)}亿`
   if (factor.name.includes('rsi') || factor.name.includes('kdj')) return v.toFixed(1)
@@ -279,7 +310,7 @@ function formatRawValue(factor: FactorResult): string {
   return typeof v === 'number' ? v.toFixed(2) : String(v)
 }
 
-function formatDetail(factor: FactorResult): string {
+function formatDetail(factor: FactorResultItem): string {
   const d = factor.detail
   if (!d) return ''
   return Object.entries(d)
@@ -289,12 +320,8 @@ function formatDetail(factor: FactorResult): string {
 }
 
 watch(selectedStrategy, () => {
-  const w = {
-    AGGRESSIVE: { capital_flow: 50, momentum: 35, technical: 10, sentiment: 5, valuation: 0, rotation: 0 },
-    MODERATE: { capital_flow: 35, momentum: 25, technical: 25, sentiment: 10, valuation: 5, rotation: 0 },
-    CONSERVATIVE: { capital_flow: 25, momentum: 15, technical: 25, sentiment: 15, valuation: 15, rotation: 5 },
-  }
-  Object.assign(strategyWeights, w[selectedStrategy.value as keyof typeof w] || w.MODERATE)
+  const st = selectedStrategy.value as keyof typeof DEFAULT_WEIGHTS_SLIDER
+  Object.assign(strategyWeights, DEFAULT_WEIGHTS_SLIDER[st] || DEFAULT_WEIGHTS_SLIDER.MODERATE)
 })
 
 loadSectors()
@@ -313,6 +340,27 @@ loadSectors()
 
   .score-section {
     margin-bottom: 24px;
+  }
+
+  .score-meta {
+    font-size: 13px;
+    color: #606266;
+    margin-bottom: 12px;
+    .sep {
+      margin: 0 8px;
+      color: #dcdfe6;
+    }
+    .hint {
+      margin-left: 8px;
+      color: #909399;
+      font-size: 12px;
+    }
+  }
+
+  .weight-hint {
+    font-size: 12px;
+    color: #909399;
+    margin-left: 8px;
   }
 
   .score-grid {
