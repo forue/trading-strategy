@@ -39,6 +39,15 @@
           title="当前使用简化评分回退（因子引擎异常或数据不完整）。综合分仍可用，因子明细可能不完整。"
         />
 
+        <el-alert
+          v-if="result.note"
+          type="info"
+          :closable="false"
+          show-icon
+          style="margin-bottom: 16px"
+          :title="result.note"
+        />
+
         <!-- 综合评分 + 类别得分 -->
         <div class="score-section">
           <div class="score-meta">

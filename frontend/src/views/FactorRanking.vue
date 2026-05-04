@@ -48,17 +48,24 @@
           </el-table-column>
           <el-table-column prop="sector_name" label="板块名称" width="120" />
           <el-table-column prop="sector_code" label="板块代码" width="100" />
-          <el-table-column label="综合评分" width="100" align="center" sortable sort-by="absolute_score">
+          <el-table-column label="综合评分" width="100" align="center" sortable sort-by="composite_score">
             <template #default="{ row }">
-              <span :style="{ color: getScoreColor(row.absolute_score), fontWeight: 600 }">
-                {{ row.absolute_score?.toFixed(2) }}
+              <span :style="{ color: getScoreColor(row.composite_score), fontWeight: 600 }">
+                {{ row.composite_score?.toFixed(2) }}
               </span>
             </template>
           </el-table-column>
-          <el-table-column label="截面评分" width="100" align="center" sortable sort-by="rank_score">
+          <el-table-column label="绝对评分" width="100" align="center" sortable sort-by="abs_composite_score">
             <template #default="{ row }">
-              <span :style="{ color: getScoreColor(row.rank_score), fontWeight: 600 }">
-                {{ row.rank_score?.toFixed(2) }}
+              <span :style="{ color: getScoreColor(row.abs_composite_score), fontWeight: 600 }">
+                {{ row.abs_composite_score?.toFixed(2) }}
+              </span>
+            </template>
+          </el-table-column>
+          <el-table-column label="截面评分" width="100" align="center" sortable sort-by="rank_composite_score">
+            <template #default="{ row }">
+              <span :style="{ color: getScoreColor(row.rank_composite_score), fontWeight: 600 }">
+                {{ row.rank_composite_score?.toFixed(2) || '—' }}
               </span>
             </template>
           </el-table-column>
@@ -83,11 +90,11 @@
               </span>
             </template>
           </el-table-column>
-          <el-table-column label="类别得分" min-width="200">
+          <el-table-column label="类别得分" min-width="250">
             <template #default="{ row }">
               <div class="category-scores">
-                <span v-for="(cat, key) in row.category_scores" :key="key" class="cat-tag">
-                  {{ getCategoryLabel(key) }}: {{ cat.score?.toFixed(1) }}
+                <span v-for="(score, key) in row.category_scores" :key="key" class="cat-tag">
+                  {{ getCategoryLabel(key) }}: {{ typeof score === 'object' ? score.score?.toFixed(1) : score?.toFixed(1) }}
                 </span>
               </div>
             </template>
@@ -128,19 +135,25 @@ const chartOption = computed(() => {
   if (ranking.value.length === 0) return {}
   const top20 = ranking.value.slice(0, 20)
   return {
-    tooltip: { trigger: 'axis' },
-    grid: { left: 80, right: 20, top: 20, bottom: 30 },
+    tooltip: {
+      trigger: 'axis',
+      formatter: (params: any) => {
+        const p = params[0]
+        return `${p.name}<br/>综合评分: ${p.value}`
+      }
+    },
+    grid: { left: 60, right: 20, top: 30, bottom: 80 },
     xAxis: {
       type: 'category',
       data: top20.map(r => r.sector_name),
-      axisLabel: { rotate: 45, fontSize: 10 },
+      axisLabel: { rotate: 45, fontSize: 11, interval: 0 },
     },
-    yAxis: { type: 'value', name: '综合评分' },
+    yAxis: { type: 'value', name: '综合评分', min: 0, max: 10 },
     series: [{
       type: 'bar',
       data: top20.map(r => ({
-        value: r.absolute_score?.toFixed(2),
-        itemStyle: { color: getScoreColor(r.absolute_score) },
+        value: r.composite_score?.toFixed(2),
+        itemStyle: { color: getScoreColor(r.composite_score) },
       })),
     }],
   }

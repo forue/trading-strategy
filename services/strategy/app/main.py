@@ -824,8 +824,7 @@ async def analyze_factors(request: FactorAnalyzeRequest):
             "rank_composite_score": None,
             "engine_fallback": engine_fallback,
             "factors": factors,
-            "category_scores": category_detail,
-            "strategy_weights": weights.model_dump(),
+            "note": "单独分析仅计算绝对评分，批量排名页面会结合截面排名计算混合评分（0.65*绝对 + 0.35*截面）",
         })
     except HTTPException:
         raise
