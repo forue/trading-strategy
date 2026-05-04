@@ -138,9 +138,35 @@ async def trigger_collect():
 @app.post("/trigger/strategy")
 async def trigger_strategy():
     """手动触发策略计算"""
+    results = []
     async with httpx.AsyncClient(timeout=120) as client:
-        await _trigger_strategy_calculation(client)
-    return {"code": 200, "message": "策略计算已触发"}
+        for strategy in ["AGGRESSIVE", "MODERATE", "CONSERVATIVE"]:
+            try:
+                resp = await client.post(
+                    f"{settings.strategy_url}/calculate?strategy_type={strategy}"
+                )
+                data = resp.json()
+                signal_count = len(data.get("data", []))
+                results.append({
+                    "strategy": strategy,
+                    "signal_count": signal_count,
+                    "message": data.get("message", ""),
+                })
+                logger.info(f"策略计算结果 [{strategy}]: {signal_count} 条信号")
+            except Exception as e:
+                results.append({
+                    "strategy": strategy,
+                    "signal_count": 0,
+                    "error": str(e),
+                })
+                logger.error(f"策略计算失败 [{strategy}]: {e}")
+
+    total_signals = sum(r.get("signal_count", 0) for r in results)
+    return {
+        "code": 200,
+        "message": f"策略计算完成，共生成 {total_signals} 条信号",
+        "data": results,
+    }
 
 
 @app.post("/trigger/all")

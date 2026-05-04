@@ -58,8 +58,13 @@ export const useUserStore = defineStore('user', () => {
       
       // 2. 触发策略计算
       try {
-        await schedulerApi.triggerStrategy()
-        ElMessage.success('策略计算完成')
+        const strategyResult = await schedulerApi.triggerStrategy()
+        const totalSignals = strategyResult?.data?.reduce((sum: number, r: any) => sum + (r.signal_count || 0), 0) || 0
+        if (totalSignals > 0) {
+          ElMessage.success(`策略计算完成，共生成 ${totalSignals} 条信号`)
+        } else {
+          ElMessage.info('策略计算完成，今日无交易信号')
+        }
       } catch (error) {
         ElMessage.warning('策略计算可能已完成或正在进行中')
       }
