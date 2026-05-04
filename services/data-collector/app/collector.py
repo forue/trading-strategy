@@ -266,20 +266,27 @@ class DataCollector:
         """通过K线历史数据填充板块资金流（用于回放）
 
         K线数据包含 OHLC + 成交额，不含资金流，但涨跌幅可替代资金强度指标。
+        使用线程池并发采集，提升效率。
 
         Args:
             days: 回溯天数
         """
-        all_data = []
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
         sector_names = self.get_sector_names()
         end_date = datetime.now().strftime("%Y%m%d")
         start_date = (datetime.now() - timedelta(days=days + 30)).strftime("%Y%m%d")
 
-        for sector_name in sector_names:
+        all_data = []
+        failed = []
+
+        def _fetch_one(sector_name):
+            """采集单个板块K线"""
             try:
                 kline = self.collect_sector_kline(sector_name, start_date, end_date)
+                result = []
                 for item in kline:
-                    all_data.append({
+                    result.append({
                         "sector_code": item["sector_code"],
                         "sector_name": item["sector_name"],
                         "date": item["date"],
@@ -296,12 +303,24 @@ class DataCollector:
                         "pe_percentile": None,
                         "pb_percentile": None,
                     })
+                return sector_name, result
             except Exception as e:
-                logger.warning(f"采集 {sector_name} K线历史失败: {e}")
+                return sector_name, e
+
+        # 并发采集，最多 5 个线程
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {executor.submit(_fetch_one, name): name for name in sector_names}
+            for future in as_completed(futures):
+                sector_name, result = future.result()
+                if isinstance(result, Exception):
+                    failed.append(sector_name)
+                    logger.warning(f"采集 {sector_name} K线历史失败: {result}")
+                else:
+                    all_data.extend(result)
 
         if all_data:
             influx_manager.write_sector_capital_flow(all_data)
-            logger.info(f"通过K线填充历史资金流: {len(all_data)} 条")
+            logger.info(f"通过K线填充历史资金流: {len(all_data)} 条, 失败: {len(failed)} 个板块")
 
         return all_data
 
@@ -334,13 +353,22 @@ class DataCollector:
                 end_date=end_date,
             )
             if df is not None and not df.empty:
+                # 尝试使用 akshare 提供的涨跌幅字段，否则计算日内涨跌幅
+                has_change_col = "涨跌幅" in df.columns
+                prev_close = None
                 for _, row in df.iterrows():
                     close = self._safe_float(row.get("收盘价", 0))
                     open_ = self._safe_float(row.get("开盘价", 0))
                     high = self._safe_float(row.get("最高价", 0))
                     low = self._safe_float(row.get("最低价", 0))
-                    # 计算涨跌幅
-                    change_pct = ((close - open_) / open_ * 100) if open_ != 0 else 0
+                    # 优先使用 akshare 提供的涨跌幅（基于前收盘价）
+                    if has_change_col:
+                        change_pct = self._safe_float(row.get("涨跌幅", 0))
+                    elif prev_close and prev_close > 0:
+                        change_pct = ((close - prev_close) / prev_close * 100)
+                    else:
+                        change_pct = ((close - open_) / open_ * 100) if open_ != 0 else 0
+                    prev_close = close
 
                     results.append({
                         "sector_code": f"THS{sector_code}" if sector_code else f"THS_{sector_name}",
