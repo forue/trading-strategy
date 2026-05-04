@@ -48,7 +48,7 @@ export const strategyApi = {
   },
 
   collectHistory(days: number): Promise<any> {
-    return request.post('/strategy/data/collect/history', null, { params: { days }, timeout: 180000 })
+    return request.post('/data/collect/history', null, { params: { days }, timeout: 180000 })
   },
 
   getReplayDates(startDate?: string, endDate?: string): Promise<string[]> {

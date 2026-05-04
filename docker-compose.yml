@@ -193,6 +193,10 @@ services:
       RABBITMQ_PORT: 5672
       RABBITMQ_USER: ${RABBITMQ_USER:-guest}
       RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: ${DB_NAME:-rotation_db}
+      POSTGRES_USER: ${DB_USER:-admin}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
       DB_USER: ${DB_USER:-admin}
       DB_PASSWORD: ${DB_PASSWORD}
     depends_on:
