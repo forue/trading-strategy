@@ -136,12 +136,11 @@ class RotationScoringModel:
             history = item.get("_history", None)
             score, valuation_score = self._calculate_composite_score(item, strategy_type, params, history)
             main_flow = item.get("main_net_inflow", 0)
-            display_flow = main_flow if main_flow != 0 else self._simulate_flow_from_kline(item)
             scored_sectors.append({
                 **item,
                 "composite_score": score,
                 "valuation_score": valuation_score,
-                "display_flow": display_flow,
+                "display_flow": main_flow,
                 "strength_score": self._normalize_flow(main_flow) * 0.7 + self._normalize_flow(item.get("north_net_inflow", 0)) * 0.3,
                 "slope_score": 5.0 + np.sign(main_flow) * min(abs(main_flow) / 1e8, 5.0),
                 "rs_score": 5.0 + item.get("index_change_pct", 0) * 1.5,
@@ -154,9 +153,8 @@ class RotationScoringModel:
         # 调试：打印前5名评分
         logger.info(f"信号日期 {signal_date} 前5名板块:")
         for i, s in enumerate(scored_sectors[:5]):
-            display_flow = s.get("display_flow", s.get("main_net_inflow", 0))
-            source = "真实" if s.get("main_net_inflow", 0) != 0 else "模拟"
-            logger.info(f"  {i+1}. {s.get('sector_name')}: 综合={s['composite_score']:.2f} (强度={s.get('strength_score', 0):.2f}, 斜率={s.get('slope_score', 0):.2f}, 涨跌={s.get('rs_score', 0):.2f}, 净流入={display_flow/1e8:.2f}亿[{source}])")
+            display_flow = s.get("display_flow", 0)
+            logger.info(f"  {i+1}. {s.get('sector_name')}: 综合={s['composite_score']:.2f} (强度={s.get('strength_score', 0):.2f}, 斜率={s.get('slope_score', 0):.2f}, 涨跌={s.get('rs_score', 0):.2f}, 净流入={display_flow/1e8:.2f}亿)")
 
         # 根据策略类型生成信号
         signals = []
@@ -211,16 +209,12 @@ class RotationScoringModel:
         main_flow = item.get("main_net_inflow", 0)
         north_flow = item.get("north_net_inflow", 0)
         change_pct = item.get("index_change_pct", 0)
-
-        # 如果资金流为0，用K线模拟
-        if main_flow == 0:
-            main_flow = self._simulate_flow_from_kline(item)
         
         # 动量得分：涨跌幅 1% = 2分，上限10分
         rs_score = 5.0 + change_pct * 2.0
         
-        # 资金强度得分
-        strength_score = 5.0 + main_flow / 2e8
+        # 资金强度得分：无数据时返回 0
+        strength_score = 0.0 if main_flow == 0 else 5.0 + main_flow / 2e8
 
         # 估值得分 (0-10) - 仅使用真实PE/PB分位数据
         if strategy_type == StrategyType.CONSERVATIVE:
@@ -259,40 +253,15 @@ class RotationScoringModel:
 
     @staticmethod
     def _normalize_flow(flow: float) -> float:
-        """将资金流标准化为0-10分
+        """将资金标准化为0-10分
         
-        如果flow为0（历史数据无资金流），用涨跌幅+成交额模拟资金强度
+        无数据时返回 0，不使用模拟数据。
         """
         if flow == 0:
-            return 5.0
+            return 0.0
         normalized = 5.0 + flow / 2e8
         return max(0, min(10, normalized))
     
-    @staticmethod
-    def _simulate_flow_from_kline(item: dict) -> float:
-        """从K线数据模拟资金流
-        
-        使用成交额和涨跌幅模拟主力资金流向：
-        - 成交额大 + 涨幅大 = 资金大幅流入
-        - 成交额大 + 跌幅大 = 资金大幅流出
-        - 模拟值按成交额比例估算（假设主力占比30%）
-        
-        注意：turnover单位是元，转换为亿元
-        """
-        turnover = item.get("turnover", 0)  # 元
-        change_pct = item.get("index_change_pct", 0)
-        
-        if turnover == 0 or change_pct == 0:
-            return 0.0
-        
-        # 成交额的30%作为主力资金估算，再乘以涨跌幅方向
-        main_ratio = 0.3
-        # turnover是元，转换为亿元
-        turnover_yi = turnover / 1e8
-        simulated = turnover_yi * main_ratio * (change_pct / 100) * 1e8
-        
-        return simulated
-
     @staticmethod
     def _get_etf_info(sector_code: str, sector_name: str = None, sector_data: dict = None) -> dict:
         """获取板块对应的场内ETF信息

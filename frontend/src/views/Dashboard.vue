@@ -226,18 +226,8 @@ function buildHeatmapData(sectors: string[]): any[] {
     })
     return data
   }
-  // 无数据时返回空数组，不使用随机数据
+  // 无数据时返回空数组
   return []
-}
-
-function generateHeatmapData(sectors: string[]): any[] {
-  const data: any[] = []
-  sectors.forEach((_, xi) => {
-    for (let yi = 0; yi < 3; yi++) {
-      data.push([xi, yi, +(Math.random() * 10 - 5).toFixed(2)])
-    }
-  })
-  return data
 }
 
 // 加载热力图数据
