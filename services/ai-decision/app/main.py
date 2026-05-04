@@ -210,33 +210,55 @@ async def analyze_signal(request: AnalyzeRequest):
 
 class RiskCheckRequest(BaseModel):
     strategy_type: str = "MODERATE"
+    positions: dict = {}
+    total_assets: float = 0.0
+    daily_pnl: float = 0.0
+    max_drawdown: float = 0.0
+    market_change: float = 0.0
 
 
 @app.post("/api/ai/risk-check")
 async def risk_check(request: RiskCheckRequest):
-    """风险检查"""
+    """风险检查 - 使用 RiskMonitor 进行全面风险评估"""
     try:
-        today = datetime.now().strftime("%Y-%m-%d")
-        alerts = []
+        from .risk_monitor import RiskMonitor, PortfolioState
 
-        for st in ["AGGRESSIVE", "MODERATE", "CONSERVATIVE"]:
-            positions_raw = redis_mgr.get(f"positions:{st}")
-            if positions_raw:
-                positions = json.loads(positions_raw)
-                for code, weight in positions.items():
-                    if weight > 0.4:
-                        alerts.append({
-                            "alert_type": "concentration",
-                            "level": "WARNING",
-                            "title": f"{st} 策略仓位集中度过高",
-                            "description": f"板块 {code} 仓位占比 {weight*100:.0f}%，超过 40% 阈值",
-                            "suggestion": "建议分散至 2-3 个板块",
-                            "metrics": {"strategy": st, "sector": code, "weight": weight},
-                        })
+        monitor = RiskMonitor()
+
+        # 如果没有传入持仓，从 Redis 读取
+        positions = request.positions
+        if not positions:
+            for st in ["AGGRESSIVE", "MODERATE", "CONSERVATIVE"]:
+                positions_raw = redis_mgr.get(f"positions:{st}")
+                if positions_raw:
+                    positions = json.loads(positions_raw)
+                    break
+
+        state = PortfolioState(
+            positions=positions,
+            total_assets=request.total_assets,
+            daily_pnl=request.daily_pnl,
+            max_drawdown=request.max_drawdown,
+            market_change=request.market_change,
+        )
+
+        alerts = monitor.check_portfolio(state)
+        alert_dicts = [
+            {
+                "alert_type": a.alert_type,
+                "level": a.level.value,
+                "title": a.title,
+                "description": a.description,
+                "suggestion": a.suggestion,
+                "metrics": a.metrics,
+            }
+            for a in alerts
+        ]
 
         return success_response(data={
-            "alerts": alerts,
-            "overall_risk": "HIGH" if any(a["level"] == "CRITICAL" for a in alerts) else "MEDIUM" if alerts else "LOW",
+            "alerts": alert_dicts,
+            "alert_count": len(alert_dicts),
+            "overall_risk": "HIGH" if any(a.level == "CRITICAL" for a in alerts) else "MEDIUM" if alerts else "LOW",
         })
     except Exception as e:
         logger.error(f"风险检查失败: {e}")

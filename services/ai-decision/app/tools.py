@@ -130,6 +130,39 @@ MCP_TOOLS = [
                 "required": ["start_date", "end_date"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_portfolio_risk",
+            "description": "检查投资组合风险：仓位集中度、亏损、回撤、市场风险",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "positions": {
+                        "type": "object",
+                        "description": "持仓权重 {sector_code: weight}，如 {\"SW801780\": 0.5}"
+                    },
+                    "total_assets": {
+                        "type": "number",
+                        "description": "总资产（元），默认 0"
+                    },
+                    "daily_pnl": {
+                        "type": "number",
+                        "description": "当日盈亏（元），默认 0"
+                    },
+                    "max_drawdown": {
+                        "type": "number",
+                        "description": "最大回撤（0-1），默认 0"
+                    },
+                    "market_change": {
+                        "type": "number",
+                        "description": "大盘涨跌幅（0-1），默认 0"
+                    }
+                },
+                "required": ["positions"]
+            }
+        }
     }
 ]
 
@@ -194,6 +227,8 @@ class MCPToolExecutor:
                 return await self._get_sector_history(arguments)
             elif tool_name == "run_backtest":
                 return await self._run_backtest(arguments)
+            elif tool_name == "check_portfolio_risk":
+                return await self._check_portfolio_risk(arguments)
             else:
                 return {"error": f"未知工具: {tool_name}"}
         except Exception as e:
@@ -381,3 +416,33 @@ class MCPToolExecutor:
             return {"error": "回测失败"}
         except Exception as e:
             return {"error": str(e)}
+
+    async def _check_portfolio_risk(self, args: dict) -> dict:
+        """检查投资组合风险"""
+        from .risk_monitor import RiskMonitor, PortfolioState
+
+        monitor = RiskMonitor()
+        state = PortfolioState(
+            positions=args.get("positions", {}),
+            total_assets=args.get("total_assets", 0),
+            daily_pnl=args.get("daily_pnl", 0),
+            max_drawdown=args.get("max_drawdown", 0),
+            market_change=args.get("market_change", 0),
+        )
+
+        alerts = monitor.check_portfolio(state)
+        return {
+            "alerts": [
+                {
+                    "type": a.alert_type,
+                    "level": a.level.value,
+                    "title": a.title,
+                    "description": a.description,
+                    "suggestion": a.suggestion,
+                }
+                for a in alerts
+            ],
+            "alert_count": len(alerts),
+            "has_critical": any(a.level == "CRITICAL" for a in alerts),
+            "overall_risk": "HIGH" if any(a.level == "CRITICAL" for a in alerts) else "MEDIUM" if alerts else "LOW",
+        }
