@@ -129,6 +129,18 @@ class DailyReviewDataCollector:
         """收集复盘所需数据"""
         data = MarketData(date=date)
 
+        # 1. 从 InfluxDB 读取市场数据
+        if self.influx:
+            try:
+                market = self._query_market_data(date)
+                data.sh_index = market.get("sh_index", 0)
+                data.sh_change = market.get("sh_change", 0)
+                data.total_turnover = market.get("total_turnover", 0)
+                data.sector_performance = market.get("sector_performance", "")
+            except Exception as e:
+                logger.warning(f"从 InfluxDB 读取市场数据失败: {e}")
+
+        # 2. 从 Redis 读取信号
         signals_text = []
         for st in ["AGGRESSIVE", "MODERATE", "CONSERVATIVE"]:
             raw = self.redis.get(f"signals:{st}:{date}")
@@ -143,6 +155,7 @@ class DailyReviewDataCollector:
 
         data.signals_text = "\n".join(signals_text) if signals_text else "今日无信号"
 
+        # 3. 从 Redis 读取持仓
         portfolio_lines = []
         for st in ["AGGRESSIVE", "MODERATE", "CONSERVATIVE"]:
             raw = self.redis.get(f"positions:{st}")
@@ -157,3 +170,55 @@ class DailyReviewDataCollector:
         data.portfolio_text = "\n".join(portfolio_lines) if portfolio_lines else "暂无持仓"
 
         return data
+
+    def _query_market_data(self, date: str) -> dict:
+        """从 InfluxDB 查询当日市场数据"""
+        if not self.influx:
+            return {}
+
+        query = f'''
+        from(bucket: "{self.influx.bucket}")
+          |> range(start: {date}T00:00:00Z, stop: {date}T23:59:59Z)
+          |> filter(fn: (r) => r._measurement == "sector_capital_flow")
+          |> pivot(rowKey: ["_time", "sector_code"], columnKey: ["_field"], valueColumn: "_value")
+        '''
+        try:
+            tables = self.influx.query_api.query_data_frame(query)
+            if isinstance(tables, list) and len(tables) == 0:
+                return {}
+            if hasattr(tables, "empty") and tables.empty:
+                return {}
+
+            records = tables.to_dict("records")
+            if not records:
+                return {}
+
+            # 计算汇总数据
+            total_turnover = sum(r.get("turnover", 0) for r in records)
+            up_count = sum(1 for r in records if r.get("index_change_pct", 0) > 0)
+            down_count = sum(1 for r in records if r.get("index_change_pct", 0) < 0)
+            avg_change = sum(r.get("index_change_pct", 0) for r in records) / max(len(records), 1)
+
+            # 板块涨跌排行
+            sorted_sectors = sorted(records, key=lambda x: x.get("index_change_pct", 0), reverse=True)
+            top5 = sorted_sectors[:5]
+            bottom5 = sorted_sectors[-5:]
+
+            sector_lines = [f"上涨: {up_count} 个, 下跌: {down_count} 个, 平均: {avg_change:+.2f}%"]
+            sector_lines.append("涨幅前5:")
+            for s in top5:
+                sector_lines.append(f"  {s.get('sector_name')}: {s.get('index_change_pct', 0):+.2f}%")
+            sector_lines.append("跌幅前5:")
+            for s in bottom5:
+                sector_lines.append(f"  {s.get('sector_name')}: {s.get('index_change_pct', 0):+.2f}%")
+
+            return {
+                "total_turnover": total_turnover,
+                "up_count": up_count,
+                "down_count": down_count,
+                "avg_change": avg_change,
+                "sector_performance": "\n".join(sector_lines),
+            }
+        except Exception as e:
+            logger.error(f"查询市场数据失败: {e}")
+            return {}
