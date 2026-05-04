@@ -19,6 +19,8 @@ Frontend: Vue 3 + TypeScript + ECharts + Element Plus at `frontend/`.
 
 Infrastructure: PostgreSQL, Redis, InfluxDB, RabbitMQ (all via Docker Compose).
 
+**Strategy scoring** (`services/strategy/app/scoring.py`): multi-factor `combine_weighted`, optional `combine_ranking` blend (`StrategyParams.cross_section_alpha`), confidence-aware category averages, `_market_is_favorable`, relative score-gap, inverse-vol position weights. Factor docs: `docs/05-strategy-engine.md`, `docs/10-factor-engine.md`, `docs/11-factor-algorithms.md`.
+
 ## Shared Python Library
 
 `services/shared/` contains `RabbitMQManager`, `RedisManager`, `ApiResponse` used by all Python services. Dockerfiles use build context `./services` and COPY `shared/` into each container. When editing Python services, remember the import path hack:

@@ -1,6 +1,6 @@
 # 因子引擎架构设计文档
 
-> 版本: v1.0 | 创建日期: 2026-05-01 | 内容: 多因子量化评估体系
+> 版本: v1.1 | 更新日期: 2026-05-05 | 更新: 截面上下文、置信度合成、策略权重与 API 字段与实现对齐
 
 ---
 
@@ -28,8 +28,8 @@
 │  ┌──────────────────────────────────────────────────────────┐   │
 │  │                 因子合成引擎 (FactorCombiner)              │   │
 │  │                                                          │   │
-│  │   输入: 各因子得分 (0-10)                                 │   │
-│  │   方法: 加权合成 / 排名合成 / 分层合成                     │   │
+│  │   输入: 各因子得分 (0-10) + 置信度                         │   │
+│  │   方法: 类内置信度加权 → 类间策略权重 → 可选截面排名混合    │   │
 │  │   输出: 综合评分 (0-10)                                   │   │
 │  └──────────────┬───────────────────────────────────────────┘   │
 │                 │                                               │
@@ -45,7 +45,7 @@
 │  │   │           BaseFactor (因子基类)               │      │   │
 │  │   │  - name: str                                 │      │   │
 │  │   │  - weight: float                             │      │   │
-│  │   │  - calculate(data) -> FactorResult           │      │   │
+│  │   │  - calculate(data, history, context?) -> FactorResult │   │
 │  │   └─────────────────────────────────────────────┘      │   │
 │  └──────────────────────────────────────────────────────────┘   │
 │                                                                 │
@@ -81,9 +81,7 @@ services/strategy/app/
 │
 ├── combiner/            # 因子合成引擎
 │   ├── __init__.py
-│   ├── weighted.py      # 加权合成 (线性加权)
-│   ├── ranking.py       # 排名合成 (分位数排名)
-│   └── config.py        # 合成配置
+│   └── weighted.py      # StrategyWeights + FactorCombiner（加权合成、截面排名合成）
 │
 └── docs/                # 算法文档
     └── algorithms.md    # 因子算法参考
@@ -124,21 +122,22 @@ class BaseFactor(ABC):
     default_weight: float = 0.0
     
     @abstractmethod
-    def calculate(self, sector_data: dict, history: list = None) -> FactorResult:
+    def calculate(self, sector_data: dict, history: list = None, context: dict = None) -> FactorResult:
         """计算因子得分
         
         Args:
             sector_data: 当日板块数据 {sector_code, main_net_inflow, index_change_pct, ...}
-            history: 历史数据序列 [{date, close, volume, ...}]
+            history: 历史数据序列（按日期升序），字段含 date、index_change_pct、index_close 等
+            context: 可选截面上下文。例如 {"changes_by_date": {"2026-01-02": {"THS801010": 1.2, ...}}}
+                     由 scoring 在当日全板块列表上预聚合，供持续性等因子做横截面排名
         
         Returns:
             FactorResult
         """
         pass
     
-    @abstractmethod
-    def validate_data(self, sector_data: dict) -> bool:
-        """验证数据完整性"""
+    def validate_data(self, sector_data: dict, history: list = None) -> bool:
+        """验证数据完整性（实现类可覆盖）"""
         pass
 ```
 
@@ -169,194 +168,132 @@ class FactorRegistry:
     def get_by_category(cls, category: FactorCategory) -> list[BaseFactor]:
         """按类别获取因子"""
         return [f for f in cls._factors.values() if f.category == category]
+
+    @classmethod
+    def calculate_all(cls, sector_data: dict, history: list = None, context: dict = None) -> list[FactorResult]:
+        """依次计算已注册因子；context 原样传入各因子 calculate（实现见源码）"""
+        pass  # 实现见 services/strategy/app/factors/base.py
 ```
 
-### 2.5 因子合成引擎
+### 2.5 因子合成引擎（`combiner/weighted.py`）
+
+实现为 **两层结构**，与下文的 `StrategyWeights` / `DEFAULT_WEIGHTS` 一致：
+
+1. **类内合成**：对同一 `FactorCategory` 下的多个 `FactorResult`，使用有效权重  
+   `w_eff = factor.weight × max(confidence, 0)`。若该类别所有因子 `w_eff` 之和为 0，**整类不参与**类间合成（避免 `confidence=0` 的占位 5 分稀释信号）。
+2. **类间合成**：用 `StrategyWeights` 中各类别权重对类别得分加权，并按**实际出现的类别权重之和**归一化；若没有任何可用类别，综合分回退为 **5.0**。
 
 ```python
+class StrategyWeights(BaseModel):
+    capital_flow: float
+    momentum: float
+    technical: float
+    sentiment: float
+    valuation: float
+    rotation: float   # 三档策略均配置非零，轮动类因子参与合成
+
 class FactorCombiner:
-    """因子合成引擎"""
-    
-    def combine_weighted(self, results: list[FactorResult]) -> float:
-        """加权合成: score = Σ(factor_score × factor_weight) / Σ(weight)"""
-        if not results:
-            return 0.0
-        total_weight = sum(r.weight for r in results)
-        if total_weight == 0:
-            return 0.0
-        return sum(r.score * r.weight for r in results) / total_weight
-    
-    def combine_ranking(self, results: list[FactorResult]) -> float:
-        """排名合成: 将各因子排名归一化后加权"""
-        # 每个因子转为百分位排名 (0-1)
-        # 再加权合成
-        pass
-    
-    def combine_hierarchical(self, results: list[FactorResult], 
-                             category_weights: dict[str, float]) -> float:
-        """分层合成: 先类别内合成，再类别间加权"""
-        # 第一层: 同类别因子合成
-        # 第二层: 类别间加权
+    def combine_weighted(
+        self, results: list[FactorResult], weights: StrategyWeights | None
+    ) -> tuple[float, dict]:
+        """返回 (综合分, 按类别的明细 category_scores)"""
+        pass  # 实现见 weighted.py
+
+    def combine_ranking(
+        self, all_sector_results: dict[str, list[FactorResult]], weights: StrategyWeights | None
+    ) -> dict[str, float]:
+        """全市场当日：各因子先做横截面分位得分 (0–10)，再按因子权重合成；用于 scoring 中与绝对分混合"""
         pass
 ```
+
+**代码中的类别权重**以 `services/strategy/app/combiner/weighted.py` 的 `DEFAULT_WEIGHTS` 为准（会随版本迭代，文档表格仅作概念对照）。
 
 ---
 
 ## 三、因子体系设计
 
-### 3.1 因子分类与权重
+### 3.1 因子分类与策略类别权重
 
-| 类别 | 因子 | 激进权重 | 稳健权重 | 保守权重 | 数据需求 |
-|------|------|---------|---------|---------|---------|
-| **资金流** | 主力净流入 | 35% | 25% | 15% | 当日数据 |
-| | 北向净流入 | 15% | 10% | 10% | 当日数据 |
-| **动量** | 价格动量(5日) | 20% | 15% | 10% | 5日K线 |
-| | 相对强弱 | 15% | 10% | 5% | 5日K线 |
-| **技术指标** | RSI(14) | 5% | 10% | 10% | 14日K线 |
-| | MACD信号 | 5% | 10% | 10% | 26日K线 |
-| | 布林带位置 | 5% | 5% | 10% | 20日K线 |
-| **情绪** | 量比 | 0% | 5% | 5% | 5日成交量 |
-| | 波动率 | 0% | 5% | 10% | 20日K线 |
-| **估值** | PE分位 | 0% | 5% | 15% | 估值数据 |
-| | PB分位 | 0% | 5% | 10% | 估值数据 |
-| **轮动** | 持续性 | 0% | 0% | 5% | 10日排名 |
-| | **合计** | 100% | 100% | 100% | |
+因子按 `FactorCategory` 分为：资金流、动量、技术指标、情绪、估值、轮动。每个因子另有类内 `default_weight`。
 
-### 3.2 数据流
+**策略档位（AGGRESSIVE / MODERATE / CONSERVATIVE）的类别间权重**由 `StrategyWeights` 定义，源码为 `combiner/weighted.py` 中的 `DEFAULT_WEIGHTS`。当前实现要点：
+
+- **轮动（rotation）** 在三档中均占非零权重，与「轮动特征因子」语义一致。
+- 类内合成使用 **置信度加权**；类间再按上述类别权重归一。
+
+单因子与数据需求说明仍以 `docs/11-factor-algorithms.md` 为准。
+
+### 3.2 数据流（含截面与信号）
 
 ```
 InfluxDB (K线/资金流)
     │
     ▼
-InfluxQuery (数据查询)
+InfluxQuery (数据查询)  →  各板块 sector_data，可选 _history
     │
     ▼
-FactorRegistry (因子注册)
+scoring.calculate_daily_signals
+    │  预聚合 context.changes_by_date（全板块历史涨跌幅按日对齐）
+    ▼
+FactorRegistry.calculate_all(sector_data, history, context)
     │
-    ├── CapitalFlowFactor.calculate()  → FactorResult
-    ├── MomentumFactor.calculate()     → FactorResult
-    ├── TechnicalFactor.calculate()    → FactorResult
-    ├── SentimentFactor.calculate()    → FactorResult
-    ├── ValuationFactor.calculate()    → FactorResult
-    └── RotationFactor.calculate()     → FactorResult
+    ├── 各类因子.calculate(...)  → FactorResult
     │
     ▼
-FactorCombiner (合成)
+FactorCombiner.combine_weighted  → 绝对综合分 + category_scores
+    │
+    ▼（当日板块数 ≥ 3 且 cross_section_alpha > 0）
+FactorCombiner.combine_ranking  → 截面排名综合分
     │
     ▼
-ScoringModel (评分 → 信号)
+综合分 = (1 − α) × 绝对分 + α × 截面分   （α = StrategyParams.cross_section_alpha）
+    │
+    ▼
+三档轮动规则 → TradeSignal（含 position_ratio，可按波动倒数分配）
 ```
 
 ---
 
 ## 四、API 设计
 
-### 4.1 因子计算接口
+（网关前缀以部署为准，以下为策略服务相对路径；与 `services/strategy/app/main.py` 一致。）
 
-```
-POST /api/strategy/factors/calculate
-Content-Type: application/json
+### 4.1 单板块因子分析 `POST /factors/analyze`
 
-Request:
+Request（`FactorAnalyzeRequest`）:
+
+```json
 {
   "sector_code": "SW801780",
   "date": "2026-05-01",
   "strategy_type": "MODERATE"
 }
-
-Response:
-{
-  "code": 200,
-  "data": {
-    "sector_code": "SW801780",
-    "sector_name": "银行",
-    "date": "2026-05-01",
-    "composite_score": 7.23,
-    "factors": [
-      {
-        "name": "capital_flow",
-        "category": "capital_flow",
-        "raw_value": 1.5e8,
-        "score": 7.5,
-        "weight": 0.35,
-        "confidence": 0.9,
-        "detail": {"main_flow_yi": 1.5, "north_flow_yi": 0.3}
-      },
-      {
-        "name": "rsi_14",
-        "category": "technical",
-        "raw_value": 62.5,
-        "score": 6.0,
-        "weight": 0.10,
-        "confidence": 0.8,
-        "detail": {"period": 14, "level": "neutral"}
-      }
-    ],
-    "strategy_weights": {
-      "capital_flow": 0.35,
-      "momentum": 0.25,
-      "technical": 0.25,
-      "sentiment": 0.10,
-      "valuation": 0.05
-    }
-  }
-}
 ```
 
-### 4.2 批量因子计算
+Response `data` 主要字段：
 
-```
-POST /api/strategy/factors/batch
-Content-Type: application/json
+| 字段 | 说明 |
+|------|------|
+| `composite_score` | 与 `abs_composite_score` 一致（单板块接口不做全市场截面混合） |
+| `abs_composite_score` | 因子引擎加权综合分 |
+| `rank_composite_score` | 单板块分析时为 `null`（需全市场因子集方可定义截面排名分） |
+| `engine_fallback` | 因子引擎异常走简化评分时为 `true` |
+| `factors` | 各因子明细列表 |
+| `category_scores` | 按类别的合成明细（与 `combine_weighted` 第二返回值一致） |
+| `strategy_weights` | 当前档位的 `StrategyWeights` |
 
-Request:
-{
-  "date": "2026-05-01",
-  "strategy_type": "MODERATE",
-  "sector_codes": ["SW801780", "SW801150", "SW801080"]
-}
+### 4.2 批量因子分析 `POST /factors/batch`
 
-Response:
-{
-  "code": 200,
-  "data": {
-    "date": "2026-05-01",
-    "strategy_type": "MODERATE",
-    "rankings": [
-      {"sector_code": "SW801780", "sector_name": "银行", "composite_score": 7.23, "rank": 1},
-      {"sector_code": "SW801080", "sector_name": "电子", "composite_score": 6.85, "rank": 2},
-      {"sector_code": "SW801150", "sector_name": "医药生物", "composite_score": 5.12, "rank": 3}
-    ]
-  }
-}
-```
+当日多板块：先逐板块 `calculate_all`（带空或截面 `context`），再 `combine_ranking` 与默认 `cross_section_alpha` 做 **绝对分与截面分的混合**。`rankings` 中每条含：
 
-### 4.3 因子配置接口
+- `composite_score`：混合后最终分  
+- `abs_composite_score`：仅加权绝对分  
+- `rank_composite_score`：截面排名合成得分（板块数不足时可能为 `null`）  
+- `rank`：按 `composite_score` 排序的名次
 
-```
-GET /api/strategy/factors/config
-PUT /api/strategy/factors/config
+### 4.3 因子配置 `GET /factors/config`
 
-Request:
-{
-  "strategy_type": "MODERATE",
-  "weights": {
-    "capital_flow": 0.35,
-    "momentum": 0.25,
-    "technical": 0.25,
-    "sentiment": 0.10,
-    "valuation": 0.05
-  },
-  "factor_params": {
-    "rsi_period": 14,
-    "macd_fast": 12,
-    "macd_slow": 26,
-    "macd_signal": 9,
-    "bollinger_period": 20,
-    "bollinger_std": 2
-  }
-}
-```
+返回已注册因子列表与 `DEFAULT_WEIGHTS` 各档位权重（只读；持久化策略参数见策略配置接口）。
 
 ---
 
@@ -381,20 +318,19 @@ Request:
 - 数值在合理范围内
 - 历史数据长度满足最小要求
 
-校验失败时：
-- 返回 `confidence=0` 的结果
-- 不参与最终评分合成
-- 记录警告日志
+校验失败或数据不足时：
+- 注册中心仍可能产生 `confidence=0` 的占位结果；**类内合成时该类整体跳过**，不进入类别平均分。
+- 记录警告/错误日志。
 
 ---
 
-## 六、实现阶段
+## 六、实现阶段（里程碑）
 
-| 阶段 | 内容 | 优先级 | 工作量 |
-|------|------|--------|--------|
-| P0 | 因子基类 + 资金流/动量因子重构 | 高 | 1天 |
-| P1 | 技术指标因子 (RSI/MACD/布林带/KDJ) | 高 | 2天 |
-| P2 | 市场情绪因子 (量比/波动率/涨跌比) | 高 | 1天 |
-| P3 | 因子合成引擎 (加权/排名合成) | 高 | 1天 |
-| P4 | 轮动特征因子 (相关性/持续性) | 中 | 1天 |
-| P5 | 估值因子增强 + 多因子模型 | 中 | 2天 |
+| 阶段 | 内容 | 状态 |
+|------|------|------|
+| P0–P2 | 因子基类、资金流/动量/技术/情绪因子 | 已落地 |
+| P3 | 加权合成 + 截面排名合成 + 置信度参与类内权重 | 已落地 |
+| P4 | 轮动特征因子（持续性含截面 TOP-K；无截面时回退） | 已落地 |
+| P5 | 估值与其它增强 | 持续迭代 |
+
+策略侧可调参数见 `models.StrategyParams`：`cross_section_alpha`、`use_relative_score_gap`、`relative_score_gap_ratio`、`use_inverse_vol_weights` 等。

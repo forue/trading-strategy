@@ -34,8 +34,8 @@
 
 | 功能 | 说明 |
 |------|------|
-| **轮动策略** | 三档策略（激进/稳健/保守），基于资金强度、资金斜率、相对强弱、估值分位多因子评分 |
-| **因子分析** | 15+ 因子（RSI/MACD/布林带/KDJ/资金流/动量/情绪/估值/轮动），支持加权/排名合成 |
+| **轮动策略** | 三档策略（激进/稳健/保守）；多因子绝对分与截面排名分可配置混合；调仓支持相对评分缺口与波动倒数仓位 |
+| **因子分析** | 15+ 因子；类内置信度参与合成；`/factors/analyze` 与 `/factors/batch` 返回含 `engine_fallback`、截面相关分数字段（见 `docs/10-factor-engine.md`） |
 | **AI 决策** | ReAct Agent 循环，支持工具调用获取实时市场数据，流式输出 thinking 过程 |
 | **MCP Agent** | MCP 协议金融 Agent，支持板块分析、信号解读、风险评估 |
 | **信号推送** | WebSocket 实时推送交易信号，支持邮件/钉钉通知 |
@@ -50,7 +50,7 @@
 |------|------|
 | **前端** | Vue3 + TypeScript + ECharts + Element Plus + Pinia |
 | **认证中心** | Spring Boot 3 + Spring Security + JWT |
-| **策略引擎** | Python + FastAPI + Pandas + 多因子评分模型 |
+| **策略引擎** | Python + FastAPI + NumPy + 多因子注册/合成与轮动信号 |
 | **数据采集** | Python + FastAPI + AkShare |
 | **信号通知** | Python + FastAPI + WebSocket + RabbitMQ |
 | **资金管理** | Spring Boot 3 + JPA + PostgreSQL |
@@ -388,26 +388,18 @@ mvn spring-boot:run
 
 ### 板块资金轮动评分模型
 
-**数据源**: 申万一级行业指数、北向资金行业持股变化、主力资金净流入额
+**数据源**: 申万/同花顺行业板块日线、主力资金与北向资金等（见数据采集与 Influx 模型）。
 
-**评分维度**:
-
-| 维度 | 权重(激进) | 权重(稳健) | 权重(保守) |
-|------|-----------|-----------|-----------|
-| 资金强度 | 60% | 40% | 30% |
-| 资金斜率 | 30% | 25% | 20% |
-| 相对强弱 | 10% | 25% | 20% |
-| 估值分位 | - | 10% | 30% |
+**评分主路径**: 各板块经 **因子引擎**（`factors/` + `FactorRegistry`）产出因子得分 → **加权合成**（置信度参与类内权重，`combiner/weighted.py`）→ 可选与 **截面排名合成** 按 `StrategyParams.cross_section_alpha` 混合 → 得到排序用综合分。细节与 API 字段以 **`docs/05-strategy-engine.md`**、**`docs/10-factor-engine.md`** 为准。
 
 ### 三档策略差异化
 
 | 特征 | 激进轮动 | 稳健轮动 | 保守轮动 |
 |------|---------|---------|---------|
-| 选取数量 | 资金强度前2名 | 综合3名 | 满足条件5名内 |
-| 仓位上限 | 100% (满仓) | 50% (半仓) | 30% |
-| 持有周期 | 1-3日 | 5日 | 10日 |
-| 止损比例 | 5% | 3% | 2% |
-| 估值限制 | 无 | 无 | 分位≤50% |
+| 选取数量 | 综合分前 `top_n`（默认 2） | 前 3 名量级 | 估值过滤后前 `top_n`（默认 5） |
+| 仓位上限 | 默认满仓档 | 默认半仓档 | 默认低仓位档 |
+| 持有周期 / 止损 | 由 `StrategyParams` 配置（见 `/configs` 与文档） | 同左 | 同左，另含估值分位约束 |
+| 估值限制 | 无 | 无 | 分位阈值可配 |
 
 ### 每日输出
 
@@ -455,10 +447,12 @@ GET  /api/strategy/data/availability                      - 数据可用范围
 ### 因子分析
 
 ```
-POST /api/strategy/factors/analyze   - 单板块因子分析
-POST /api/strategy/factors/batch     - 批量因子分析（排名）
-GET  /api/strategy/factors/config    - 获取因子配置
+POST /api/strategy/factors/analyze   - 单板块因子分析（含 engine_fallback、abs_composite_score 等）
+POST /api/strategy/factors/batch     - 批量因子分析（绝对分 + 截面排名混合与排名）
+GET  /api/strategy/factors/config    - 获取因子与默认类别权重
 ```
+
+说明见 `docs/10-factor-engine.md` 第四节。
 
 ### 数据采集
 

@@ -1,12 +1,12 @@
 # 策略引擎服务设计文档
 
-> 版本: v1.2 | 更新日期: 2026-05-04 | 更新内容: 说明架构演进，scoring.py 为核心实现
+> 版本: v1.3 | 更新日期: 2026-05-05 | 更新内容: 与多因子引擎、截面混合、调仓参数及回测仓位对齐
 
 ---
 
 ## 一、模块概述
 
-策略引擎是系统的核心模块，负责基于板块资金流数据计算三档轮动策略的综合评分，输出每日买卖信号。采用四维加权评分模型，差异化输出激进/稳健/保守三种策略信号。
+策略引擎是系统的核心模块，负责基于板块日线与资金流等数据，经 **因子注册中心 + 因子合成** 得到综合评分，再按三档规则输出买卖信号。评分主路径为 **多因子绝对分** 与可选 **截面排名分** 的线性混合，辅以市场过滤、相对调仓阈值与波动倒数仓位（均可由 `StrategyParams` 关闭或调参）。
 
 | 属性 | 值 |
 |------|-----|
@@ -34,49 +34,29 @@ services/strategy/app/
 
 ---
 
-## 二、评分模型设计
+## 二、评分模型设计（与 `scoring.py` 一致）
 
-### 2.1 评分维度
+### 2.1 主路径：因子引擎 + 合成
 
-| 维度 | 含义 | 计算方式 | 分值范围 |
-|------|------|----------|---------|
-| **资金强度** | 主力+北向资金净流入的绝对强度 | 标准化函数映射到0-10 | 0-10 |
-| **资金斜率** | 过去N日资金净流入的趋势方向 | 线性回归斜率+强度修正 | 0-10 |
-| **相对强弱** | 板块指数涨幅相对大盘的超额收益 | 涨跌幅线性映射 | 0-10 |
-| **估值分位** | 当前估值在历史中的百分位 | 历史分位数计算 | 0-10 |
+1. 对每个板块：`FactorRegistry.calculate_all(sector_data, history, context)`，其中 `context.changes_by_date` 由当日全板块 `_history` 聚合，供轮动类因子使用。
+2. `FactorCombiner.combine_weighted` 得到 **绝对综合分**（类内置信度 × 因子权重，类间 `StrategyWeights`，见 `combiner/weighted.py`）。
+3. 若当日有效板块数 ≥ 3 且 `cross_section_alpha > 0`：`combine_ranking` 得到 **截面综合分**，最终  
+   `composite_score = (1 − α) × 绝对分 + α × 截面分`。
 
-### 2.2 三档权重矩阵
+### 2.2 回退路径
 
-| 维度 | 激进 | 稳健 | 保守 |
-|------|------|------|------|
-| 资金强度 | **60%** | 40% | 30% |
-| 资金斜率 | 30% | 25% | 20% |
-| 相对强弱 | 10% | 25% | 20% |
-| 估值分位 | - | 10% | **30%** |
+因子引擎异常时使用 `_calculate_composite_score_fallback`（简化资金+动量+估值），并标记 `engine_fallback`（单板块分析 API 返回该字段）。
 
-**设计逻辑**:
-- 激进策略侧重资金强度（追强势），忽略估值
-- 稳健策略均衡各维度，兼顾趋势与安全
-- 保守策略最重视估值分位（买便宜），降低资金追涨权重
+### 2.3 策略参数补充（`models.StrategyParams`）
 
-### 2.3 评分计算公式
+| 参数 | 含义 |
+|------|------|
+| `cross_section_alpha` | 截面排名分权重 α，0 表示仅绝对分 |
+| `use_relative_score_gap` | 是否启用相对调仓缺口（与绝对 `score_gap_threshold` 取 max） |
+| `relative_score_gap_ratio` | 相对缺口：比例 × max(ε, \|当前持仓最高分\|, \|新建议最高分\|, 1) |
+| `use_inverse_vol_weights` | 入选标的中是否按波动倒数分配 `position_ratio`（无 `_history` 时近似等权） |
 
-```
-综合评分 = Σ(维度得分 × 维度权重)
-
-其中:
-  资金强度得分 = normalize(main_net_inflow) × 0.7 + normalize(north_net_inflow) × 0.3
-  
-  normalize(flow) = 5.0 + flow / (2 × 10^8)
-                   钳位到 [0, 10]
-                   (以1亿为基准单位)
-
-  资金斜率得分 = 5.0 + sign(main_net_inflow) × min(|main_net_inflow| / 10^8, 5.0)
-
-  相对强弱得分 = 5.0 + index_change_pct × 1.5
-
-  估值得分 = 历史分位数映射 (0-10)
-```
+默认配置见源码；与旧「四维手写权重」文档不一致时以代码为准。
 
 ---
 
@@ -94,7 +74,7 @@ services/strategy/app/
   stop_loss = 12%         # 止损12%
   capital_pct = 50%      # 资金使用比例
   min_score_threshold = 2.0   # 最小评分阈值
-  score_gap_threshold = 1.0   # 评分差距阈值
+  score_gap_threshold = 1.0   # 与相对缺口取较大，见 StrategyParams
   cooldown_days = 2       # 调仓冷却期
   keep_overlap = true     # 保持重叠持仓
   allow_empty = true     # 允许空仓
@@ -106,8 +86,8 @@ services/strategy/app/
 买入逻辑:
   1. 按综合评分排序所有板块
   2. 选取评分最高的前2名（需满足min_score_threshold）
-  3. 等分仓位(各50%)买入
-  4. 生成BUY信号
+  3. 在 `max_position × capital_pct` 目标下，按 `use_inverse_vol_weights` 在入选标的中分配仓位（否则等权）
+  4. 生成BUY信号（每条含 `position_ratio`）
 
 卖出逻辑:
   1. 综合评分 < min_score_keep 的板块
@@ -130,7 +110,7 @@ services/strategy/app/
   stop_loss = 10%        # 止损10%
   capital_pct = 30%      # 资金使用比例
   min_score_threshold = 2.0   # 最小评分阈值
-  score_gap_threshold = 1.0   # 评分差距阈值
+  score_gap_threshold = 1.0   # 与相对缺口取较大，见 StrategyParams
   cooldown_days = 2       # 调仓冷却期
   keep_overlap = true     # 保持重叠持仓
   allow_empty = true     # 允许空仓
@@ -142,7 +122,7 @@ services/strategy/app/
 买入逻辑:
   1. 按综合评分排序
   2. 选取前3名（需满足min_score_threshold）
-  3. 等分仓位(各16.7%，总计50%)买入
+  3. 总目标仓位内按波动倒数或等权分配各 BUY 的 `position_ratio`
 
 卖出逻辑:
   1. 综合评分 < min_score_keep 的板块
@@ -166,7 +146,7 @@ services/strategy/app/
   capital_pct = 20%        # 资金使用比例
   valuation_pct_max = 50   # 估值分位≤50%
   min_score_threshold = 2.0   # 最小评分阈值
-  score_gap_threshold = 1.0   # 评分差距阈值
+  score_gap_threshold = 1.0   # 与相对缺口取较大，见 StrategyParams
   cooldown_days = 3       # 调仓冷却期
   keep_overlap = true     # 保持重叠持仓
   allow_empty = true     # 允许空仓
@@ -183,33 +163,6 @@ services/strategy/app/
 
 卖出逻辑:
   1. 综合评分 < min_score_keep 的板块
-  2. 不满足安全边际
-
-信号示例:
-  { direction: "BUY", sector: "银行", score: 6.12, position: 0.2,
-    reason: "保守轮动: 综合评分6.12, 估值分位≤50%, 仓位上限30%" }
-```
-目标: 注重安全边际，低仓位配置
-
-参数:
-  top_n = 5                # 取满足条件的前5名
-  max_position = 30%       # 仓位上限30%
-  hold_days = 10           # 持有10日
-  stop_loss = 2%           # 止损2%
-  capital_pct = 20%        # 资金使用比例
-  valuation_pct_max = 50   # 估值分位≤50%
-  commission_rate = 0.3‰   # 佣金费率（万三）
-  stamp_tax_rate = 1.0‰    # 印花税率（千一，仅卖出）
-  slippage_rate = 1.0‰     # 滑点费率（千一）
-
-买入逻辑:
-  1. 按综合评分排序
-  2. 筛选评分 ≥ 5.0 的板块
-  3. 选取前5名
-  4. 单板块仓位上限30%，总仓位不超过100%
-
-卖出逻辑:
-  1. 综合评分 < 3.5 的板块
   2. 不满足安全边际
 
 信号示例:
@@ -238,22 +191,16 @@ services/strategy/app/
 
   3. 从Redis读取当前持仓 (positions:{strategy_type})
 
-  4. 遍历每个板块数据，计算四维评分:
-      a. 资金强度得分 (normalize main_flow + north_flow)
-      b. 资金斜率得分 (趋势方向判断)
-      c. 相对强弱得分 (涨跌幅映射)
-      d. 估值得分 (历史分位)
+  4. 构建截面上下文（各板块 `_history` 中的 `date` + `index_change_pct` 按日合并）
 
-  5. 按策略权重计算综合评分:
-      AGGRESSIVE: strength*0.6 + slope*0.3 + rs*0.1
-      MODERATE:   strength*0.4 + slope*0.25 + rs*0.25 + val*0.1
-      CONSERVATIVE: strength*0.3 + slope*0.2 + rs*0.2 + val*0.3
+  5. 遍历每个板块：因子引擎计算 → 绝对综合分；当日板块数≥3 时再算截面分并按 `cross_section_alpha` 混合
 
-  6. 按评分排序，根据策略类型生成信号:
-      - 买入: 选取前N名（需满足min_score_threshold），计算仓位比例
-      - 卖出: 评分 < min_score_keep 的板块
-      - 冷却期: 止损后cooldown_days内不建仓
-      - 重叠持仓: keep_overlap=true时保留已持仓
+  6. 按综合分排序，根据策略类型生成信号:
+      - 市场过滤: `_market_is_favorable`（激进与稳健/保守规则不同，见源码）
+      - 买入: 前 N 名且过 `min_score_threshold`；调仓需超过有效评分缺口（绝对 + 相对）
+      - 卖出: 调出不在新组合中的标的（配合 keep_overlap 等）
+      - 仓位: `max_position × capital_pct` 内波动倒数或等权
+      - 冷却期: 止损后 cooldown_days 内不建仓
 
   7. 信号处理:
       a. 更新持仓到Redis (positions:{type}, TTL: 7天)
@@ -503,8 +450,9 @@ POST /data/replay/strategy-overlay  - 策略叠加回放
      e. 持仓天数递减（有持仓且计数器>0时才递减）
      f. 更新冷静期（止损冷静期递减）
      g. 检查调仓（冷静期结束且持仓天数≤0）
+        - 新仓位权重直接取自当日 BUY 信号的 `position_ratio`（与策略层一致）
         - 计算卖出旧持仓成本
-        - 计算买入新持仓成本  
+        - 计算买入新持仓成本
         - 扣除总交易成本
      h. 记录净值曲线
   4. 计算绩效指标:
