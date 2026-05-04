@@ -190,6 +190,85 @@ async def get_jobs():
     return {"code": 200, "data": jobs}
 
 
+@app.get("/logs")
+async def get_logs(service: str = "", lines: int = 100):
+    """获取服务日志（从 Docker 容器读取）"""
+    import re
+    import subprocess
+
+    # 可用的服务列表
+    valid_services = [
+        "backend-strategy", "backend-data-collector", "backend-signal",
+        "backend-ai-decision", "backend-scheduler", "backend-auth", "backend-fund",
+    ]
+
+    try:
+        if service and service in valid_services:
+            cmd = ["docker", "compose", "logs", "--tail", str(lines), service]
+        else:
+            cmd = ["docker", "compose", "logs", "--tail", str(lines)]
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+
+        log_entries = []
+        # 解析日志格式: container_name  | timestamp | level | message
+        log_pattern = re.compile(
+            r'(\S+)\s+\|\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+)\s+\|\s+(\w+)\s+\|\s+(.+)'
+        )
+        # 也匹配 uvicorn 格式: INFO:     ip:port - "method path" status
+        uvicorn_pattern = re.compile(
+            r'(\S+)\s+\|\s+(INFO|WARNING|ERROR|DEBUG):\s+(.+)'
+        )
+
+        for line in result.stdout.split('\n'):
+            if not line.strip():
+                continue
+
+            match = log_pattern.match(line)
+            if match:
+                container = match.group(1).strip()
+                time_str = match.group(2).strip()
+                level = match.group(3).strip().lower()
+                message = match.group(4).strip()
+
+                # 从容器名推断服务名
+                service_name = container.replace('rotation-', '')
+                if service_name == 'frontend':
+                    service_name = 'nginx'
+
+                log_entries.append({
+                    "time": time_str,
+                    "level": level if level in ('info', 'warn', 'error', 'debug') else 'info',
+                    "service": service_name,
+                    "message": message,
+                })
+                continue
+
+            match = uvicorn_pattern.match(line)
+            if match:
+                container = match.group(1).strip()
+                level = match.group(2).strip().lower()
+                message = match.group(3).strip()
+
+                service_name = container.replace('rotation-', '')
+                log_entries.append({
+                    "time": "",
+                    "level": level if level in ('info', 'warn', 'error', 'debug') else 'info',
+                    "service": service_name,
+                    "message": message,
+                })
+
+        # 倒序显示（最新的在前）
+        log_entries.reverse()
+
+        return {"code": 200, "data": log_entries}
+    except subprocess.TimeoutExpired:
+        return {"code": 500, "data": [], "message": "读取日志超时"}
+    except Exception as e:
+        logger.error(f"获取日志失败: {e}")
+        return {"code": 500, "data": [], "message": str(e)}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=settings.service_port)
