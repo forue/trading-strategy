@@ -46,7 +46,7 @@
         <el-divider content-position="left">信号分析专用模型</el-divider>
 
         <el-form-item label="信号分析提供商">
-          <el-select v-model="globalConfig.signal_analysis_provider" style="width: 100%" clearable placeholder="不指定则使用默认模型">
+          <el-select v-model="globalConfig.signal_analysis_provider" style="width: 100%" clearable placeholder="不指定则使用默认模型" @change="onProviderChange">
             <el-option label="（使用默认模型）" value="" />
             <el-option v-for="p in configuredProviders" :key="p.id" :label="p.name" :value="p.id" />
           </el-select>
@@ -116,7 +116,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { Delete } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { aiApi } from '@/api/ai'
@@ -183,15 +183,10 @@ const signalProviderModels = computed(() => {
   return provider?.models || []
 })
 
-// 标记是否正在加载配置
-let isLoadingConfig = true
-
-// 切换信号分析提供商时清空模型选择（仅用户手动切换时）
-watch(() => globalConfig.signal_analysis_provider, (newVal, oldVal) => {
-  if (!isLoadingConfig && newVal !== oldVal) {
-    globalConfig.signal_analysis_model = ''
-  }
-})
+// 用户手动切换提供商时清空模型选择
+function onProviderChange() {
+  globalConfig.signal_analysis_model = ''
+}
 
 onMounted(async () => {
   await loadProviders()
@@ -202,7 +197,6 @@ onMounted(async () => {
     globalConfig.signal_analysis_provider = config.signal_analysis_provider || ''
     globalConfig.signal_analysis_model = config.signal_analysis_model || ''
   } catch {}
-  isLoadingConfig = false
 })
 
 async function loadProviders() {
