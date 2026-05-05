@@ -48,8 +48,9 @@
         <el-form-item label="信号分析提供商">
           <el-select v-model="globalConfig.signal_analysis_provider" style="width: 100%" clearable placeholder="不指定则使用默认模型">
             <el-option label="（使用默认模型）" value="" />
-            <el-option v-for="p in providers" :key="p.id" :label="p.name" :value="p.id" />
+            <el-option v-for="p in configuredProviders" :key="p.id" :label="p.name" :value="p.id" />
           </el-select>
+          <div class="form-hint">默认使用「全局设置」中配置的提供商和模型</div>
         </el-form-item>
         <el-form-item label="信号分析模型">
           <el-select v-model="globalConfig.signal_analysis_model" style="width: 100%" clearable filterable allow-create placeholder="选择信号分析专用模型">
@@ -59,7 +60,7 @@
               <span v-if="m.desc" style="float: right; color: #8492a6; font-size: 11px">{{ m.desc }}</span>
             </el-option>
           </el-select>
-          <div class="form-hint">信号解读和风险分析使用的专用模型，留空则使用默认模型</div>
+          <div class="form-hint">留空则使用默认模型。可手动输入模型名称。</div>
         </el-form-item>
 
         <el-form-item>
@@ -144,6 +145,11 @@ const editForm = reactive({
   base_url: '',
   api_key: '',
   models: [] as { value: string; label: string; desc: string }[],
+})
+
+// 只显示已配置的提供商（有 API Key 或是 Ollama）
+const configuredProviders = computed(() => {
+  return providers.value.filter(p => p.id === 'ollama' || p.is_configured)
 })
 
 // 信号分析提供商对应的模型列表
