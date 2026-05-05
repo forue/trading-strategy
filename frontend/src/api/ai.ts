@@ -32,6 +32,8 @@ export interface AiConfig {
   ollama_base_url: string
   ollama_model: string
   has_api_key: boolean
+  signal_analysis_provider?: string
+  signal_analysis_model?: string
 }
 
 export interface DailyReviewReport {
