@@ -50,7 +50,7 @@
             <el-option label="（使用默认模型）" value="" />
             <el-option v-for="p in configuredProviders" :key="p.id" :label="p.name" :value="p.id" />
           </el-select>
-          <div class="form-hint">默认使用「全局设置」中配置的提供商和模型</div>
+          <div class="form-hint">{{ signalProviderHint }}</div>
         </el-form-item>
         <el-form-item label="信号分析模型">
           <el-select v-model="globalConfig.signal_analysis_model" style="width: 100%" clearable filterable allow-create placeholder="选择信号分析专用模型">
@@ -60,7 +60,7 @@
               <span v-if="m.desc" style="float: right; color: #8492a6; font-size: 11px">{{ m.desc }}</span>
             </el-option>
           </el-select>
-          <div class="form-hint">留空则使用默认模型。可手动输入模型名称。</div>
+          <div class="form-hint">{{ signalModelHint }}</div>
         </el-form-item>
 
         <el-form-item>
@@ -150,6 +150,29 @@ const editForm = reactive({
 // 只显示已配置的提供商（有 API Key 或是 Ollama）
 const configuredProviders = computed(() => {
   return providers.value.filter(p => p.id === 'ollama' || p.is_configured)
+})
+
+// 当前默认提供商名称
+const defaultProviderName = computed(() => {
+  const p = configuredProviders.value.find(pr => pr.id === aiStore.lastProvider)
+  return p?.name || configuredProviders.value[0]?.name || '未配置'
+})
+
+// 当前默认模型名称
+const defaultModelName = computed(() => {
+  return aiStore.lastModel || '未选择'
+})
+
+// 信号分析提供商提示
+const signalProviderHint = computed(() => {
+  if (globalConfig.signal_analysis_provider) return ''
+  return `默认使用 ${defaultProviderName.value}`
+})
+
+// 信号分析模型提示
+const signalModelHint = computed(() => {
+  if (globalConfig.signal_analysis_model) return '可手动输入模型名称'
+  return `默认使用 ${defaultModelName.value}`
 })
 
 // 信号分析提供商对应的模型列表
