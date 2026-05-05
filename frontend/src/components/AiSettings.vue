@@ -183,9 +183,14 @@ const signalProviderModels = computed(() => {
   return provider?.models || []
 })
 
-// 切换信号分析提供商时清空模型选择
-watch(() => globalConfig.signal_analysis_provider, () => {
-  globalConfig.signal_analysis_model = ''
+// 标记是否正在加载配置
+let isLoadingConfig = true
+
+// 切换信号分析提供商时清空模型选择（仅用户手动切换时）
+watch(() => globalConfig.signal_analysis_provider, (newVal, oldVal) => {
+  if (!isLoadingConfig && newVal !== oldVal) {
+    globalConfig.signal_analysis_model = ''
+  }
 })
 
 onMounted(async () => {
@@ -197,6 +202,7 @@ onMounted(async () => {
     globalConfig.signal_analysis_provider = config.signal_analysis_provider || ''
     globalConfig.signal_analysis_model = config.signal_analysis_model || ''
   } catch {}
+  isLoadingConfig = false
 })
 
 async function loadProviders() {
