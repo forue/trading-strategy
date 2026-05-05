@@ -35,13 +35,33 @@
       <div class="card-header">
         <span class="card-title">全局设置</span>
       </div>
-      <el-form label-width="120px" style="max-width: 500px">
+      <el-form label-width="140px" style="max-width: 600px">
         <el-form-item label="温度参数">
           <el-slider v-model="globalConfig.temperature" :min="0" :max="1" :step="0.1" show-input :show-input-controls="false" />
         </el-form-item>
         <el-form-item label="最大输出 Token">
           <el-input-number v-model="globalConfig.max_tokens" :min="100" :max="8000" :step="100" />
         </el-form-item>
+
+        <el-divider content-position="left">信号分析专用模型</el-divider>
+
+        <el-form-item label="信号分析提供商">
+          <el-select v-model="globalConfig.signal_analysis_provider" style="width: 100%" clearable placeholder="不指定则使用默认模型">
+            <el-option label="（使用默认模型）" value="" />
+            <el-option v-for="p in providers" :key="p.id" :label="p.name" :value="p.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="信号分析模型">
+          <el-select v-model="globalConfig.signal_analysis_model" style="width: 100%" clearable filterable allow-create placeholder="选择信号分析专用模型">
+            <el-option label="（使用默认模型）" value="" />
+            <el-option v-for="m in signalProviderModels" :key="m.value" :label="m.label" :value="m.value">
+              <span>{{ m.label }}</span>
+              <span v-if="m.desc" style="float: right; color: #8492a6; font-size: 11px">{{ m.desc }}</span>
+            </el-option>
+          </el-select>
+          <div class="form-hint">信号解读和风险分析使用的专用模型，留空则使用默认模型</div>
+        </el-form-item>
+
         <el-form-item>
           <el-button type="primary" @click="saveGlobalConfig" :loading="savingGlobal">保存设置</el-button>
         </el-form-item>
@@ -95,7 +115,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, watch, onMounted } from 'vue'
 import { Delete } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { aiApi } from '@/api/ai'
@@ -114,6 +134,8 @@ const savingGlobal = ref(false)
 const globalConfig = reactive({
   temperature: 0.7,
   max_tokens: 2000,
+  signal_analysis_provider: '',
+  signal_analysis_model: '',
 })
 
 const editForm = reactive({
@@ -124,12 +146,27 @@ const editForm = reactive({
   models: [] as { value: string; label: string; desc: string }[],
 })
 
+// 信号分析提供商对应的模型列表
+const signalProviderModels = computed(() => {
+  const providerId = globalConfig.signal_analysis_provider
+  if (!providerId) return []
+  const provider = providers.value.find(p => p.id === providerId)
+  return provider?.models || []
+})
+
+// 切换信号分析提供商时清空模型选择
+watch(() => globalConfig.signal_analysis_provider, () => {
+  globalConfig.signal_analysis_model = ''
+})
+
 onMounted(async () => {
   await loadProviders()
   try {
     const config = await aiApi.getConfig()
     globalConfig.temperature = config.temperature
     globalConfig.max_tokens = config.max_tokens
+    globalConfig.signal_analysis_provider = config.signal_analysis_provider || ''
+    globalConfig.signal_analysis_model = config.signal_analysis_model || ''
   } catch {}
 })
 
@@ -237,6 +274,8 @@ async function saveGlobalConfig() {
     await aiApi.updateConfig({
       temperature: globalConfig.temperature,
       max_tokens: globalConfig.max_tokens,
+      signal_analysis_provider: globalConfig.signal_analysis_provider,
+      signal_analysis_model: globalConfig.signal_analysis_model,
     })
     ElMessage.success('设置已保存')
   } catch {
