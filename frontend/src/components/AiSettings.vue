@@ -300,7 +300,10 @@ async function testConnection(provider: ProviderConfig) {
 async function saveGlobalConfig() {
   savingGlobal.value = true
   try {
+    // 先读取当前完整配置，再合并更新
+    const current = await aiApi.getConfig()
     await aiApi.updateConfig({
+      ...current,
       temperature: globalConfig.temperature,
       max_tokens: globalConfig.max_tokens,
       signal_analysis_provider: globalConfig.signal_analysis_provider,
