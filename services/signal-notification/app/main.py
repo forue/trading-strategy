@@ -51,7 +51,10 @@ async def startup_event():
         db=settings.redis_db,
     )
     _load_notify_config()
-    logger.info("推送通道配置已加载")
+    # 连接建立后启动 RabbitMQ 消费者
+    mq_thread = threading.Thread(target=start_rabbitmq_consumer, daemon=True)
+    mq_thread.start()
+    logger.info("信号通知服务启动完成")
 
 
 @app.on_event("shutdown")
@@ -149,11 +152,6 @@ def start_rabbitmq_consumer():
         )
     except Exception as e:
         logger.error(f"RabbitMQ消费者启动失败: {e}")
-
-
-# 在后台线程启动RabbitMQ消费者
-mq_thread = threading.Thread(target=start_rabbitmq_consumer, daemon=True)
-mq_thread.start()
 
 
 @app.get("/health")

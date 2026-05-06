@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     redis_host: str = "localhost"
     redis_port: int = 6379
     redis_password: str = ""
-    redis_db: int = 2
+    redis_db: int = 1
 
     # RabbitMQ
     rabbitmq_host: str = "localhost"
