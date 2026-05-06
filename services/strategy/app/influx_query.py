@@ -33,6 +33,30 @@ class InfluxDBQuery:
         except (ValueError, TypeError, ArithmeticError):
             return default
 
+    @staticmethod
+    def _to_records(tables) -> list[dict]:
+        """将 query_data_frame 返回的结果统一转换为 records 列表
+
+        query_data_frame 可能返回：
+        - 空列表 []（无数据）
+        - 单个 DataFrame
+        - DataFrame 列表（多表合并）
+        """
+        if tables is None:
+            return []
+        if isinstance(tables, list):
+            if len(tables) == 0:
+                return []
+            # 多个 DataFrame 合并
+            import pandas as pd
+            combined = pd.concat(tables, ignore_index=True)
+            return combined.to_dict("records") if not combined.empty else []
+        if hasattr(tables, "empty") and tables.empty:
+            return []
+        if hasattr(tables, "to_dict"):
+            return tables.to_dict("records")
+        return []
+
     def __init__(self):
         self.client = InfluxDBClient(
             url=settings.influxdb_url,
@@ -99,15 +123,8 @@ class InfluxDBQuery:
             logger.error(f"InfluxDB查询失败: {e}")
             return {}
 
-        # query_data_frame 在无数据时可能返回空列表或空DataFrame
-        if isinstance(tables, list) and len(tables) == 0:
-            return {}
-        if hasattr(tables, "empty") and tables.empty:
-            return {}
-
-        # 按日期分组
-        daily_data: dict[str, list[dict]] = {}
-        records = tables.to_dict("records")
+        records = self._to_records(tables)
+        if not records:
         for row in records:
             time_str = str(row.get("_time", ""))
             try:
@@ -151,53 +168,8 @@ class InfluxDBQuery:
             if (now - self._date_range_cache_time).total_seconds() < self.CACHE_TTL:
                 return self._date_range_cache
 
-        # 单次查询获取最早和最新日期
-        query = f'''
-        import "experimental"
-        first_row = from(bucket: "{self.bucket}")
-          |> range(start: -730d)
-          |> filter(fn: (r) => r._measurement == "sector_capital_flow")
-          |> group()
-          |> sort(columns: ["_time"])
-          |> limit(n: 1)
-          |> findRecord(fn: (key) => true, idx: 0)
-
-        last_row = from(bucket: "{self.bucket}")
-          |> range(start: -730d)
-          |> filter(fn: (r) => r._measurement == "sector_capital_flow")
-          |> group()
-          |> sort(columns: ["_time"], desc: true)
-          |> limit(n: 1)
-          |> findRecord(fn: (key) => true, idx: 0)
-
-        union(tables: [first_row, last_row])
-        '''
-        try:
-            tables = self.query_api.query_data_frame(query)
-            if isinstance(tables, list) and len(tables) == 0:
-                return "", ""
-            if hasattr(tables, "empty") and tables.empty:
-                return "", ""
-
-            records = tables.to_dict("records") if hasattr(tables, "to_dict") else []
-            times = sorted([str(r.get("_time", "")) for r in records if r.get("_time")])
-            if len(times) >= 2:
-                min_date = datetime.fromisoformat(times[0].replace("Z", "+00:00")).strftime("%Y-%m-%d")
-                max_date = datetime.fromisoformat(times[-1].replace("Z", "+00:00")).strftime("%Y-%m-%d")
-                self._date_range_cache = (min_date, max_date)
-                self._date_range_cache_time = now
-                return min_date, max_date
-            elif len(times) == 1:
-                date = datetime.fromisoformat(times[0].replace("Z", "+00:00")).strftime("%Y-%m-%d")
-                self._date_range_cache = (date, date)
-                self._date_range_cache_time = now
-                return date, date
-        except Exception as e:
-            logger.error(f"获取日期范围失败: {e}")
-            # 回退到两次查询
-            return self._get_date_range_fallback()
-
-        return "", ""
+        # 直接使用回退方案：两次查询获取最早和最新日期
+        return self._get_date_range_fallback()
 
     def _get_date_range_fallback(self) -> tuple[str, str]:
         """回退方案：两次查询获取日期范围"""
@@ -220,7 +192,7 @@ class InfluxDBQuery:
             logger.error(f"获取最早日期失败: {e}")
             return "", ""
 
-        records = tables.to_dict("records")
+        records = self._to_records(tables)
         if not records:
             return "", ""
         times = sorted([str(r.get("_time", "")) for r in records if r.get("_time")])
@@ -239,9 +211,7 @@ class InfluxDBQuery:
         '''
         try:
             tables_max = self.query_api.query_data_frame(query_max)
-            if not (isinstance(tables_max, list) and len(tables_max) == 0) and \
-               not (hasattr(tables_max, "empty") and tables_max.empty):
-                records_max = tables_max.to_dict("records")
+            records_max = self._to_records(tables_max)
                 times_max = sorted([str(r.get("_time", "")) for r in records_max if r.get("_time")])
                 if times_max:
                     max_date = datetime.fromisoformat(times_max[-1].replace("Z", "+00:00")).strftime("%Y-%m-%d")
@@ -270,11 +240,7 @@ class InfluxDBQuery:
         '''
         try:
             tables = self.query_api.query_data_frame(query)
-            if isinstance(tables, list) and len(tables) == 0:
-                return []
-            if hasattr(tables, "empty") and tables.empty:
-                return []
-            records = tables.to_dict("records")
+            records = self._to_records(tables)
             # distinct结果中 sector_code 在 _value 列
             codes = []
             for r in records:
@@ -371,7 +337,7 @@ class InfluxDBQuery:
             return []
 
         result = []
-        records = tables.to_dict("records")
+        records = self._to_records(tables)
         for row in records:
             time_str = str(row.get("_time", ""))
             try:
@@ -432,7 +398,7 @@ class InfluxDBQuery:
         if hasattr(tables, "empty") and tables.empty:
             return None, None
 
-        records = tables.to_dict("records")
+        records = self._to_records(tables)
         
         pe_values = []
         pb_values = []
