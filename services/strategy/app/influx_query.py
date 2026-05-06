@@ -125,6 +125,9 @@ class InfluxDBQuery:
 
         records = self._to_records(tables)
         if not records:
+            return {}
+
+        daily_data: dict[str, list[dict]] = {}
         for row in records:
             time_str = str(row.get("_time", ""))
             try:
@@ -212,12 +215,12 @@ class InfluxDBQuery:
         try:
             tables_max = self.query_api.query_data_frame(query_max)
             records_max = self._to_records(tables_max)
-                times_max = sorted([str(r.get("_time", "")) for r in records_max if r.get("_time")])
-                if times_max:
-                    max_date = datetime.fromisoformat(times_max[-1].replace("Z", "+00:00")).strftime("%Y-%m-%d")
-                    self._date_range_cache = (min_date, max_date)
-                    self._date_range_cache_time = now
-                    return min_date, max_date
+            times_max = sorted([str(r.get("_time", "")) for r in records_max if r.get("_time")])
+            if times_max:
+                max_date = datetime.fromisoformat(times_max[-1].replace("Z", "+00:00")).strftime("%Y-%m-%d")
+                self._date_range_cache = (min_date, max_date)
+                self._date_range_cache_time = now
+                return min_date, max_date
         except Exception as e:
             logger.error(f"获取最新日期失败: {e}")
 
