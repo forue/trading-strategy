@@ -72,10 +72,14 @@ export const useUserStore = defineStore('user', () => {
       // 3. 检查今日是否有信号，如果有则运行回测
       const today = dayjs().format('YYYY-MM-DD')
       try {
-        // 获取今日信号
-        const signals = await strategyApi.calculateSignals('AGGRESSIVE')
-        
-        if (signals && signals.length > 0) {
+        // 计算三种策略的信号
+        let totalSignals = 0
+        for (const st of ['AGGRESSIVE', 'MODERATE', 'CONSERVATIVE']) {
+          const result = await strategyApi.calculateSignals(st)
+          totalSignals += result?.length || 0
+        }
+
+        if (totalSignals > 0) {
           // 运行回测（使用默认参数）
           const backtestResult = await strategyApi.runBacktest({
             strategyType: 'AGGRESSIVE',
@@ -84,13 +88,9 @@ export const useUserStore = defineStore('user', () => {
             initialCapital: 1000000
           })
           
-          ElMessage.success(`当日回测完成，总收益: ${backtestResult.total_return?.toFixed(2)}%`)
-          
-          // 4. 发送通知（这里可以调用通知API）
-          // 例如：发送WebSocket消息或调用通知服务
-          console.log('回测完成，可以发送通知:', backtestResult)
+          ElMessage.success(`信号计算完成，共 ${totalSignals} 条信号，回测收益: ${backtestResult.total_return?.toFixed(2)}%`)
         } else {
-          ElMessage.info('今日无交易信号，跳过回测')
+          ElMessage.info('今日无交易信号')
         }
       } catch (error) {
         console.error('回测失败:', error)

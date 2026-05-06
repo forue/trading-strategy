@@ -188,10 +188,13 @@ async function fetchSignals() {
 async function triggerCalculate() {
   calculating.value = true
   try {
-    const strategyType = filterForm.strategyType || 'AGGRESSIVE'
-    const result = await strategyApi.calculateSignals(strategyType)
-    ElMessage.success(`信号计算完成，生成 ${result?.length || 0} 条信号`)
-    // Refresh signal list
+    const types = ['AGGRESSIVE', 'MODERATE', 'CONSERVATIVE']
+    let total = 0
+    for (const t of types) {
+      const result = await strategyApi.calculateSignals(t)
+      total += result?.length || 0
+    }
+    ElMessage.success(`信号计算完成，共生成 ${total} 条信号`)
     await fetchSignals()
   } catch (e: any) {
     ElMessage.error(e?.message || '信号计算失败')
