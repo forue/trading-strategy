@@ -81,21 +81,48 @@ def setup_scheduler():
     scheduler.add_job(
         job_collect_data, CronTrigger(day_of_week="mon-fri", hour=15, minute=0),
         id="collect_data", name="板块资金流数据采集", replace_existing=True,
-        misfire_grace_time=300,  # 5分钟容错时间
+        misfire_grace_time=86400,  # 24小时容错（重启后仍执行）
     )
     # 数据采集后5分钟计算策略（仅限交易日）
     scheduler.add_job(
         job_calculate_strategy, CronTrigger(day_of_week="mon-fri", hour=15, minute=5),
         id="calculate_strategy", name="三档轮动策略计算", replace_existing=True,
-        misfire_grace_time=300,
+        misfire_grace_time=86400,
     )
     # 16:00采集北向资金（仅限交易日）
     scheduler.add_job(
         job_collect_north_bound, CronTrigger(day_of_week="mon-fri", hour=16, minute=0),
         id="collect_north_bound", name="北向资金数据采集", replace_existing=True,
-        misfire_grace_time=300,
+        misfire_grace_time=86400,
     )
+    # 启动时立即执行一次（确保数据可用）
+    import threading
+    threading.Thread(target=_run_startup_jobs, daemon=True).start()
     logger.info("定时任务配置完成 - 仅限交易日执行")
+
+
+def _run_startup_jobs():
+    """启动时立即执行定时任务（在线程中运行，不阻塞启动）"""
+    import asyncio
+    import httpx
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(_run_startup_jobs_async())
+    except Exception as e:
+        logger.warning(f"启动时任务执行失败: {e}")
+    finally:
+        loop.close()
+
+
+async def _run_startup_jobs_async():
+    """启动时执行所有任务"""
+    logger.info(">>> 启动时执行: 数据采集")
+    await job_collect_data()
+    logger.info(">>> 启动时执行: 策略计算")
+    await job_calculate_strategy()
+    logger.info(">>> 启动时执行: 北向资金采集")
+    await job_collect_north_bound()
 
 
 @app.on_event("startup")
