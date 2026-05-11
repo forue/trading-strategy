@@ -78,6 +78,17 @@ async def collect_history(days: int = 30):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/collect/backfill-fund-flow")
+async def backfill_fund_flow(start_date: str = "20240101", end_date: str = None):
+    """回填历史板块资金流数据（使用 stock_sector_fund_flow_hist 接口）"""
+    try:
+        count = data_collector.backfill_sector_fund_flow_hist(start_date, end_date)
+        return success_response(data={"count": count}, message=f"资金流回填完成，写入 {count} 条记录")
+    except Exception as e:
+        logger.error(f"资金流回填失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/collect/north-bound")
 async def collect_north_bound():
     """采集北向资金数据"""

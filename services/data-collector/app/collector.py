@@ -192,7 +192,7 @@ class DataCollector:
                         "sector_name": sector_name,
                         "date": trade_date,
                         "main_net_inflow": main_net_inflow,
-                        "north_net_inflow": 0,
+                        "north_net_inflow": None,  # 不覆盖北向资金（独立采集）
                         "index_close": self._safe_float(row.get("均价", 0)),
                         "index_change_pct": self._safe_float(row.get("涨跌幅", 0)),
                         "turnover": self._safe_float(row.get("总成交额", 0)) * 1e8,
@@ -200,9 +200,9 @@ class DataCollector:
                         "pb": pb,
                         "pe_percentile": None,
                         "pb_percentile": None,
-                        "open": 0,
-                        "high": 0,
-                        "low": 0,
+                        "open": None,
+                        "high": None,
+                        "low": None,
                     })
                 logger.info(f"同花顺行业汇总采集成功: {len(results)} 个板块")
         except Exception as e:
@@ -290,8 +290,8 @@ class DataCollector:
                         "sector_code": item["sector_code"],
                         "sector_name": item["sector_name"],
                         "date": item["date"],
-                        "main_net_inflow": 0,
-                        "north_net_inflow": 0,
+                        "main_net_inflow": None,
+                        "north_net_inflow": None,
                         "index_close": item["close"],
                         "index_change_pct": item["change_pct"],
                         "turnover": item.get("amount", 0),
@@ -319,8 +319,9 @@ class DataCollector:
                     all_data.extend(result)
 
         if all_data:
-            influx_manager.write_sector_capital_flow(all_data)
-            logger.info(f"通过K线填充历史资金流: {len(all_data)} 条, 失败: {len(failed)} 个板块")
+            merged = self._merge_with_existing_data(all_data)
+            influx_manager.write_sector_capital_flow(merged)
+            logger.info(f"通过K线填充历史资金流: {len(merged)} 条, 失败: {len(failed)} 个板块")
 
         return all_data
 
@@ -410,7 +411,8 @@ class DataCollector:
     def collect_north_bound_flow(self) -> list[dict]:
         """采集北向资金数据
 
-        使用 AkShare 的 stock_hsgt_north_net_flow_in_em() 接口获取北向资金净流入数据。
+        使用 AkShare 的 stock_hsgt_fund_flow_summary_em() 获取当日沪深股通资金流向。
+        返回单日汇总数据（北向净流入 = 沪股通 + 深股通 净买额之和）。
         非交易日不采集。
         """
         today = datetime.now().strftime("%Y%m%d")
@@ -419,44 +421,250 @@ class DataCollector:
             return []
 
         try:
-            # 获取北向资金净流入（东方财富源）
-            df = ak.stock_hsgt_north_net_flow_in_em()
+            df = ak.stock_hsgt_fund_flow_summary_em()
             if df is None or df.empty:
                 logger.warning("北向资金数据为空")
                 return []
 
-            results = []
-            for _, row in df.iterrows():
-                date_val = row.get("date", "")
-                if not date_val:
-                    continue
-                # 日期格式转换
-                if hasattr(date_val, "strftime"):
-                    date_str = date_val.strftime("%Y-%m-%d")
-                else:
-                    date_str = str(date_val)[:10]
+            # 接口返回 4 行: [沪股通北向, 沪股通南向, 深股通北向, 深股通南向]
+            # 列结构 (positional): 0=日期, 1=市场, 2=方向, 3=资金向, 4=状态, 5=成交净买额(亿), 6=资金余额(亿)
+            if len(df) < 2:
+                logger.warning(f"北向资金数据行数不足: {len(df)}")
+                return []
 
-                # value 单位是万元，转换为元
-                net_inflow = self._safe_float(row.get("value", 0)) * 1e4
+            date_val = df.iloc[0, 0]
+            if hasattr(date_val, "strftime"):
+                date_str = date_val.strftime("%Y-%m-%d")
+            else:
+                date_str = str(date_val)[:10]
 
-                results.append({
-                    "date": date_str,
-                    "north_net_inflow": net_inflow,
-                })
+            # 北向净流入 = 沪股通北向 + 深股通北向 (第0行和第2行的第5列, 单位亿元)
+            north_sh = self._safe_float(df.iloc[0, 5])
+            north_sz = self._safe_float(df.iloc[2, 5]) if len(df) >= 3 else 0.0
+            net_inflow = (north_sh + north_sz) * 1e8  # 亿元 → 元
 
-            # 只保留最近30天的数据
-            cutoff = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
-            results = [r for r in results if r["date"] >= cutoff]
+            results = [{"date": date_str, "north_net_inflow": net_inflow}]
 
-            # 写入 InfluxDB
-            if results:
-                influx_manager.write_north_bound_flow(results)
-                logger.info(f"北向资金采集完成: {len(results)} 条")
+            influx_manager.write_north_bound_flow(results)
+            logger.info(f"北向资金采集完成: 日期={date_str}, 净流入={net_inflow/1e8:.2f}亿")
 
             return results
         except Exception as e:
             logger.error(f"北向资金采集失败: {e}")
             return []
+
+    # 东方财富板块代码缓存
+    _em_code_map: dict[str, str] | None = None
+
+    def _get_em_code_map(self) -> dict[str, str]:
+        """从东方财富网页抓取板块名称→EM代码映射（push2.eastmoney.com 被封，改从HTML页面提取）"""
+        if self._em_code_map is not None:
+            return self._em_code_map
+        import requests
+        import re
+        try:
+            r = requests.get(
+                "https://data.eastmoney.com/bkzj/hy.html",
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+                timeout=15,
+            )
+            pairs = re.findall(r'<a href="/bkzj/(BK\d+)\.html">([^<]+)</a>', r.text)
+            self._em_code_map = {name: code for code, name in pairs}
+            logger.info(f"从东方财富抓取板块代码映射: {len(self._em_code_map)} 个")
+        except Exception as e:
+            logger.warning(f"抓取东方财富板块代码映射失败: {e}")
+            self._em_code_map = {}
+        return self._em_code_map
+
+    def _match_em_code(self, ths_name: str) -> str | None:
+        """将THS板块名称匹配到东方财富板块代码"""
+        em_map = self._get_em_code_map()
+        if not em_map:
+            return None
+        # 精确匹配
+        if ths_name in em_map:
+            return em_map[ths_name]
+        # 模糊匹配: EM名称以THS名称开头，或THS名称以EM名称开头
+        for em_name, code in em_map.items():
+            if em_name.startswith(ths_name) or ths_name.startswith(em_name):
+                return code
+        return None
+
+    def backfill_sector_fund_flow_hist(self, start_date: str = "20240101", end_date: str = None) -> int:
+        """回填历史板块资金流数据
+
+        由于 akshare 的 stock_sector_fund_flow_hist() 底层调用 push2.eastmoney.com
+        获取板块代码映射时被封，本方法改为:
+        1. 从 data.eastmoney.com 网页抓取 EM 板块代码映射
+        2. 直接调用 push2his.eastmoney.com 数据接口（未被封）
+        3. 解析主力净流入并写入 InfluxDB
+        """
+        import requests as req
+        import time as _time
+
+        if end_date is None:
+            end_date = datetime.now().strftime("%Y%m%d")
+
+        sector_names = self.get_sector_names()
+        if not sector_names:
+            logger.warning("无可用板块名称，跳过资金流回填")
+            return 0
+
+        # 提前获取 EM 代码映射
+        em_map = self._get_em_code_map()
+        if not em_map:
+            logger.warning("无法获取东方财富板块代码映射，跳过回填")
+            return 0
+
+        # 建立 THS名称 → EM代码 的匹配表
+        name_to_em: dict[str, str] = {}
+        unmatched: list[str] = []
+        for name in sector_names:
+            code = self._match_em_code(name)
+            if code:
+                name_to_em[name] = code
+            else:
+                unmatched.append(name)
+        logger.info(
+            f"板块匹配: {len(name_to_em)} 个成功, {len(unmatched)} 个未匹配"
+            + (f" ({', '.join(unmatched[:10])}...)" if unmatched else "")
+        )
+
+        if not name_to_em:
+            logger.warning("无任何板块匹配成功，跳过回填")
+            return 0
+
+        logger.info(f"开始回填 {len(name_to_em)} 个板块的历史资金流 ({start_date}~{end_date})（串行模式，间隔2秒）")
+
+        all_records: list[dict] = []
+        failed: list[str] = []
+
+        for idx, (name, em_code) in enumerate(name_to_em.items()):
+            ths_code = self._get_sector_name_code_map().get(name, "")
+            try:
+                url = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
+                params = {
+                    "lmt": "0",
+                    "klt": "101",
+                    "fields1": "f1,f2,f3,f7",
+                    "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
+                    "secid": f"90.{em_code}",
+                }
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    "Referer": f"https://data.eastmoney.com/bkzj/{em_code}.html",
+                }
+                r = req.get(url, params=params, headers=headers, timeout=15)
+                data_json = r.json()
+                klines = data_json.get("data", {}).get("klines")
+                if not klines:
+                    failed.append(name)
+                    continue
+
+                records = []
+                for line in klines:
+                    parts = line.split(",")
+                    if len(parts) < 2:
+                        continue
+                    date_str = parts[0].replace("-", "") if parts[0] else ""
+                    if not date_str or not (start_date <= date_str <= end_date):
+                        continue
+                    if not self.is_trade_day(date_str):
+                        continue
+
+                    main_net_inflow = self._safe_float(parts[1])  # 主力净流入-净额（元）
+
+                    records.append({
+                        "sector_code": f"THS{ths_code}" if ths_code else f"THS_{name}",
+                        "sector_name": name,
+                        "date": date_str,
+                        "main_net_inflow": main_net_inflow,
+                        "north_net_inflow": 0,
+                        "index_close": None,
+                        "index_change_pct": None,
+                        "turnover": 0,
+                        "pe_ttm": None,
+                        "pb": None,
+                        "pe_percentile": None,
+                        "pb_percentile": None,
+                        "open": None,
+                        "high": None,
+                        "low": None,
+                    })
+                all_records.extend(records)
+                if (idx + 1) % 10 == 0:
+                    logger.info(f"资金流回填进度: {idx + 1}/{len(name_to_em)} (已写入 {len(all_records)} 条)")
+            except Exception as e:
+                logger.warning(f"回填 {name}({em_code}) 失败: {e}")
+                failed.append(name)
+            # 每个请求间隔 2 秒，避免触发反爬
+            if idx < len(name_to_em) - 1:
+                _time.sleep(2)
+
+        if all_records:
+            merged = self._merge_with_existing_data(all_records)
+            influx_manager.write_sector_capital_flow(merged)
+            logger.info(f"资金流回填完成: {len(merged)} 条记录, 失败板块: {len(failed)}")
+        else:
+            logger.warning("资金流回填: 无数据写入")
+
+        return len(all_records)
+
+    _MERGEABLE_FIELDS = (
+        "open", "high", "low", "index_close", "index_change_pct",
+        "main_net_inflow", "north_net_inflow", "turnover",
+        "pe_ttm", "pb", "pe_percentile", "pb_percentile",
+    )
+
+    def _merge_with_existing_data(self, new_records: list[dict]) -> list[dict]:
+        """将新数据与 InfluxDB 中已有数据合并，双向保留已有字段不被 None 覆盖。
+
+        回填场景：OHLC 字段为 None，从已有数据恢复 OHLC
+        K线填充场景：资金流字段为 None，从已有数据恢复资金流
+        """
+        if not new_records:
+            return new_records
+
+        lookup: dict[str, set[str]] = {}
+        for r in new_records:
+            d = r.get("date", "")
+            sc = r.get("sector_code", "")
+            if d and sc:
+                d_normalized = f"{d[:4]}-{d[4:6]}-{d[6:8]}" if len(d) == 8 else d[:10]
+                lookup.setdefault(d_normalized, set()).add(sc)
+
+        if not lookup:
+            return new_records
+
+        dates = sorted(lookup.keys())
+        start, end = dates[0], dates[-1]
+        existing_map: dict[str, dict] = {}
+        try:
+            daily = influx_manager.query_all_sectors_data(start, end)
+            for rec in daily:
+                t = str(rec.get("_time", ""))[:10]
+                sc = str(rec.get("sector_code", ""))
+                key = f"{t}|{sc}"
+                if key not in existing_map:
+                    existing_map[key] = rec
+        except Exception as e:
+            logger.warning(f"查询已有数据失败，跳过合并: {e}")
+            return new_records
+
+        merged = []
+        for r in new_records:
+            d = r.get("date", "")
+            sc = r.get("sector_code", "")
+            d_normalized = f"{d[:4]}-{d[4:6]}-{d[6:8]}" if len(d) == 8 else d[:10]
+            key = f"{d_normalized}|{sc}"
+            existing = existing_map.get(key)
+            if existing:
+                for f in self._MERGEABLE_FIELDS:
+                    if r.get(f) is None and existing.get(f) is not None:
+                        r[f] = float(existing[f]) if existing[f] else 0.0
+            merged.append(r)
+
+        return merged
 
     @staticmethod
     def _safe_float(val, default=0.0) -> float:
@@ -547,15 +755,6 @@ class DataCollector:
             pb_percentile = rank / len(sorted_pb) * 100
 
         return pe_percentile, pb_percentile
-
-    @staticmethod
-    def _safe_float(val, default=0.0) -> float:
-        try:
-            if pd.isna(val):
-                return default
-            return float(val)
-        except (ValueError, TypeError):
-            return default
 
 
 # 全局实例

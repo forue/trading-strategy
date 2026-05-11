@@ -44,19 +44,22 @@ class InfluxDBManager:
                 Point("sector_capital_flow")
                 .tag("sector_code", item["sector_code"])
                 .tag("sector_name", item["sector_name"])
-                .field("main_net_inflow", float(item.get("main_net_inflow", 0)))
-                .field("north_net_inflow", float(item.get("north_net_inflow", 0)))
-                .field("index_close", float(item.get("index_close", 0)))
-                .field("index_change_pct", float(item.get("index_change_pct", 0)))
-                .field("turnover", float(item.get("turnover", 0)))
             )
-            # K线附加字段（如果有）
-            for k in ("open", "high", "low"):
-                if item.get(k) is not None and item.get(k) != 0:
+            # 资金流字段（有值才写，避免K线回填覆盖真实数据）
+            for k in ("main_net_inflow", "north_net_inflow"):
+                if item.get(k) is not None:
                     point = point.field(k, float(item[k]))
-            # 估值字段（如果有）
+            # 行情字段（有值才写）
+            for k in ("index_close", "index_change_pct", "turnover"):
+                if item.get(k) is not None:
+                    point = point.field(k, float(item[k]))
+            # K线附加字段（有值才写，避免回填覆盖K线数据的OHLC）
+            for k in ("open", "high", "low"):
+                if item.get(k) is not None and float(item.get(k, 0)) != 0:
+                    point = point.field(k, float(item[k]))
+            # 估值字段（有值才写）
             for k in ("pe_ttm", "pb", "pe_percentile", "pb_percentile"):
-                if item.get(k) is not None and item.get(k) != 0:
+                if item.get(k) is not None and float(item.get(k, 0)) != 0:
                     point = point.field(k, float(item[k]))
             # 基金字段（如果有）
             if item.get("etf_code"):
