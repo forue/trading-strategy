@@ -1,26 +1,37 @@
 """RabbitMQ 连接管理器 - 单例模式，复用连接"""
 import json
+import threading
 import pika
 from typing import Optional, Callable
 from loguru import logger
 
 
 class RabbitMQManager:
-    """RabbitMQ 连接管理器（单例）"""
-    
+    """RabbitMQ 连接管理器（单例）
+
+    发布和消费使用独立的 channel，避免 pika 线程安全问题。
+    """
+
     _instance: Optional["RabbitMQManager"] = None
+    _lock = threading.Lock()
+
     _connection: Optional[pika.BlockingConnection] = None
-    _channel: Optional[pika.channel.Channel] = None
+    _publish_channel: Optional[pika.channel.Channel] = None
+    _consume_channel: Optional[pika.channel.Channel] = None
+
     _host: str = "localhost"
     _port: int = 5672
     _user: str = "guest"
     _password: str = ""
-    
+    _exchange_declared: bool = False
+
     def __new__(cls) -> "RabbitMQManager":
         if cls._instance is None:
-            cls._instance = super().__new__(cls)
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
         return cls._instance
-    
+
     def connect(
         self,
         host: str = "localhost",
@@ -34,60 +45,84 @@ class RabbitMQManager:
         self._user = user
         self._password = password
         self._do_connect()
-    
+
     def _do_connect(self) -> None:
-        """实际建立连接"""
+        """实际建立连接，仅为发布 channel 声明交换机"""
         try:
             if self._connection and self._connection.is_open:
                 return
-            
+
             credentials = pika.PlainCredentials(self._user, self._password)
             parameters = pika.ConnectionParameters(
                 host=self._host,
                 port=self._port,
                 credentials=credentials,
-                heartbeat=0,
-                blocked_connection_timeout=0,
+                heartbeat=60,
+                blocked_connection_timeout=300,
             )
             self._connection = pika.BlockingConnection(parameters)
-            self._channel = self._connection.channel()
+            self._publish_channel = self._connection.channel()
+            self._consume_channel = None
+            self._exchange_declared = False
             logger.info("RabbitMQ 连接已建立")
         except Exception as e:
             logger.error(f"RabbitMQ 连接失败: {e}")
             self._connection = None
-            self._channel = None
-    
+            self._publish_channel = None
+            self._consume_channel = None
+
     def close(self) -> None:
         """关闭连接"""
         try:
-            if self._channel and self._channel.is_open:
-                self._channel.close()
+            if self._consume_channel and self._consume_channel.is_open:
+                self._consume_channel.close()
+            if self._publish_channel and self._publish_channel.is_open:
+                self._publish_channel.close()
             if self._connection and self._connection.is_open:
                 self._connection.close()
         except Exception as e:
             logger.debug(f"RabbitMQ 关闭: {e}")
         finally:
             self._connection = None
-            self._channel = None
-    
-    def get_channel(self) -> Optional[pika.channel.Channel]:
-        """获取可用的 channel，必要时重连"""
+            self._publish_channel = None
+            self._consume_channel = None
+            self._exchange_declared = False
+
+    def _get_publish_channel(self) -> Optional[pika.channel.Channel]:
+        """获取发布 channel，必要时重连"""
         try:
             if self._connection is None or self._connection.is_closed:
                 self._do_connect()
-            return self._channel
+            if self._publish_channel is None or self._publish_channel.is_closed:
+                self._publish_channel = self._connection.channel()
+            return self._publish_channel
         except Exception:
             self._do_connect()
-            return self._channel
-    
-    def declare_exchange(
-        self, exchange: str = "rotation", exchange_type: str = "topic", durable: bool = True
-    ) -> None:
-        """声明交换机"""
-        channel = self.get_channel()
+            return self._publish_channel
+
+    def _get_consume_channel(self) -> Optional[pika.channel.Channel]:
+        """获取消费 channel（独立于发布 channel），必要时重连"""
+        try:
+            if self._connection is None or self._connection.is_closed:
+                self._do_connect()
+            if self._consume_channel is None or self._consume_channel.is_closed:
+                self._consume_channel = self._connection.channel()
+            return self._consume_channel
+        except Exception:
+            self._do_connect()
+            if self._connection and self._connection.is_open:
+                self._consume_channel = self._connection.channel()
+            return self._consume_channel
+
+    def _ensure_exchange(self, exchange: str = "rotation", exchange_type: str = "topic"):
+        """声明交换机（仅首次调用时执行，后续幂等跳过）"""
+        if self._exchange_declared:
+            return
+        channel = self._get_publish_channel()
         if channel:
-            channel.exchange_declare(exchange=exchange, exchange_type=exchange_type, durable=durable)
-    
+            channel.exchange_declare(exchange=exchange, exchange_type=exchange_type, durable=True)
+            self._exchange_declared = True
+
     def publish(
         self,
         routing_key: str,
@@ -97,9 +132,9 @@ class RabbitMQManager:
         """发布消息（自动重连）"""
         for attempt in range(2):
             try:
-                channel = self.get_channel()
+                channel = self._get_publish_channel()
                 if channel and channel.is_open:
-                    self.declare_exchange(exchange)
+                    self._ensure_exchange(exchange)
                     channel.basic_publish(
                         exchange=exchange,
                         routing_key=routing_key,
@@ -107,7 +142,7 @@ class RabbitMQManager:
                     )
                     return True
                 else:
-                    logger.error("RabbitMQ 通道不可用，消息未发送")
+                    logger.error("RabbitMQ 发布通道不可用，消息未发送")
                     return False
             except Exception as e:
                 if attempt == 0:
@@ -117,7 +152,7 @@ class RabbitMQManager:
                     logger.error(f"RabbitMQ 消息发送失败: {e}")
                     return False
         return False
-    
+
     def consume(
         self,
         queue: str,
@@ -126,14 +161,14 @@ class RabbitMQManager:
         routing_key: str = "#",
         durable: bool = True,
     ) -> None:
-        """消费消息（阻塞式，手动确认）"""
+        """消费消息（阻塞式，使用独立 channel，手动确认）"""
         try:
-            channel = self.get_channel()
+            channel = self._get_consume_channel()
             if not channel:
-                logger.error("RabbitMQ 通道不可用")
+                logger.error("RabbitMQ 消费通道不可用")
                 return
-            
-            self.declare_exchange(exchange)
+
+            channel.exchange_declare(exchange=exchange, exchange_type="topic", durable=True)
             result = channel.queue_declare(queue=queue, durable=durable)
             channel.queue_bind(exchange=exchange, queue=result.method.queue, routing_key=routing_key)
 
