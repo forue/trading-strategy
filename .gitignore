@@ -56,6 +56,12 @@ htmlcov/
 *.bak
 deployment_report.md
 
+# Claude Code
+.claude/
+
+# One-off diagnostic scripts
+tests/verify_api*.py
+
 # Config files (keep example files only)
 **/application.yml.example
 **/config.py.example
