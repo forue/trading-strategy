@@ -1,6 +1,6 @@
 # 因子引擎架构设计文档
 
-> 版本: v1.1 | 更新日期: 2026-05-05 | 更新: 截面上下文、置信度合成、策略权重与 API 字段与实现对齐
+> 版本: v1.2 | 更新日期: 2026-05-12 | 更新: Z-Score截面归一化、FlowAccelerationFactor
 
 ---
 
@@ -333,4 +333,16 @@ Response `data` 主要字段：
 | P4 | 轮动特征因子（持续性含截面 TOP-K；无截面时回退） | 已落地 |
 | P5 | 估值与其它增强 | 持续迭代 |
 
-策略侧可调参数见 `models.StrategyParams`：`cross_section_alpha`、`use_relative_score_gap`、`relative_score_gap_ratio`、`use_inverse_vol_weights` 等。
+策略侧可调参数见 `models.StrategyParams`：`cross_section_alpha`、`use_relative_score_gap`、`relative_score_gap_ratio`、`use_inverse_vol_weights`、`use_zscore_normalization` 等。
+
+### 6.2 截面 Z-Score 归一化 (`FactorRegistry.apply_zscore_normalization`)
+
+当 `StrategyParams.use_zscore_normalization = True`（默认开启）时，在因子加权合成之前对全板块因子结果进行截面归一化：
+
+1. 对每个因子，收集所有板块的 `raw_value`
+2. 计算截面均值 μ 和标准差 σ
+3. 将每个板块的评分替换为 Z-Score 映射: `score = clamp(5 + z × 2, 0, 10)`
+4. 标准差为 0（全板块值相同）时保持原评分不变
+5. 至少 3 个有效值才进行归一化
+
+归一化后，因子评分反映的是板块间相对排名而非绝对阈值，减少市场整体涨跌对评分的系统性偏移。`detail` 中会附加 `zscore`、`cross_mean`、`cross_std` 字段。

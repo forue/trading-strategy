@@ -1,6 +1,6 @@
 # 策略引擎服务设计文档
 
-> 版本: v1.3 | 更新日期: 2026-05-05 | 更新内容: 与多因子引擎、截面混合、调仓参数及回测仓位对齐
+> 版本: v1.4 | 更新日期: 2026-05-12 | 更新: _rotation_core统一方法、use_zscore_normalization
 
 ---
 
@@ -55,8 +55,13 @@ services/strategy/app/
 | `use_relative_score_gap` | 是否启用相对调仓缺口（与绝对 `score_gap_threshold` 取 max） |
 | `relative_score_gap_ratio` | 相对缺口：比例 × max(ε, \|当前持仓最高分\|, \|新建议最高分\|, 1) |
 | `use_inverse_vol_weights` | 入选标的中是否按波动倒数分配 `position_ratio`（无 `_history` 时近似等权） |
+| `use_zscore_normalization` | 是否对因子评分进行截面Z-Score归一化（将硬阈值分替换为板块间相对排名得分） |
 
 默认配置见源码；与旧「四维手写权重」文档不一致时以代码为准。
+
+### 2.4 轮动方法架构（_rotation_core）
+
+三档策略的买卖逻辑已合并为统一的 `_rotation_core()` 方法，根据 `StrategyType` 派生差异化参数（取前N名、最小评分阈值、持仓评分缺口、估值过滤、仓位分配等）。三个公开方法 (`_aggressive_rotation` / `_moderate_rotation` / `_conservative_rotation`) 退化为 ~5 行的薄包装层，仅负责传入 `StrategyType` 并调用核心方法。
 
 ---
 

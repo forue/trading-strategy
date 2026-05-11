@@ -1,6 +1,6 @@
 # 量化因子算法参考文档
 
-> 版本: v1.1 | 更新日期: 2026-05-05 | 更新: 持续性因子截面定义与实现对齐
+> 版本: v1.2 | 更新日期: 2026-05-12 | 更新: FlowAccelerationFactor、相对强弱截面模式
 
 ---
 
@@ -322,31 +322,90 @@ Jaccard距离 = 1 - |A ∩ B| / |A ∪ B|
 
 ---
 
-## 四、因子标准化方法
+## 四、资金流因子
 
-### 4.1 Min-Max 标准化
+### 4.1 资金流加速度 (Flow Acceleration Factor)
+
+**原理**: 衡量资金流变化的二阶导数，捕捉资金加速流入或流出的拐点。
+
+**公式**:
+```
+Δflow_t = flow_t - flow_{t-1}      # 一阶差分
+Δ²flow_t = Δflow_t - Δflow_{t-1}   # 二阶差分 (加速度)
+
+raw_value = Δ²flow_t                # 单位：元
+acc_yi = Δ²flow_t / 1e8             # 单位：亿
+```
+
+**评分映射**:
+```
+Score = clamp(5 + acc_yi × 2, 0, 10)
+
+加速度 > 0  → 资金加速流入 → 看涨信号 → score > 5
+加速度 < 0  → 资金加速流出 → 看跌信号 → score < 5
+加速度 ≈ 0  → 资金流稳定   → 中性     → score ≈ 5
+```
+
+**数据要求**: 至少 3 个交易日的历史资金流数据（含当日），不足时 confidence=0。
+
+---
+
+## 五、动量因子补充
+
+### 5.1 相对强弱因子 (Relative Strength Factor) 截面模式
+
+**原理**: 衡量板块相对同截面所有板块的涨跌幅强弱。
+
+**公式（三档优先级）**:
+
+```
+优先级1 (cross_section): 从 context["changes_by_date"] 取当日所有板块涨跌幅
+    market_avg = mean(peer_index_change_pct)
+    mode = "cross_section", confidence = 0.85 (>=3 peers)
+
+优先级2 (precomputed): 使用 sector_data["market_avg_change"] 预计算值
+    mode = "precomputed", confidence = 0.7
+
+优先级3 (fallback): 使用板块自身历史涨跌幅均值
+    market_avg = mean(history_index_change_pct)
+    mode = "fallback_self_history", confidence = 0.4
+
+相对强弱 = 板块涨跌幅 - market_avg
+Score = clamp(5 + 相对强弱 × 2, 0, 10)
+```
+
+---
+
+## 六、因子标准化方法
+
+### 6.1 Min-Max 标准化
 
 ```
 score = (value - min) / (max - min) × 10
 钳位到 [0, 10]
 ```
 
-### 4.2 Z-Score 标准化
+### 6.2 截面 Z-Score 归一化
+
+应用于 `FactorRegistry.apply_zscore_normalization()`，在因子合成前对全板块因子得分进行截面归一化：
 
 ```
-z = (value - mean) / std
-score = 5 + z × 1.5   # 映射到约 [0, 10]
-钳位到 [0, 10]
+z = (raw_value - cross_section_mean) / cross_section_std
+score = clamp(5 + z × 2, 0, 10)
 ```
 
-### 4.3 百分位排名
+- 至少 3 个有效值才归一化
+- 标准差为 0 时保持原评分
+- 归一化后评分反映板块间相对排名，消除市场整体涨跌的系统性偏移
+
+### 6.3 百分位排名
 
 ```
 rank = count(value_i < value) / total_count
 score = rank × 10
 ```
 
-### 4.4 选择标准
+### 6.4 选择标准
 
 | 因子类型 | 推荐方法 | 原因 |
 |---------|---------|------|
@@ -359,9 +418,9 @@ score = rank × 10
 
 ---
 
-## 五、数据质量要求
+## 七、数据质量要求
 
-### 5.1 最小数据长度
+### 7.1 最小数据长度
 
 | 因子 | 最小K线数 | 理想K线数 | 缺失处理 |
 |------|----------|----------|---------|
@@ -373,8 +432,9 @@ score = rank × 10
 | 量比(5) | 6 | 10 | 使用默认值 |
 | 波动率(20) | 21 | 40 | 跳过 |
 | 持续性(10) | 11 | 20 | 跳过 |
+| 资金流加速度 | 3 | 10 | 跳过 |
 
-### 5.2 异常值处理
+### 7.2 异常值处理
 
 ```
 1. 缺失值: 跳过该因子，confidence=0
@@ -385,7 +445,7 @@ score = rank × 10
 
 ---
 
-## 六、参考资料
+## 八、参考资料
 
 1. Wilder, J.W. (1978). New Concepts in Technical Trading Systems
 2. Appel, G. (1979). Technical Analysis: Power Tools for Active Investors
