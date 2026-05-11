@@ -28,13 +28,20 @@
       <div class="card-header">
         <span class="card-title">系统日志</span>
         <div style="display: flex; gap: 8px; align-items: center">
-          <el-select v-model="logService" size="small" style="width: 160px" @change="fetchLogs">
+          <el-select v-model="logService" size="small" style="width: 140px" @change="fetchLogs">
             <el-option label="全部服务" value="" />
             <el-option label="策略引擎" value="backend-strategy" />
             <el-option label="数据采集" value="backend-data-collector" />
             <el-option label="信号通知" value="backend-signal" />
             <el-option label="AI 决策" value="backend-ai-decision" />
             <el-option label="任务调度" value="backend-scheduler" />
+          </el-select>
+          <el-select v-model="logLevel" size="small" style="width: 100px" @change="fetchLogs">
+            <el-option label="全部等级" value="" />
+            <el-option label="DEBUG" value="debug" />
+            <el-option label="INFO" value="info" />
+            <el-option label="WARNING" value="warning" />
+            <el-option label="ERROR" value="error" />
           </el-select>
           <el-button size="small" @click="fetchLogs" :loading="logsLoading">刷新日志</el-button>
         </div>
@@ -49,7 +56,7 @@
         <div v-for="(log, idx) in filteredLogs" :key="idx" class="log-line" :class="log.level">
           <span class="log-time">{{ log.time }}</span>
           <el-tag :type="logLevelMap[log.level]" size="small" style="margin: 0 8px">{{ log.level.toUpperCase() }}</el-tag>
-          <span class="log-service">[{{ log.service }}]</span>
+          <span class="log-service">[{{ serviceNameMap[log.service] || log.service }}]</span>
           <span class="log-message">{{ log.message }}</span>
         </div>
       </div>
@@ -63,6 +70,7 @@ import { ref, reactive, computed, onMounted } from 'vue'
 const refreshing = ref(false)
 const logsLoading = ref(false)
 const logService = ref('')
+const logLevel = ref('')
 
 interface HealthCheck {
   name: string
@@ -90,12 +98,19 @@ const healthChecks = ref<HealthCheck[]>([
 
 const logLevelMap: Record<string, string> = { info: 'info', warn: 'warning', error: 'danger', debug: '' }
 
+const serviceNameMap: Record<string, string> = {
+  'backend-strategy': '策略引擎',
+  'backend-data-collector': '数据采集',
+  'backend-signal': '信号通知',
+  'backend-ai-decision': 'AI决策',
+  'backend-scheduler': '任务调度',
+  'backend-auth': '认证中心',
+  'backend-fund': '资金管理',
+}
+
 const logs = ref<LogEntry[]>([])
 
-const filteredLogs = computed(() => {
-  if (!logService.value) return logs.value
-  return logs.value.filter(l => l.service === logService.value)
-})
+const filteredLogs = computed(() => logs.value)
 
 async function checkHealth(url: string, name: string): Promise<HealthCheck> {
   try {
@@ -126,10 +141,10 @@ async function refreshHealthChecks() {
 async function fetchLogs() {
   logsLoading.value = true
   try {
-    const service = logService.value
-    const url = service
-      ? `/api/scheduler/logs?service=${service}&lines=100`
-      : `/api/scheduler/logs?lines=100`
+    const params = new URLSearchParams({ lines: '100' })
+    if (logService.value) params.set('service', logService.value)
+    if (logLevel.value) params.set('level', logLevel.value)
+    const url = `/api/scheduler/logs?${params}`
     const resp = await fetch(url, { signal: AbortSignal.timeout(10000) })
     if (resp.ok) {
       const data = await resp.json()
