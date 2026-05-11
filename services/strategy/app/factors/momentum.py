@@ -63,30 +63,55 @@ class RelativeStrengthFactor(BaseFactor):
     """相对强弱因子
 
     衡量板块相对市场整体的强弱程度。
-    计算: 板块涨跌幅 - 市场平均涨跌幅
+    计算: 板块涨跌幅 - 同截面所有板块平均涨跌幅
+
+    优先使用 context["changes_by_date"] 进行真正的截面比较；
+    context 不可用时回退到 sector_data["market_avg_change"] 预计算值；
+    两者都不可用时使用自身历史均值（置信度降低）。
     """
 
     name = "relative_strength"
     category = FactorCategory.MOMENTUM
     default_weight = 0.10
 
+    @staticmethod
+    def _norm_date(d) -> str:
+        if d is None:
+            return ""
+        return str(d)[:10]
+
     def calculate(self, sector_data: dict, history: list = None, context: dict = None) -> FactorResult:
         change_pct = sector_data.get("index_change_pct", 0)
 
-        # 市场平均涨跌幅 (从历史数据计算)
         market_avg = 0.0
-        if history and len(history) > 0:
+        mode = "fallback_self_history"
+
+        # 优先: 截面上下文 — 真正的板块间比较
+        changes_by_date = (context or {}).get("changes_by_date") or {}
+        today = self._norm_date(sector_data.get("date"))
+        peers_today = changes_by_date.get(today) if today else None
+
+        if peers_today and len(peers_today) >= 3:
+            peer_changes = list(peers_today.values())
+            market_avg = float(np.mean(peer_changes))
+            mode = "cross_section"
+        elif sector_data.get("market_avg_change") is not None:
+            market_avg = float(sector_data["market_avg_change"])
+            mode = "precomputed"
+        elif history and len(history) > 0:
             market_changes = [h.get("index_change_pct", 0) for h in history]
             market_avg = float(np.mean(market_changes)) if market_changes else 0.0
+            mode = "fallback_self_history"
 
-        # 相对强弱 = 板块涨跌幅 - 市场平均
         rs = change_pct - market_avg
-
-        # 评分: 相对强弱1% = 2分, 基准5分
         score = self.clamp(5.0 + rs * 2.0)
 
-        # 置信度
-        confidence = 0.7 if history and len(history) >= 5 else 0.4
+        if mode == "cross_section":
+            confidence = 0.85
+        elif mode == "precomputed":
+            confidence = 0.7
+        else:
+            confidence = 0.4
 
         return FactorResult(
             name=self.name,
@@ -99,6 +124,8 @@ class RelativeStrengthFactor(BaseFactor):
                 "change_pct": round(change_pct, 2),
                 "market_avg": round(market_avg, 2),
                 "relative_strength": round(rs, 2),
+                "mode": mode,
+                "peer_count": len(peers_today) if peers_today else 0,
             },
         )
 

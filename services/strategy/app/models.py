@@ -41,6 +41,8 @@ class StrategyParams(BaseModel):
     score_gap_epsilon: float = 1e-6
     # 仓位：在入选标的中按波动率倒数分配（无波动数据时回退等权）
     use_inverse_vol_weights: bool = True
+    # 截面 Z-Score 归一化：将因子硬阈值评分替换为板块间相对排名得分
+    use_zscore_normalization: bool = True
 
 
 class TradeSignal(BaseModel):

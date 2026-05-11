@@ -1,4 +1,5 @@
-"""资金流因子 - 主力净流入 + 北向资金"""
+"""资金流因子 - 主力净流入 + 北向资金 + 资金流加速度"""
+import numpy as np
 from .base import BaseFactor, FactorResult, FactorCategory, FactorRegistry
 
 
@@ -87,6 +88,73 @@ class NorthFlowFactor(BaseFactor):
         return "north_net_inflow" in sector_data
 
 
+class FlowAccelerationFactor(BaseFactor):
+    """资金流加速度因子
+
+    资金流变化的二阶导数，捕捉资金加速流入或流出拐点。
+    计算: Δflow_t = flow_t - flow_{t-1}, Δ²flow_t = Δflow_t - Δflow_{t-1}
+    正加速度 = 资金流入在加速 (看涨信号)
+    负加速度 = 资金流入在减速 (看跌信号)
+
+    需要至少 3 个交易日的历史资金流数据。
+    """
+
+    name = "flow_acceleration"
+    category = FactorCategory.CAPITAL_FLOW
+    default_weight = 0.03
+    min_history_days = 3
+
+    def calculate(self, sector_data: dict, history: list = None, context: dict = None) -> FactorResult:
+        today_flow = sector_data.get("main_net_inflow", 0)
+
+        if not history or len(history) < 3:
+            return FactorResult(
+                name=self.name,
+                category=self.category,
+                raw_value=0,
+                score=5.0,
+                weight=self.default_weight,
+                confidence=0.0,
+                detail={"error": "历史资金流数据不足(需>=3天)"},
+            )
+
+        flows = [h.get("main_net_inflow", 0) for h in history[-3:]]
+        flows.append(today_flow)
+        d1 = flows[-1] - flows[-2]
+        d2 = flows[-2] - flows[-3]
+        acceleration = d1 - d2
+
+        acc_yi = acceleration / 1e8
+
+        # 评分: 加速度为正=资金加速流入, 每1亿加速度 +2分
+        score = self.clamp(5.0 + acc_yi * 2.0)
+
+        confidence = 0.65 if all(f != 0 for f in flows[-3:]) else 0.4
+
+        direction = "accelerating_in" if acceleration > 0 else "decelerating" if acceleration < 0 else "steady"
+
+        return FactorResult(
+            name=self.name,
+            category=self.category,
+            raw_value=acceleration,
+            score=round(score, 2),
+            weight=self.default_weight,
+            confidence=round(confidence, 2),
+            detail={
+                "acceleration_yi": round(acc_yi, 2),
+                "d1_yi": round(d1 / 1e8, 2),
+                "d2_yi": round(d2 / 1e8, 2),
+                "direction": direction,
+            },
+        )
+
+    def validate_data(self, sector_data: dict, history: list = None) -> bool:
+        if "main_net_inflow" not in sector_data:
+            return False
+        return history is not None and len(history) >= self.min_history_days
+
+
 # 注册因子
 FactorRegistry.register(MainFlowFactor())
 FactorRegistry.register(NorthFlowFactor())
+FactorRegistry.register(FlowAccelerationFactor())

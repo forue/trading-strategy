@@ -1,4 +1,5 @@
 """因子引擎 - 基类与注册中心"""
+import numpy as np
 from abc import ABC, abstractmethod
 from enum import Enum
 from typing import Any, Optional
@@ -142,6 +143,62 @@ class FactorRegistry:
                     detail={"error": str(e)},
                 ))
         return results
+
+    @classmethod
+    def apply_zscore_normalization(cls, all_sector_results: list[list[FactorResult]]) -> list[list[FactorResult]]:
+        """截面 Z-Score 归一化：将硬阈值评分替换为截面相对排名得分。
+
+        对每个因子，计算全板块 raw_value 的均值与标准差，
+        将每个板块的 score 替换为 Z-Score 映射到 0-10 的值：
+            z = (raw - μ) / σ
+            score = clamp(5 + z * 2, 0, 10)
+
+        标准差为 0（全板块值相同）时保持原评分不变。
+        每个板块至少需要 3 个有效值才进行归一化。
+
+        Args:
+            all_sector_results: 每个板块的因子结果列表
+
+        Returns:
+            归一化后的结果列表（原地修改并返回）
+        """
+        if not all_sector_results or len(all_sector_results) < 3:
+            return all_sector_results
+
+        factor_names = set()
+        for results in all_sector_results:
+            for r in results:
+                factor_names.add(r.name)
+
+        for fname in factor_names:
+            values: list[tuple[int, float]] = []
+            for i, results in enumerate(all_sector_results):
+                for r in results:
+                    if r.name == fname and r.confidence > 0:
+                        values.append((i, r.raw_value))
+                        break
+
+            if len(values) < 3:
+                continue
+
+            raw_vals = [v[1] for v in values]
+            mean = float(np.mean(raw_vals))
+            std = float(np.std(raw_vals))
+            if std < 1e-8:
+                continue
+
+            for i, raw in values:
+                z = (raw - mean) / std
+                new_score = round(BaseFactor.clamp(5.0 + z * 2.0), 2)
+                for r in all_sector_results[i]:
+                    if r.name == fname:
+                        r.score = new_score
+                        r.detail["zscore"] = round(z, 4)
+                        r.detail["cross_mean"] = round(mean, 4)
+                        r.detail["cross_std"] = round(std, 4)
+                        break
+
+        return all_sector_results
 
     @classmethod
     def clear(cls):

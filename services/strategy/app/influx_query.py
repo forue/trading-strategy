@@ -85,6 +85,35 @@ class InfluxDBQuery:
             # 回退：用足够大的相对时间范围
             return "-730d", "now()"
 
+    def _query_north_bound_map(self, start_date: str, end_date: str) -> dict[str, float]:
+        """查询北向资金日数据，返回 {date_str: north_net_inflow} 映射"""
+        flux_start, flux_stop = self._date_to_flux_range(start_date, end_date)
+        query = f'''
+        from(bucket: "{self.bucket}")
+          |> range(start: {flux_start}, stop: {flux_stop})
+          |> filter(fn: (r) => r._measurement == "north_bound_flow")
+          |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+          |> keep(columns: ["_time", "north_net_inflow"])
+        '''
+        try:
+            tables = self.query_api.query_data_frame(query)
+            records = self._to_records(tables)
+            result: dict[str, float] = {}
+            for row in records:
+                time_str = str(row.get("_time", ""))
+                try:
+                    dt = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
+                    date_key = dt.strftime("%Y-%m-%d")
+                except (ValueError, TypeError):
+                    continue
+                val = self._safe_float(row.get("north_net_inflow", 0))
+                if date_key not in result:
+                    result[date_key] = val
+            return result
+        except Exception as e:
+            logger.debug(f"北向资金查询失败(可能无数据): {e}")
+            return {}
+
     def query_daily_sectors(self, start_date: str, end_date: str,
                             sector_code: str = None) -> dict[str, list[dict]]:
         """查询指定日期范围内每天的板块资金流数据
@@ -159,6 +188,14 @@ class InfluxDBQuery:
             })
 
         logger.info(f"从InfluxDB查询到 {len(daily_data)} 天数据, 共 {len(records)} 条记录")
+
+        # 注入北向资金数据（市场级别，同一天所有板块共享同一个值）
+        north_bound_map = self._query_north_bound_map(start_date, end_date)
+        for date_key, north_val in north_bound_map.items():
+            if date_key in daily_data:
+                for sector in daily_data[date_key]:
+                    sector["north_net_inflow"] = north_val
+
         return daily_data
 
     def get_available_date_range(self) -> tuple[str, str]:
