@@ -12,6 +12,10 @@ class Settings(BaseSettings):
     rabbitmq_user: str = "guest"
     rabbitmq_password: str = ""
 
+    redis_host: str = "localhost"
+    redis_port: int = 6379
+    redis_password: str = ""
+
     service_port: int = 8006
 
     # Logging
