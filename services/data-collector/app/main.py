@@ -170,6 +170,23 @@ async def get_sectors():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.delete("/data/cleanup")
+async def cleanup_data(measurement: str, start_date: str, end_date: str):
+    """删除指定测量中某时间范围的数据（用于清理错误数据）
+
+    Args:
+        measurement: InfluxDB 测量名 (sector_capital_flow, sector_kline, north_bound_flow)
+        start_date: 开始日期 YYYYMMDD
+        end_date: 结束日期 YYYYMMDD
+    """
+    try:
+        influx_manager.delete_by_date_range(measurement, start_date, end_date)
+        return success_response(message=f"已删除 {measurement} {start_date}~{end_date} 的数据")
+    except Exception as e:
+        logger.error(f"数据清理失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=settings.service_port)

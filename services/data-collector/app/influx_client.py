@@ -190,6 +190,38 @@ class InfluxDBManager:
             return []
         return tables.to_dict("records")
 
+    def delete_by_date_range(self, measurement: str, start_date: str, end_date: str) -> int:
+        """删除指定测量中某时间范围的数据
+
+        Args:
+            measurement: InfluxDB 测量名
+            start_date: 开始日期 YYYYMMDD 或 YYYY-MM-DD
+            end_date: 结束日期 YYYYMMDD 或 YYYY-MM-DD
+        Returns:
+            删除的记录数（估算）
+        """
+        try:
+            # 规范化日期为 RFC3339
+            if len(start_date) == 8:
+                start_date = f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:8]}"
+            if len(end_date) == 8:
+                end_date = f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:8]}"
+            start = f"{start_date}T00:00:00Z" if "T" not in start_date else start_date
+            stop = f"{end_date}T23:59:59Z" if "T" not in end_date else end_date
+            delete_api = self.client.delete_api()
+            delete_api.delete(
+                start,
+                stop,
+                f'_measurement="{measurement}"',
+                bucket=self.bucket,
+                org=self.org,
+            )
+            logger.info(f"已删除 {measurement} 数据: {start} ~ {stop}")
+            return 1
+        except Exception as e:
+            logger.error(f"删除 {measurement} 数据失败 ({start_date}~{end_date}): {e}")
+            raise
+
     def close(self):
         self.client.close()
 

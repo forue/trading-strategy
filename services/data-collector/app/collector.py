@@ -102,22 +102,33 @@ class DataCollector:
         except ValueError:
             return False
 
+    def _get_last_trade_date(self, before_date: str = None) -> str:
+        """获取指定日期之前最近一个交易日（格式 YYYYMMDD）"""
+        if before_date is None:
+            before_date = datetime.now().strftime("%Y%m%d")
+        trade_dates = self.get_trade_dates()
+        if trade_dates:
+            past = [d for d in trade_dates if d < before_date]
+            if past:
+                return past[-1]
+        return (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
+
     def _get_yesterday_close_price(self, sector_name: str) -> float | None:
-        """获取指定板块的昨日收盘价（从K线接口）"""
+        """获取指定板块前一个交易日的收盘价（从K线接口，自动跳过周末和节假日）"""
         try:
-            yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
+            last_trade_date = self._get_last_trade_date()
             df = ak.stock_board_industry_index_ths(
                 symbol=sector_name,
-                start_date=yesterday,
-                end_date=yesterday,
+                start_date=last_trade_date,
+                end_date=last_trade_date,
             )
             if df is not None and not df.empty:
                 close = self._safe_float(df.iloc[0].get("收盘价", 0))
                 if close > 0:
-                    logger.debug(f"获取 {sector_name} 昨日收盘价: {close}")
+                    logger.debug(f"获取 {sector_name} 前交易日({last_trade_date})收盘价: {close}")
                     return close
         except Exception as e:
-            logger.debug(f"获取 {sector_name} 昨日收盘价失败: {e}")
+            logger.debug(f"获取 {sector_name} 前交易日收盘价失败: {e}")
         return None
 
     def _get_today_close_price(self, sector_name: str) -> float | None:
@@ -210,17 +221,27 @@ class DataCollector:
             results = []
             close_cache = {}
 
-        # 获取收盘价（从K线接口替换均价）
-        # 优先获取昨日收盘价，非交易时段今日收盘价可能为空
+        # 获取收盘价（从K线接口替换均价，并发获取以控制在合理时间内完成）
         if close_cache:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            sector_names = [item["sector_name"] for item in results]
+            close_prices: dict[str, float | None] = {}
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                futures = {executor.submit(self._get_yesterday_close_price, name): name for name in sector_names}
+                for future in as_completed(futures):
+                    name = futures[future]
+                    try:
+                        close_prices[name] = future.result()
+                    except Exception:
+                        close_prices[name] = None
             for item in results:
-                sector_name = item["sector_name"]
-                close_price = self._get_yesterday_close_price(sector_name)
+                name = item["sector_name"]
+                close_price = close_prices.get(name)
                 if close_price and close_price > 0:
                     item["index_close"] = close_price
                 else:
-                    # 无昨日数据时回退到均价
-                    item["index_close"] = close_cache.get(sector_name, item["index_close"])
+                    # 无前交易日数据时回退到均价
+                    item["index_close"] = close_cache.get(name, item["index_close"])
 
         # 写入InfluxDB
         if results:
