@@ -44,59 +44,21 @@ export const useUserStore = defineStore('user', () => {
   async function triggerDailyBacktest(): Promise<void> {
     try {
       ElMessage.info('检测到交易日已过回测时间点，正在触发当日回测...')
-      
-      // 1. 触发数据采集
+
+      // 1. 触发数据采集（内部链式触发策略计算，无需再单独调用 triggerStrategy）
       try {
-        await schedulerApi.triggerCollect()
+        const collectResult = await schedulerApi.triggerCollect()
         ElMessage.success('数据采集完成')
-        
-        // 等待2秒，确保数据采集完成
-        await new Promise(resolve => setTimeout(resolve, 2000))
-      } catch (error) {
-        ElMessage.warning('数据采集可能已完成或正在进行中')
-      }
-      
-      // 2. 触发策略计算
-      try {
-        const strategyResult = await schedulerApi.triggerStrategy()
-        const totalSignals = strategyResult?.data?.reduce((sum: number, r: any) => sum + (r.signal_count || 0), 0) || 0
+        // 采集返回结果中已包含策略计算信号数
+        const totalSignals = collectResult?.data?.reduce?.((sum: number, r: any) => sum + (r.signal_count || 0), 0) || 0
         if (totalSignals > 0) {
           ElMessage.success(`策略计算完成，共生成 ${totalSignals} 条信号`)
-        } else {
-          ElMessage.info('策略计算完成，今日无交易信号')
-        }
-      } catch (error) {
-        ElMessage.warning('策略计算可能已完成或正在进行中')
-      }
-      
-      // 3. 检查今日是否有信号，如果有则运行回测
-      const today = dayjs().format('YYYY-MM-DD')
-      try {
-        // 计算三种策略的信号
-        let totalSignals = 0
-        for (const st of ['AGGRESSIVE', 'MODERATE', 'CONSERVATIVE']) {
-          const result = await strategyApi.calculateSignals(st)
-          totalSignals += result?.length || 0
-        }
-
-        if (totalSignals > 0) {
-          // 运行回测（使用默认参数）
-          const backtestResult = await strategyApi.runBacktest({
-            strategyType: 'AGGRESSIVE',
-            startDate: today,
-            endDate: today,
-            initialCapital: 1000000
-          })
-          
-          ElMessage.success(`信号计算完成，共 ${totalSignals} 条信号，回测收益: ${backtestResult.total_return?.toFixed(2)}%`)
         } else {
           ElMessage.info('今日无交易信号')
         }
       } catch (error) {
-        console.error('回测失败:', error)
-        ElMessage.warning('回测失败，可能今日数据尚未准备就绪')
+        ElMessage.warning('数据采集可能已完成或正在进行中')
       }
-      
     } catch (error: any) {
       console.error('触发回测流程失败:', error)
       ElMessage.error(`回测流程失败: ${error.message || '未知错误'}`)

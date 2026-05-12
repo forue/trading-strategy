@@ -12,6 +12,46 @@ from loguru import logger
 
 from .config import settings
 
+# Redis 去重客户端（db=0，与 auth 服务共享 keyspace）
+import redis.asyncio as aioredis
+_redis_dedup: aioredis.Redis | None = None
+
+
+async def _get_redis_dedup() -> aioredis.Redis | None:
+    global _redis_dedup
+    if _redis_dedup is not None:
+        try:
+            await _redis_dedup.ping()
+            return _redis_dedup
+        except Exception:
+            _redis_dedup = None
+    try:
+        _redis_dedup = aioredis.Redis(
+            host=settings.redis_host,
+            port=settings.redis_port,
+            password=settings.redis_password or None,
+            db=0,
+            decode_responses=True,
+        )
+        await _redis_dedup.ping()
+        return _redis_dedup
+    except Exception:
+        return None
+
+
+async def _check_and_mark_executed(key: str, ttl: int = 86400) -> bool:
+    """检查 Redis 去重标记，首次调用返回 True 并设置标记"""
+    r = await _get_redis_dedup()
+    if r is None:
+        return True  # Redis 不可用时放行
+    # SET NX: 仅当 key 不存在时设置，返回 True 表示首次
+    result = await r.set(key, "1", nx=True, ex=ttl)
+    if result:
+        logger.info(f"Redis 去重标记已设置: {key} (TTL={ttl}s)")
+        return True
+    logger.info(f"Redis 去重命中，跳过重复执行: {key}")
+    return False
+
 
 def _is_weekend() -> bool:
     """简单判断今天是否为周末（精确的节假日判断由下游服务负责）"""
@@ -32,6 +72,9 @@ async def job_collect_data():
             if result.get("code") == 200:
                 logger.info(">>> 数据采集完成，立即触发策略计算")
                 await _trigger_strategy_calculation(client)
+                # 采集+计算成功后设置去重标记
+                today = datetime.now().strftime("%Y-%m-%d")
+                await _check_and_mark_executed(f"signal:calculated:{today}")
     except Exception as e:
         logger.error(f"数据采集任务失败: {e}")
 
@@ -52,6 +95,10 @@ async def job_calculate_strategy():
     """定时任务：策略计算（作为采集链路的备用触发，正常由采集任务链式触发）"""
     if _is_weekend():
         logger.info(">>> 今日为周末，跳过策略计算（节假日由下游服务判断）")
+        return
+    today = datetime.now().strftime("%Y-%m-%d")
+    if not await _check_and_mark_executed(f"signal:calculated:{today}"):
+        logger.info(">>> 今日策略已计算，跳过备用触发")
         return
     logger.info(">>> 定时任务触发: 策略计算")
     try:
@@ -134,8 +181,12 @@ async def _run_startup_jobs():
     """启动时执行所有任务（不阻塞启动流程）
 
     job_collect_data 内部已链式触发策略计算，无需再单独调用 job_calculate_strategy，
-    避免重复推送。
+    避免重复推送。启动前检查 Redis 去重标记，若今日已执行则跳过。
     """
+    today = datetime.now().strftime("%Y-%m-%d")
+    if not await _check_and_mark_executed(f"signal:calculated:{today}"):
+        logger.info(">>> 今日策略已计算，跳过启动任务")
+        return
     logger.info(">>> 启动时执行: 数据采集")
     await job_collect_data()
     logger.info(">>> 启动时执行: 北向资金采集")
@@ -183,6 +234,9 @@ async def health_check():
 @app.post("/trigger/collect")
 async def trigger_collect():
     """手动触发数据采集（后续自动链式触发策略计算）"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    if not await _check_and_mark_executed(f"signal:calculated:{today}"):
+        return {"code": 200, "message": "今日策略已计算，跳过重复触发"}
     await job_collect_data()
     return {"code": 200, "message": "数据采集已触发"}
 
@@ -190,6 +244,9 @@ async def trigger_collect():
 @app.post("/trigger/strategy")
 async def trigger_strategy():
     """手动触发策略计算"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    if not await _check_and_mark_executed(f"signal:calculated:{today}"):
+        return {"code": 200, "message": "今日策略已计算，跳过重复触发"}
     results = []
     async with httpx.AsyncClient(timeout=120) as client:
         for strategy in ["AGGRESSIVE", "MODERATE", "CONSERVATIVE"]:
