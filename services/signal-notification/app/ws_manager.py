@@ -36,14 +36,23 @@ class ConnectionManager:
                 self.disconnect(user_id)
 
     async def broadcast_signal(self, signal: dict, strategy_type: str = None):
-        """广播信号给订阅了该策略的用户"""
+        """广播单个信号（兼容旧调用，内部转为批量）"""
+        return await self.broadcast_signals([signal], strategy_type)
+
+    async def broadcast_signals(self, signals: list, strategy_type: str = None):
+        """批量广播信号给订阅了该策略的用户（一次WebSocket消息含该策略全部信号）"""
         sent_count = 0
+        message = {
+            "type": "signals",
+            "strategy_type": strategy_type,
+            "signals": signals,
+            "count": len(signals),
+        }
         for user_id, subscriptions in self.user_subscriptions.items():
-            # 如果未指定策略类型或用户订阅了该策略
             if strategy_type is None or not subscriptions or strategy_type in subscriptions:
-                await self.send_personal_message(signal, user_id)
+                await self.send_personal_message(message, user_id)
                 sent_count += 1
-        logger.info(f"信号广播完成: strategy={strategy_type}, 发送{sent_count}个客户端")
+        logger.info(f"信号广播完成: strategy={strategy_type}, 信号{len(signals)}条, 发送{sent_count}个客户端")
         return sent_count
 
     def subscribe(self, user_id: str, strategy_type: str):

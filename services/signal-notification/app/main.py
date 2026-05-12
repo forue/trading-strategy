@@ -112,16 +112,15 @@ def start_rabbitmq_consumer():
                 strategy_type = message.get("strategy_type", "")
                 signal_date = message.get("signal_date", datetime.now().strftime("%Y-%m-%d"))
 
-                # 1. 通过WebSocket广播信号（在主事件循环上执行）
+                # 1. 通过WebSocket批量推送（一次发送该策略全部信号，避免逐条弹窗）
                 if _main_loop and not _main_loop.is_closed():
-                    for signal in signals:
-                        future = asyncio.run_coroutine_threadsafe(
-                            ws_manager.broadcast_signal(signal, strategy_type), _main_loop
-                        )
-                        try:
-                            future.result(timeout=5)
-                        except Exception as e:
-                            logger.error(f"WebSocket广播失败: {e}")
+                    future = asyncio.run_coroutine_threadsafe(
+                        ws_manager.broadcast_signals(signals, strategy_type), _main_loop
+                    )
+                    try:
+                        future.result(timeout=5)
+                    except Exception as e:
+                        logger.error(f"WebSocket广播失败: {e}")
 
                 # 2. 外部推送通道（钉钉、企业微信）
                 try:
