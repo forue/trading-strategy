@@ -29,53 +29,63 @@ _main_loop: asyncio.AbstractEventLoop = None
 
 
 def _init_llm():
-    """初始化 LLM 客户端（优先从 Redis 加载配置）"""
+    """初始化 LLM 客户端（优先从 Redis 加载配置）
+
+    初始化顺序：先尝试信号分析专用模型，再尝试默认模型。
+    至少一个成功即视为就绪，默认模型失败不阻断专用模型的初始化。
+    """
     global llm_client, signal_llm_client, analyzer
-    try:
-        config = _load_ai_config()
-        llm_client = ModelAdapterFactory.create(
-            provider=config.get("provider", settings.ai_provider),
-            api_key=config.get("api_key", settings.ai_api_key),
-            base_url=config.get("base_url", settings.ai_base_url),
-            model=config.get("model", settings.ai_model),
-            ollama_base_url=config.get("ollama_base_url", settings.ollama_base_url),
-            ollama_model=config.get("ollama_model", settings.ollama_model),
-        )
+    config = _load_ai_config()
 
-        # 信号分析专用 LLM 客户端
-        signal_provider = config.get("signal_analysis_provider", "")
-        signal_model = config.get("signal_analysis_model", "")
-        if signal_provider and signal_model:
-            try:
-                if signal_provider == "ollama":
+    # 1. 信号分析专用 LLM 客户端（优先）
+    signal_provider = config.get("signal_analysis_provider", "")
+    signal_model = config.get("signal_analysis_model", "")
+    if signal_provider and signal_model:
+        try:
+            if signal_provider == "ollama":
+                signal_llm_client = ModelAdapterFactory.create(
+                    provider="ollama",
+                    ollama_base_url=config.get("ollama_base_url", settings.ollama_base_url),
+                    ollama_model=signal_model,
+                )
+            else:
+                provider_mgr = _get_provider_mgr()
+                provider_config = provider_mgr.get(signal_provider)
+                if provider_config and provider_config.api_key:
                     signal_llm_client = ModelAdapterFactory.create(
-                        provider="ollama",
-                        ollama_base_url=config.get("ollama_base_url", settings.ollama_base_url),
-                        ollama_model=signal_model,
+                        provider="openai",
+                        api_key=provider_config.api_key,
+                        base_url=provider_config.base_url,
+                        model=signal_model,
                     )
-                else:
-                    # 从已配置的提供商中查找
-                    provider_mgr = _get_provider_mgr()
-                    provider_config = provider_mgr.get(signal_provider)
-                    if provider_config and provider_config.api_key:
-                        signal_llm_client = ModelAdapterFactory.create(
-                            provider="openai",
-                            api_key=provider_config.api_key,
-                            base_url=provider_config.base_url,
-                            model=signal_model,
-                        )
-                if signal_llm_client:
-                    logger.info(f"信号分析专用 LLM 客户端初始化完成: provider={signal_provider}, model={signal_model}")
-            except Exception as e:
-                logger.warning(f"信号分析专用 LLM 客户端初始化失败，使用默认客户端: {e}")
+            if signal_llm_client:
+                logger.info(f"信号分析专用 LLM 客户端初始化完成: provider={signal_provider}, model={signal_model}")
+        except Exception as e:
+            logger.warning(f"信号分析专用 LLM 客户端初始化失败: {e}")
 
-        # 使用专用客户端或默认客户端
+    # 2. 默认 LLM 客户端（辅助用，失败不阻断）
+    if not llm_client:
+        try:
+            llm_client = ModelAdapterFactory.create(
+                provider=config.get("provider", settings.ai_provider),
+                api_key=config.get("api_key", settings.ai_api_key),
+                base_url=config.get("base_url", settings.ai_base_url),
+                model=config.get("model", settings.ai_model),
+                ollama_base_url=config.get("ollama_base_url", settings.ollama_base_url),
+                ollama_model=config.get("ollama_model", settings.ollama_model),
+            )
+            provider = config.get("provider", settings.ai_provider)
+            model = config.get("model", settings.ai_model) if config.get("provider", settings.ai_provider) == "openai" else config.get("ollama_model", settings.ollama_model)
+            logger.info(f"默认 LLM 客户端初始化完成: provider={provider}, model={model}")
+        except Exception as e:
+            logger.warning(f"默认 LLM 客户端初始化失败（信号分析不受影响）: {e}")
+
+    # 3. 使用专用客户端或默认客户端
+    if signal_llm_client or llm_client:
         analyzer = SignalAnalyzer(signal_llm_client or llm_client)
-        provider = config.get("provider", settings.ai_provider)
-        model = config.get("model", settings.ai_model) if provider == "openai" else config.get("ollama_model", settings.ollama_model)
-        logger.info(f"LLM 客户端初始化完成: provider={provider}, model={model}")
-    except Exception as e:
-        logger.error(f"LLM 客户端初始化失败: {e}")
+        logger.info("信号分析器初始化完成")
+    else:
+        logger.error("所有 LLM 客户端初始化均失败，信号解读不可用")
 
 
 @asynccontextmanager
@@ -419,9 +429,37 @@ async def update_config(request: UpdateConfigRequest):
 
         _save_ai_config(config)
 
-        # 重新初始化 LLM 客户端
+        # 重新初始化 LLM 客户端（信号分析专用模型优先，默认模型失败不阻断）
+        signal_llm_client_temp = None
+        llm_client_temp = None
+
+        # 1. 信号分析专用客户端
+        signal_provider = config.get("signal_analysis_provider", "")
+        signal_model = config.get("signal_analysis_model", "")
+        if signal_provider and signal_model:
+            try:
+                if signal_provider == "ollama":
+                    signal_llm_client_temp = ModelAdapterFactory.create(
+                        provider="ollama",
+                        ollama_base_url=config["ollama_base_url"],
+                        ollama_model=signal_model,
+                    )
+                else:
+                    provider_mgr = _get_provider_mgr()
+                    provider_config = provider_mgr.get(signal_provider)
+                    if provider_config and provider_config.api_key:
+                        signal_llm_client_temp = ModelAdapterFactory.create(
+                            provider="openai",
+                            api_key=provider_config.api_key,
+                            base_url=provider_config.base_url,
+                            model=signal_model,
+                        )
+            except Exception as e:
+                logger.warning(f"信号分析专用客户端更新失败: {e}")
+
+        # 2. 默认客户端
         try:
-            llm_client = ModelAdapterFactory.create(
+            llm_client_temp = ModelAdapterFactory.create(
                 provider=config["provider"],
                 api_key=config["api_key"],
                 base_url=config["base_url"],
@@ -429,36 +467,19 @@ async def update_config(request: UpdateConfigRequest):
                 ollama_base_url=config["ollama_base_url"],
                 ollama_model=config["ollama_model"],
             )
-
-            # 重新初始化信号分析专用客户端
-            signal_provider = config.get("signal_analysis_provider", "")
-            signal_model = config.get("signal_analysis_model", "")
-            if signal_provider and signal_model:
-                try:
-                    if signal_provider == "ollama":
-                        signal_llm_client = ModelAdapterFactory.create(
-                            provider="ollama",
-                            ollama_base_url=config["ollama_base_url"],
-                            ollama_model=signal_model,
-                        )
-                    else:
-                        provider_mgr = _get_provider_mgr()
-                        provider_config = provider_mgr.get(signal_provider)
-                        if provider_config and provider_config.api_key:
-                            signal_llm_client = ModelAdapterFactory.create(
-                                provider="openai",
-                                api_key=provider_config.api_key,
-                                base_url=provider_config.base_url,
-                                model=signal_model,
-                            )
-                except Exception as e:
-                    logger.warning(f"信号分析专用客户端更新失败: {e}")
-                    signal_llm_client = None
-
-            analyzer = SignalAnalyzer(signal_llm_client or llm_client)
-            logger.info(f"LLM 客户端已更新: provider={config['provider']}")
         except Exception as e:
-            logger.warning(f"LLM 客户端更新失败: {e}")
+            logger.warning(f"默认 LLM 客户端更新失败（信号分析不受影响）: {e}")
+
+        # 3. 应用更新
+        if signal_llm_client_temp:
+            signal_llm_client = signal_llm_client_temp
+        if llm_client_temp:
+            llm_client = llm_client_temp
+        if signal_llm_client or llm_client:
+            analyzer = SignalAnalyzer(signal_llm_client or llm_client)
+            logger.info(f"LLM 客户端已更新: signal_analyzer={'ready' if signal_llm_client else 'fallback'}")
+        else:
+            logger.error("所有 LLM 客户端更新均失败")
 
         api_key = config.get("api_key", "")
         masked_key = ""
