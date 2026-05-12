@@ -374,17 +374,21 @@ onMounted(() => {
 </script>
 
 <style lang="scss" scoped>
-.summary-row { margin-bottom: 20px; }
+.summary-row { margin-bottom: 16px; }
 .summary-card {
-  background: #fff; border-radius: 8px; padding: 20px 12px; text-align: center;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.05);
-  .summary-label { font-size: 13px; color: #909399; margin-bottom: 6px; }
-  .summary-value { font-size: 22px; font-weight: bold; }
+  background: var(--bg-secondary); border: 1px solid var(--border-secondary);
+  border-radius: var(--radius-md); padding: 18px 12px; text-align: center;
+  box-shadow: var(--shadow-sm);
+  transition: all var(--transition-base);
+  &:hover { box-shadow: var(--shadow-card); }
+  .summary-label { font-size: 12px; color: var(--text-tertiary); margin-bottom: 6px; }
+  .summary-value { font-size: 20px; font-weight: 700; font-family: var(--font-mono); }
 }
-.card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; .card-title { font-size: 16px; font-weight: 600; } }
 .stats-row { margin-top: 12px; }
-.stat-item { text-align: center; padding: 8px; background: #fafafa; border-radius: 6px; .stat-label { font-size: 12px; color: #909399; display: block; } .stat-val { font-size: 16px; font-weight: bold; } }
-.signal-buy { color: #f56c6c; font-weight: bold; }
-.signal-sell { color: #67c23a; font-weight: bold; }
-.text-muted { color: #c0c4cc; }
+.stat-item {
+  text-align: center; padding: 8px;
+  background: var(--bg-tertiary); border-radius: var(--radius-sm);
+  .stat-label { font-size: 12px; color: var(--text-tertiary); display: block; }
+  .stat-val { font-size: 15px; font-weight: 600; }
+}
 </style>

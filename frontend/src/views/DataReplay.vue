@@ -294,7 +294,7 @@
               <el-tag v-for="sig in row.buySignals" :key="sig.sector_code" size="small" type="danger" style="margin: 2px">
                 {{ sig.sector_name }}
               </el-tag>
-              <span v-if="!row.buySignals.length" style="color: #909399">无</span>
+              <span v-if="!row.buySignals.length" style="color: var(--text-tertiary)">无</span>
             </template>
           </el-table-column>
           <el-table-column label="卖出" min-width="200">
@@ -302,7 +302,7 @@
               <el-tag v-for="sig in row.sellSignals" :key="sig.sector_code" size="small" type="success" style="margin: 2px">
                 {{ sig.sector_name }}
               </el-tag>
-              <span v-if="!row.sellSignals.length" style="color: #909399">无</span>
+              <span v-if="!row.sellSignals.length" style="color: var(--text-tertiary)">无</span>
             </template>
           </el-table-column>
           <el-table-column prop="strategy_return" label="策略日收益" width="120" sortable>
@@ -314,7 +314,7 @@
           </el-table-column>
           <el-table-column prop="benchmark_return" label="基准日收益" width="120">
             <template #default="{ row }">
-              <span style="color: #909399">{{ row.benchmark_return >= 0 ? '+' : '' }}{{ row.benchmark_return.toFixed(4) }}%</span>
+              <span style="color: var(--text-tertiary)">{{ row.benchmark_return >= 0 ? '+' : '' }}{{ row.benchmark_return.toFixed(4) }}%</span>
             </template>
           </el-table-column>
         </el-table>
@@ -337,9 +337,12 @@ import { CanvasRenderer } from 'echarts/renderers'
 import { ElMessage } from 'element-plus'
 import { settingsApi } from '@/api/settings'
 import { strategyApi } from '@/api/strategy'
+import { useThemeStore } from '@/stores/theme'
 import dayjs from 'dayjs'
 
 use([BarChart, LineChart, ScatterChart, CandlestickChart, GridComponent, TooltipComponent, LegendComponent, DataZoomComponent, MarkLineComponent, MarkPointComponent, CanvasRenderer])
+
+const themeStore = useThemeStore()
 
 // ============ 通用状态 ============
 const loading = ref(false)
@@ -585,6 +588,9 @@ function onModeChange() { stopAutoPlay() }
 // ============ 资金流向柱状图（按日期）- 双面板布局 ============
 const flowChartOption = computed(() => {
   if (!dayData.value?.sectors?.length) return {}
+  const isDark = themeStore.mode === 'dark'
+  const gridColor = isDark ? '#2a2d38' : '#ebeef5'
+  const textColor = isDark ? '#9da1b0' : '#5a5f6e'
   const sorted = [...dayData.value.sectors].sort((a, b) => b.index_change_pct - a.index_change_pct)
   const sectorNames = sorted.map(s => s.sector_name)
   const changes = sorted.map(s => s.index_change_pct)
@@ -606,28 +612,28 @@ const flowChartOption = computed(() => {
         return html
       }
     },
-    legend: { data: ['涨跌幅(%)', '主力净流入(亿)', '北向净流入(亿)'], selectedMode: 'multiple' },
+    legend: { data: ['涨跌幅(%)', '主力净流入(亿)', '北向净流入(亿)'], selectedMode: 'multiple', textStyle: { color: textColor } },
     grid: [
       { left: 70, right: 50, top: 35, height: '42%' },
       { left: 70, right: 50, top: '58%', height: '32%' },
     ],
     dataZoom: [
       { type: 'inside', xAxisIndex: [0, 1], start: 0, end: 100 },
-      { type: 'slider', xAxisIndex: [0, 1], start: 0, end: 100, bottom: 5, height: 20 },
+      { type: 'slider', xAxisIndex: [0, 1], start: 0, end: 100, bottom: 5, height: 20, textStyle: { color: textColor } },
     ],
     xAxis: [
       { type: 'category', data: sectorNames, gridIndex: 0, axisLabel: { show: false }, position: 'top' },
-      { type: 'category', data: sectorNames, gridIndex: 1, axisLabel: { rotate: 45, fontSize: 10 }, position: 'bottom' },
+      { type: 'category', data: sectorNames, gridIndex: 1, axisLabel: { rotate: 45, fontSize: 10, color: textColor }, position: 'bottom' },
     ],
     yAxis: [
-      { type: 'value', name: '涨跌幅(%)', position: 'left', gridIndex: 0, axisLine: { show: true, lineStyle: { color: '#409eff' } }, axisLabel: { formatter: '{value}%' }, splitLine: { lineStyle: { color: '#f5f5f5' } } },
-      { type: 'value', name: '主力(亿)', position: 'left', gridIndex: 1, offset: 0, axisLine: { show: true, lineStyle: { color: '#f56c6c' } }, axisLabel: { formatter: '{value}', margin: 8 }, splitLine: { lineStyle: { color: '#f5f5f5' } } },
-      { type: 'value', name: '北向(亿)', position: 'right', gridIndex: 1, axisLine: { show: true, lineStyle: { color: '#e6a23c' } }, axisLabel: { formatter: '{value}', margin: 8 }, splitLine: { show: false } },
+      { type: 'value', name: '涨跌幅(%)', position: 'left', gridIndex: 0, nameTextStyle: { color: textColor }, axisLine: { show: true, lineStyle: { color: isDark ? '#7b93f5' : '#409eff' } }, axisLabel: { formatter: '{value}%', color: isDark ? '#646878' : '#9499a6' }, splitLine: { lineStyle: { color: gridColor } } },
+      { type: 'value', name: '主力(亿)', position: 'left', gridIndex: 1, offset: 0, nameTextStyle: { color: textColor }, axisLine: { show: true, lineStyle: { color: isDark ? '#f06060' : '#f56c6c' } }, axisLabel: { formatter: '{value}', margin: 8, color: isDark ? '#646878' : '#9499a6' }, splitLine: { lineStyle: { color: gridColor } } },
+      { type: 'value', name: '北向(亿)', position: 'right', gridIndex: 1, axisLine: { show: true, lineStyle: { color: isDark ? '#eebb3c' : '#e6a23c' } }, axisLabel: { formatter: '{value}', margin: 8, color: isDark ? '#646878' : '#9499a6' }, splitLine: { show: false } },
     ],
     series: [
-      { name: '涨跌幅(%)', type: 'bar', xAxisIndex: 0, yAxisIndex: 0, data: changes, itemStyle: { color: (p: any) => p.data >= 0 ? '#f56c6c' : '#67c23a' }, barWidth: 10 },
-      { name: '主力净流入(亿)', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: mainFlow, itemStyle: { color: '#f56c6c' }, barWidth: 6 },
-      { name: '北向净流入(亿)', type: 'bar', xAxisIndex: 1, yAxisIndex: 2, data: northFlow, itemStyle: { color: '#e6a23c' }, barWidth: 6 },
+      { name: '涨跌幅(%)', type: 'bar', xAxisIndex: 0, yAxisIndex: 0, data: changes, itemStyle: { color: (p: any) => p.data >= 0 ? '#f56c6c' : '#67c23a' }, barMaxWidth: 24 },
+      { name: '主力净流入(亿)', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: mainFlow, itemStyle: { color: '#f56c6c' }, barMaxWidth: 16 },
+      { name: '北向净流入(亿)', type: 'bar', xAxisIndex: 1, yAxisIndex: 2, data: northFlow, itemStyle: { color: '#e6a23c' }, barMaxWidth: 16 },
     ],
   }
 })
@@ -635,6 +641,9 @@ const flowChartOption = computed(() => {
 // ============ 板块K线图 + 资金流（按板块）- 双面板布局 ============
 const sectorHistoryChartOption = computed(() => {
   if (!sectorHistory.value.length) return {}
+  const isDark = themeStore.mode === 'dark'
+  const gridColor = isDark ? '#2a2d38' : '#eee'
+  const textColor = isDark ? '#9da1b0' : '#5a5f6e'
   const dates = sectorHistory.value.map(s => s.date)
   const changes = sectorHistory.value.map(s => s.index_change_pct)
 
@@ -690,7 +699,7 @@ const sectorHistoryChartOption = computed(() => {
         return html
       },
     },
-    legend: { data: ['K线', 'MA5', 'MA10', '主力净流入(亿)', '北向净流入(亿)'], top: 0 },
+    legend: { data: ['K线', 'MA5', 'MA10', '主力净流入(亿)', '北向净流入(亿)'], top: 0, textStyle: { color: textColor } },
     // 上下双面板：上方K线占70%，下方资金流占30%
     grid: [
       { left: 70, right: 20, top: 30, height: '52%' },  // K线主图
@@ -698,15 +707,15 @@ const sectorHistoryChartOption = computed(() => {
     ],
     xAxis: [
       { type: 'category', data: dates, axisLabel: { show: false }, axisTick: { show: false } },  // 主图X轴隐藏标签
-      { type: 'category', data: dates, gridIndex: 1, axisLabel: { rotate: 30, fontSize: 10 } },  // 副图X轴显示标签
+      { type: 'category', data: dates, gridIndex: 1, axisLabel: { rotate: 30, fontSize: 10, color: textColor } },  // 副图X轴显示标签
     ],
     yAxis: [
-      { type: 'value', name: '指数', scale: true, splitLine: { lineStyle: { color: '#eee' } } },  // 主图Y轴
-      { type: 'value', name: '亿元', gridIndex: 1, splitLine: { lineStyle: { color: '#f5f5f5' } } },  // 副图Y轴
+      { type: 'value', name: '指数', scale: true, nameTextStyle: { color: textColor }, axisLabel: { color: isDark ? '#646878' : '#9499a6' }, splitLine: { lineStyle: { color: gridColor } } },  // 主图Y轴
+      { type: 'value', name: '亿元', gridIndex: 1, nameTextStyle: { color: textColor }, axisLabel: { color: isDark ? '#646878' : '#9499a6' }, splitLine: { lineStyle: { color: gridColor } } },  // 副图Y轴
     ],
     dataZoom: [
       { type: 'inside', xAxisIndex: [0, 1], start: Math.max(0, (1 - 60 / dates.length) * 100) },
-      { type: 'slider', xAxisIndex: [0, 1], bottom: 5, height: 18 },
+      { type: 'slider', xAxisIndex: [0, 1], bottom: 5, height: 18, textStyle: { color: textColor } },
     ],
     series: [
       // === 主图：K线 + 均线 ===
@@ -740,6 +749,9 @@ const sectorHistoryChartOption = computed(() => {
 // ============ 策略叠加净值曲线 + 买卖点标记 ============
 const overlayChartOption = computed(() => {
   if (!overlayData.value?.nav_curve?.length) return {}
+  const isDark = themeStore.mode === 'dark'
+  const gridColor = isDark ? '#2a2d38' : '#ebeef5'
+  const textColor = isDark ? '#9da1b0' : '#5a5f6e'
   const curve = overlayData.value.nav_curve
   const signals = overlayData.value.daily_signals
 
@@ -793,11 +805,11 @@ const overlayChartOption = computed(() => {
         return html
       },
     },
-    legend: { data: ['策略净值', '基准净值', '买入点', '卖出点'] },
+    legend: { data: ['策略净值', '基准净值', '买入点', '卖出点'], textStyle: { color: textColor } },
     grid: { left: 80, right: 30, bottom: 60, top: 40 },
-    dataZoom: [{ type: 'inside' }, { type: 'slider' }],
-    xAxis: { type: 'category', data: curve.map((p: any) => p.date), axisLabel: { rotate: 30, fontSize: 10 } },
-    yAxis: { type: 'value', name: '净值', scale: true, axisLabel: { formatter: (v: number) => (v / 10000).toFixed(0) + '万' } },
+    dataZoom: [{ type: 'inside' }, { type: 'slider', textStyle: { color: textColor } }],
+    xAxis: { type: 'category', data: curve.map((p: any) => p.date), axisLabel: { rotate: 30, fontSize: 10, color: textColor } },
+    yAxis: { type: 'value', name: '净值', scale: true, nameTextStyle: { color: textColor }, axisLabel: { formatter: (v: number) => (v / 10000).toFixed(0) + '万', color: isDark ? '#646878' : '#9499a6' }, splitLine: { lineStyle: { color: gridColor } } },
     series: [
       {
         name: '策略净值', type: 'line', data: curve.map((p: any) => p.nav),
@@ -848,23 +860,22 @@ init()
 .replay-controls {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 0;
 }
-.date-progress { font-size: 14px; color: #409eff; font-weight: 600; margin-left: 8px; }
+.date-progress { font-size: 14px; color: var(--accent-primary); font-weight: 600; margin-left: 8px; }
 .stat-box {
-  text-align: center; padding: 16px; background: #f5f7fa; border-radius: 8px;
-  .stat-value { font-size: 20px; font-weight: 600; color: #303133; }
-  .stat-label { font-size: 12px; color: #909399; margin-top: 4px; }
-  &.rise .stat-value { color: #f56c6c; }
-  &.fall .stat-value { color: #67c23a; }
+  text-align: center; padding: 16px; background: var(--bg-tertiary); border-radius: var(--radius-sm);
+  transition: background var(--transition-base);
+  .stat-value { font-size: 20px; font-weight: 600; color: var(--text-primary); }
+  .stat-label { font-size: 12px; color: var(--text-tertiary); margin-top: 4px; }
+  &.rise .stat-value { color: var(--accent-danger); }
+  &.fall .stat-value { color: var(--accent-success); }
 }
 .card-header {
   display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;
-  .card-title { font-size: 16px; font-weight: 600; }
+  .card-title { font-size: 16px; font-weight: 600; color: var(--text-primary); }
 }
 .params-display {
-  margin-bottom: 12px;
-  padding: 8px;
-  background: #f5f7fa;
-  border-radius: 4px;
+  margin-bottom: 12px; padding: 8px;
+  background: var(--bg-tertiary); border-radius: var(--radius-sm);
 }
-::deep(.el-tabs__nav-wrap::after) { display: none; }
+:deep(.el-tabs__nav-wrap::after) { display: none; }
 </style>

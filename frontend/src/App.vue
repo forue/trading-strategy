@@ -5,8 +5,11 @@
 <script setup lang="ts">
 import { onMounted } from 'vue'
 import { useUserStore } from '@/stores/user'
+import { useThemeStore } from '@/stores/theme'
 
 const userStore = useUserStore()
+// Initialize theme store (triggers class application)
+useThemeStore()
 
 onMounted(() => {
   const token = localStorage.getItem('token')
@@ -21,6 +24,8 @@ html, body, #app {
   margin: 0;
   padding: 0;
   height: 100%;
-  font-family: 'Microsoft YaHei', 'PingFang SC', sans-serif;
+  font-family: var(--font-sans);
+  background: var(--bg-primary);
+  color: var(--text-primary);
 }
 </style>

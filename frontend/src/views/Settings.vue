@@ -207,7 +207,7 @@
           <el-form label-width="160px" style="max-width: 600px; margin-bottom: 20px">
             <el-form-item label="默认缓存天数">
               <el-input-number v-model="cacheTtlDays" :min="1" :max="90" @change="saveSettings" />
-              <span style="margin-left: 8px; color: #909399; font-size: 13px">天</span>
+              <span style="margin-left: 8px; color: var(--text-tertiary); font-size: 13px">天</span>
             </el-form-item>
           </el-form>
 
@@ -305,15 +305,15 @@
           <el-form label-width="160px" style="max-width: 600px">
             <el-form-item label="数据采集时间">
               <el-time-picker v-model="schedulerTimes.collect" format="HH:mm" value-format="HH:mm" placeholder="采集时间" @change="saveSettings" />
-              <span style="margin-left: 8px; color: #909399; font-size: 13px">每交易日</span>
+              <span style="margin-left: 8px; color: var(--text-tertiary); font-size: 13px">每交易日</span>
             </el-form-item>
             <el-form-item label="策略计算时间">
               <el-time-picker v-model="schedulerTimes.calculate" format="HH:mm" value-format="HH:mm" placeholder="计算时间" @change="saveSettings" />
-              <span style="margin-left: 8px; color: #909399; font-size: 13px">每交易日</span>
+              <span style="margin-left: 8px; color: var(--text-tertiary); font-size: 13px">每交易日</span>
             </el-form-item>
             <el-form-item label="北向资金采集">
               <el-time-picker v-model="schedulerTimes.north_bound" format="HH:mm" value-format="HH:mm" placeholder="采集时间" @change="saveSettings" />
-              <span style="margin-left: 8px; color: #909399; font-size: 13px">每交易日</span>
+              <span style="margin-left: 8px; color: var(--text-tertiary); font-size: 13px">每交易日</span>
             </el-form-item>
           </el-form>
         </div>
@@ -597,16 +597,31 @@ onMounted(() => {
 
 <style lang="scss" scoped>
 .settings-page { padding: 0; }
+:deep(.el-tabs--border-card) {
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  border: 1px solid var(--border-secondary);
+  background: var(--bg-secondary);
+}
+:deep(.el-tabs--border-card > .el-tabs__header) {
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border-secondary);
+}
+:deep(.el-tabs--border-card > .el-tabs__header .el-tabs__item) {
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+}
 .stat-box {
-  text-align: center; padding: 20px; background: #f5f7fa; border-radius: 8px;
-  .stat-value { font-size: 24px; font-weight: 600; color: #303133; }
-  .stat-label { font-size: 13px; color: #909399; margin-top: 6px; }
+  text-align: center; padding: 20px;
+  background: var(--bg-tertiary); border-radius: var(--radius-sm);
+  .stat-value { font-size: 24px; font-weight: 600; color: var(--text-primary); font-family: var(--font-mono); }
+  .stat-label { font-size: 13px; color: var(--text-tertiary); margin-top: 6px; }
 }
 .db-card {
-  background: #f5f7fa; border-radius: 8px; padding: 20px;
-  .db-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; font-size: 16px; font-weight: 600; }
-  .db-info { font-size: 13px; color: #606266; line-height: 1.8; }
+  background: var(--bg-tertiary); border-radius: var(--radius-sm); padding: 20px;
+  transition: background var(--transition-base);
+  .db-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; font-size: 16px; font-weight: 600; color: var(--text-primary); }
+  .db-info { font-size: 13px; color: var(--text-secondary); line-height: 1.8; }
 }
-.card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; .card-title { font-size: 16px; font-weight: 600; } }
-.form-hint { font-size: 12px; color: #909399; margin-top: 4px; }
+.card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; .card-title { font-size: 16px; font-weight: 600; color: var(--text-primary); } }
+.form-hint { font-size: 12px; color: var(--text-tertiary); margin-top: 4px; }
 </style>

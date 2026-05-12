@@ -169,9 +169,33 @@ onMounted(() => {
 </script>
 
 <style lang="scss" scoped>
-.card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; .card-title { font-size: 16px; font-weight: 600; } }
 .health-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
-.health-item { display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: 8px; background: #f5f7fa; &.healthy { border-left: 3px solid #67c23a; } &.unhealthy { border-left: 3px solid #f56c6c; } &.warning { border-left: 3px solid #e6a23c; } .health-info { .health-name { font-weight: 500; font-size: 14px; } .health-detail { color: #909399; font-size: 12px; margin-top: 4px; } } }
-.log-container { background: #1d1e2c; border-radius: 8px; padding: 16px; max-height: 500px; overflow-y: auto; font-family: 'Consolas', 'Monaco', monospace; font-size: 13px; }
-.log-line { padding: 4px 0; color: #d4d4d4; display: flex; align-items: center; &.warn { color: #e6a23c; } &.error { color: #f56c6c; } &.debug { color: #909399; } .log-time { color: #6a9955; min-width: 160px; } .log-service { color: #569cd6; min-width: 120px; } .log-message { flex: 1; word-break: break-all; } }
+.health-item {
+  display: flex; align-items: center; gap: 12px; padding: 12px;
+  border-radius: var(--radius-sm); background: var(--bg-tertiary);
+  border-left: 3px solid var(--text-tertiary);
+  transition: background var(--transition-base);
+  &.healthy { border-left-color: var(--accent-success); }
+  &.unhealthy { border-left-color: var(--accent-danger); }
+  &.warning { border-left-color: var(--accent-warning); }
+  .health-info {
+    .health-name { font-weight: 500; font-size: 14px; color: var(--text-primary); }
+    .health-detail { color: var(--text-tertiary); font-size: 12px; margin-top: 4px; }
+  }
+}
+.log-container {
+  background: #12141a; border-radius: var(--radius-sm); padding: 16px;
+  max-height: 500px; overflow-y: auto;
+  font-family: var(--font-mono); font-size: 13px;
+}
+.log-line {
+  padding: 4px 0; color: #d4d4d4; display: flex; align-items: center;
+  &.warn { color: var(--accent-warning); }
+  &.error { color: var(--accent-danger); }
+  &.debug { color: var(--text-tertiary); }
+  .log-time { color: #6a9955; min-width: 160px; }
+  .log-service { color: #569cd6; min-width: 120px; }
+  .log-message { flex: 1; word-break: break-all; }
+}
+@media (max-width: 768px) { .health-grid { grid-template-columns: 1fr; } }
 </style>

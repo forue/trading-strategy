@@ -226,10 +226,7 @@ onMounted(() => fetchSignals())
 </script>
 
 <style lang="scss" scoped>
-.card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; .card-title { font-size: 16px; font-weight: 600; } }
-.ws-status { display: flex; align-items: center; gap: 8px; font-size: 13px; }
-.signal-buy { color: #f56c6c; font-weight: bold; }
-.signal-sell { color: #67c23a; font-weight: bold; }
-.etf-tag { cursor: pointer; display: inline-flex; align-items: center; gap: 4px; .etf-name { font-size: 12px; color: #606266; } &:hover .el-tag { border-color: #409eff; } }
-.text-muted { color: #c0c4cc; }
+.ws-status { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-secondary); }
+.etf-tag { cursor: pointer; display: inline-flex; align-items: center; gap: 4px; .etf-name { font-size: 12px; color: var(--text-secondary); } &:hover .el-tag { border-color: var(--accent-primary); } }
+.text-muted { color: var(--text-tertiary); }
 </style>

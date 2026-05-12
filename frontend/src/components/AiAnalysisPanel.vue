@@ -98,9 +98,10 @@ watch(() => [props.strategyType, props.signalDate], loadAnalyses, { immediate: t
 
 <style lang="scss" scoped>
 .ai-analysis-panel {
-  background: #fff;
-  border-radius: 8px;
-  border: 1px solid #e4e7ed;
+  background: var(--bg-primary);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-secondary);
+  box-shadow: var(--shadow-card);
   overflow: hidden;
 
   .panel-header {
@@ -108,8 +109,8 @@ watch(() => [props.strategyType, props.signalDate], loadAnalyses, { immediate: t
     align-items: center;
     gap: 8px;
     padding: 12px 16px;
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    color: #fff;
+    background: linear-gradient(135deg, #637ee8 0%, #8b5cf6 100%);
+    color: var(--text-inverse);
     font-weight: 600;
     font-size: 14px;
   }
@@ -123,7 +124,7 @@ watch(() => [props.strategyType, props.signalDate], loadAnalyses, { immediate: t
 
     .analysis-card {
       padding: 12px;
-      border: 1px solid #ebeef5;
+      border: 1px solid var(--border-secondary);
       border-radius: 6px;
       margin-bottom: 10px;
 
@@ -150,18 +151,18 @@ watch(() => [props.strategyType, props.signalDate], loadAnalyses, { immediate: t
 
           .label {
             font-size: 12px;
-            color: #909399;
+            color: var(--text-tertiary);
           }
         }
       }
 
       .interpretation {
         font-size: 13px;
-        color: #303133;
+        color: var(--text-primary);
         line-height: 1.6;
         margin-bottom: 10px;
         padding: 8px 12px;
-        background: #f5f7fa;
+        background: var(--bg-tertiary);
         border-radius: 4px;
       }
 
@@ -174,7 +175,7 @@ watch(() => [props.strategyType, props.signalDate], loadAnalyses, { immediate: t
           gap: 4px;
           font-size: 13px;
           font-weight: 600;
-          color: #e6a23c;
+          color: var(--accent-warning);
           margin-bottom: 6px;
         }
 
@@ -182,7 +183,7 @@ watch(() => [props.strategyType, props.signalDate], loadAnalyses, { immediate: t
           margin: 0;
           padding-left: 20px;
           font-size: 12px;
-          color: #606266;
+          color: var(--text-secondary);
           line-height: 1.8;
         }
       }
@@ -192,9 +193,9 @@ watch(() => [props.strategyType, props.signalDate], loadAnalyses, { immediate: t
         align-items: flex-start;
         gap: 6px;
         font-size: 12px;
-        color: #409eff;
+        color: var(--accent-primary);
         padding: 8px 12px;
-        background: #ecf5ff;
+        background: var(--accent-primary-light);
         border-radius: 4px;
       }
     }
@@ -202,12 +203,12 @@ watch(() => [props.strategyType, props.signalDate], loadAnalyses, { immediate: t
 
   .panel-footer {
     padding: 8px 16px;
-    border-top: 1px solid #ebeef5;
+    border-top: 1px solid var(--border-secondary);
     text-align: right;
 
     .meta {
       font-size: 11px;
-      color: #c0c4cc;
+      color: var(--text-tertiary);
     }
   }
 }

@@ -339,69 +339,40 @@ loadSectors()
 <style lang="scss" scoped>
 .factor-analysis {
   .card-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
+    display: flex; justify-content: space-between; align-items: center;
     margin-bottom: 12px;
-    .card-title { font-size: 15px; font-weight: 600; }
+    .card-title { font-size: 15px; font-weight: 600; color: var(--text-primary); }
     .header-actions { display: flex; gap: 8px; align-items: center; }
   }
-
-  .score-section {
-    margin-bottom: 24px;
-  }
-
+  .score-section { margin-bottom: 24px; }
   .score-meta {
-    font-size: 13px;
-    color: #606266;
-    margin-bottom: 12px;
-    .sep {
-      margin: 0 8px;
-      color: #dcdfe6;
-    }
-    .hint {
-      margin-left: 8px;
-      color: #909399;
-      font-size: 12px;
-    }
+    font-size: 13px; color: var(--text-secondary); margin-bottom: 12px;
+    .sep { margin: 0 8px; color: var(--border-primary); }
+    .hint { margin-left: 8px; color: var(--text-tertiary); font-size: 12px; }
   }
-
-  .weight-hint {
-    font-size: 12px;
-    color: #909399;
-    margin-left: 8px;
-  }
-
+  .weight-hint { font-size: 12px; color: var(--text-tertiary); margin-left: 8px; }
   .score-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-    gap: 12px;
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px;
   }
-
   .score-box {
-    text-align: center;
-    padding: 16px;
-    background: #f5f7fa;
-    border-radius: 8px;
-    border: 1px solid #ebeef5;
+    text-align: center; padding: 16px;
+    background: var(--bg-tertiary); border-radius: var(--radius-sm);
+    border: 1px solid var(--border-secondary);
     .score-value { font-size: 24px; font-weight: bold; }
-    .score-label { font-size: 12px; color: #909399; margin-top: 6px; }
+    .score-label { font-size: 12px; color: var(--text-tertiary); margin-top: 6px; }
     &.main-score {
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      background: linear-gradient(135deg, #637ee8 0%, #8b5cf6 100%);
       border: none;
       .score-value { color: #fff !important; font-size: 28px; }
       .score-label { color: rgba(255,255,255,0.8); }
     }
   }
-
   .weight-item {
-    text-align: center;
-    padding: 10px 6px;
-    background: #f5f7fa;
-    border-radius: 6px;
-    border: 1px solid #ebeef5;
-    .weight-label { font-size: 12px; color: #606266; margin-bottom: 6px; }
-    .weight-value { font-size: 13px; font-weight: 600; margin-top: 4px; }
+    text-align: center; padding: 10px 6px;
+    background: var(--bg-tertiary); border-radius: var(--radius-sm);
+    border: 1px solid var(--border-secondary);
+    .weight-label { font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; }
+    .weight-value { font-size: 13px; font-weight: 600; color: var(--text-primary); margin-top: 4px; }
   }
 }
 </style>

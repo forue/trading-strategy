@@ -6,7 +6,7 @@
       <el-select v-model="currentConvId" size="small" style="flex: 1" placeholder="选择对话" @change="switchConversation" :disabled="sending">
         <el-option v-for="c in conversations" :key="c.id" :label="c.title" :value="c.id">
           <span>{{ c.title }}</span>
-          <span style="float: right; color: #8492a6; font-size: 11px">{{ c.message_count }}条</span>
+          <span style="float: right; color: var(--text-tertiary); font-size: 11px">{{ c.message_count }}条</span>
         </el-option>
       </el-select>
       <el-dropdown @command="handleConvAction" trigger="click">
@@ -29,7 +29,7 @@
       <el-select v-model="chatModel" size="small" style="flex: 1" filterable allow-create @change="saveModelPref" :disabled="sending">
         <el-option v-for="m in currentModels" :key="m.value" :label="m.label" :value="m.value">
           <span>{{ m.label }}</span>
-          <span v-if="m.desc" style="float: right; color: #8492a6; font-size: 11px">{{ m.desc }}</span>
+          <span v-if="m.desc" style="float: right; color: var(--text-tertiary); font-size: 11px">{{ m.desc }}</span>
         </el-option>
       </el-select>
     </div>
@@ -593,16 +593,16 @@ async function scrollToBottom() {
 
 <style lang="scss" scoped>
 .chat-assistant {
-  display: flex; flex-direction: column; height: 100%; background: #fff;
+  display: flex; flex-direction: column; height: 100%; background: var(--bg-primary);
 
   .chat-toolbar {
     display: flex; align-items: center; gap: 6px;
-    padding: 8px 12px; border-bottom: 1px solid #ebeef5; background: #fafafa;
+    padding: 8px 12px; border-bottom: 1px solid var(--border-secondary); background: var(--bg-tertiary);
   }
 
   .model-bar {
     display: flex; gap: 6px; padding: 6px 12px;
-    border-bottom: 1px solid #ebeef5;
+    border-bottom: 1px solid var(--border-secondary);
   }
 
   .chat-messages {
@@ -612,7 +612,7 @@ async function scrollToBottom() {
       text-align: center; padding: 30px 16px;
       .welcome-icon { font-size: 48px; margin-bottom: 10px; }
       .welcome-text { font-size: 18px; font-weight: 600; margin-bottom: 6px; }
-      .welcome-hint { font-size: 13px; color: #909399; margin-bottom: 16px; }
+      .welcome-hint { font-size: 13px; color: var(--text-tertiary); margin-bottom: 16px; }
       .quick-questions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
     }
 
@@ -620,61 +620,61 @@ async function scrollToBottom() {
       display: flex; gap: 10px; margin-bottom: 16px;
       &.user {
         flex-direction: row-reverse;
-        .avatar { background: #409eff; color: #fff; }
+        .avatar { background: var(--accent-primary); color: var(--text-inverse); }
         .content { align-items: flex-end; }
       }
       .avatar {
         flex-shrink: 0; width: 32px; height: 32px; border-radius: 50%;
-        background: #f0f2f5; display: flex; align-items: center; justify-content: center; font-size: 14px;
+        background: var(--bg-tertiary); display: flex; align-items: center; justify-content: center; font-size: 14px;
       }
       .content {
         display: flex; flex-direction: column; max-width: 80%;
         .user-text {
-          padding: 10px 14px; background: #ecf5ff; border-radius: 12px 12px 2px 12px;
+          padding: 10px 14px; background: var(--accent-primary-light); border-radius: 12px 12px 2px 12px;
           font-size: 14px; line-height: 1.6; white-space: pre-wrap;
         }
         .md-body {
-          padding: 12px 16px; background: #f5f7fa; border-radius: 12px 12px 12px 2px;
+          padding: 12px 16px; background: var(--bg-tertiary); border-radius: 12px 12px 12px 2px;
           font-size: 14px; line-height: 1.7; word-break: break-word;
           :deep(p) { margin: 0 0 8px 0; &:last-child { margin-bottom: 0; } }
           :deep(h1), :deep(h2), :deep(h3) { margin: 12px 0 6px 0; font-weight: 600; }
-          :deep(code) { background: #e6e8eb; padding: 1px 4px; border-radius: 3px; font-size: 13px; }
+          :deep(code) { background: var(--bg-elevated); padding: 1px 4px; border-radius: 3px; font-size: 13px; }
           :deep(pre) { background: #1e1e1e; color: #d4d4d4; padding: 10px 14px; border-radius: 6px; overflow-x: auto; margin: 8px 0; code { background: none; padding: 0; color: inherit; } }
-          :deep(table) { border-collapse: collapse; margin: 8px 0; th, td { border: 1px solid #e4e7ed; padding: 4px 8px; } th { background: #f5f7fa; } }
-          :deep(a) { color: #409eff; }
+          :deep(table) { border-collapse: collapse; margin: 8px 0; th, td { border: 1px solid var(--border-secondary); padding: 4px 8px; } th { background: var(--bg-tertiary); } }
+          :deep(a) { color: var(--accent-primary); }
         }
-        .meta { font-size: 11px; color: #c0c4cc; margin-top: 4px; }
+        .meta { font-size: 11px; color: var(--text-tertiary); margin-top: 4px; }
       }
     }
 
     .thinking-block {
-      margin-bottom: 8px; border: 1px solid #e4e7ed; border-radius: 8px; overflow: hidden;
+      margin-bottom: 8px; border: 1px solid var(--border-secondary); border-radius: 8px; overflow: hidden;
       .thinking-header {
         display: flex; align-items: center; gap: 6px;
-        padding: 6px 12px; background: #f0f2f5; cursor: pointer;
-        font-size: 12px; color: #909399;
-        &:hover { background: #e8eaed; }
+        padding: 6px 12px; background: var(--bg-tertiary); cursor: pointer;
+        font-size: 12px; color: var(--text-tertiary);
+        &:hover { background: var(--border-primary); }
       }
       .thinking-content {
-        padding: 10px 12px; font-size: 12px; color: #606266;
+        padding: 10px 12px; font-size: 12px; color: var(--text-secondary);
         line-height: 1.6; white-space: pre-wrap; max-height: 200px; overflow-y: auto;
-        background: #fafbfc;
+        background: var(--bg-secondary);
       }
-      &.expanded .thinking-header { background: #e8eaed; }
+      &.expanded .thinking-header { background: var(--border-primary); }
     }
 
     .tool-call-block {
-      margin-bottom: 8px; border: 1px solid #e0e7ff; border-radius: 8px; overflow: hidden;
+      margin-bottom: 8px; border: 1px solid var(--accent-primary-light); border-radius: 8px; overflow: hidden;
       .tool-call-header {
         display: flex; align-items: center; gap: 6px;
-        padding: 6px 12px; background: #ecf5ff; font-size: 12px; color: #409eff;
+        padding: 6px 12px; background: var(--accent-primary-light); font-size: 12px; color: var(--accent-primary);
       }
       .tool-call-loading {
-        padding: 8px 12px; font-size: 12px; color: #909399; font-style: italic;
+        padding: 8px 12px; font-size: 12px; color: var(--text-tertiary); font-style: italic;
       }
       .tool-call-result {
-        padding: 8px 12px; background: #f5f7fa;
-        pre { margin: 0; font-size: 11px; color: #606266; white-space: pre-wrap; word-break: break-all; max-height: 150px; overflow-y: auto; }
+        padding: 8px 12px; background: var(--bg-tertiary);
+        pre { margin: 0; font-size: 11px; color: var(--text-secondary); white-space: pre-wrap; word-break: break-all; max-height: 150px; overflow-y: auto; }
       }
     }
 
@@ -685,8 +685,8 @@ async function scrollToBottom() {
     @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 
     .typing {
-      display: flex; gap: 4px; padding: 12px 16px; background: #f5f7fa; border-radius: 12px;
-      span { width: 6px; height: 6px; background: #c0c4cc; border-radius: 50%; animation: typing 1.4s infinite;
+      display: flex; gap: 4px; padding: 12px 16px; background: var(--bg-tertiary); border-radius: 12px;
+      span { width: 6px; height: 6px; background: var(--text-tertiary); border-radius: 50%; animation: typing 1.4s infinite;
         &:nth-child(2) { animation-delay: 0.2s; }
         &:nth-child(3) { animation-delay: 0.4s; }
       }
@@ -695,12 +695,12 @@ async function scrollToBottom() {
 
   .quick-actions {
     display: flex; gap: 6px; padding: 8px 12px;
-    border-top: 1px solid #ebeef5; overflow-x: auto;
-    .action-tag { cursor: pointer; white-space: nowrap; &:hover { background: #ecf5ff; } &.disabled { opacity: 0.5; pointer-events: none; } }
+    border-top: 1px solid var(--border-secondary); overflow-x: auto;
+    .action-tag { cursor: pointer; white-space: nowrap; &:hover { background: var(--accent-primary-light); } &.disabled { opacity: 0.5; pointer-events: none; } }
   }
 
   .chat-input {
-    padding: 10px 12px; border-top: 1px solid #ebeef5;
+    padding: 10px 12px; border-top: 1px solid var(--border-secondary);
     display: flex; gap: 8px; align-items: flex-end;
     :deep(.el-textarea__inner) { resize: none; border-radius: 8px; }
     .input-actions { display: flex; align-items: flex-end; }

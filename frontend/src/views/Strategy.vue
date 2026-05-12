@@ -30,15 +30,15 @@
             <!-- 交易成本设置 -->
             <el-form-item label="佣金费率">
               <el-input-number v-model="strategy.params.commission_rate_pct" :min="0.1" :max="5" :step="0.1" :precision="2" />
-              <span style="margin-left: 8px; color: #909399; font-size: 12px">‰ (千分之)</span>
+              <span style="margin-left: 8px; color: var(--text-tertiary); font-size: 12px">‰ (千分之)</span>
             </el-form-item>
             <el-form-item label="印花税率">
               <el-input-number v-model="strategy.params.stamp_tax_rate_pct" :min="0.1" :max="5" :step="0.1" :precision="2" />
-              <span style="margin-left: 8px; color: #909399; font-size: 12px">‰ (千分之)</span>
+              <span style="margin-left: 8px; color: var(--text-tertiary); font-size: 12px">‰ (千分之)</span>
             </el-form-item>
             <el-form-item label="滑点费率">
               <el-input-number v-model="strategy.params.slippage_rate_pct" :min="0.1" :max="5" :step="0.1" :precision="2" />
-              <span style="margin-left: 8px; color: #909399; font-size: 12px">‰ (千分之)</span>
+              <span style="margin-left: 8px; color: var(--text-tertiary); font-size: 12px">‰ (千分之)</span>
             </el-form-item>
           </el-form>
 
@@ -456,16 +456,25 @@ const backtestChartOption = computed(() => {
 
 <style lang="scss" scoped>
 .strategy-card {
-  background: #fff; border-radius: 12px; padding: 24px;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
-  border-top: 4px solid #ddd;
-  &.aggressive { border-top-color: #f56c6c; }
-  &.moderate { border-top-color: #e6a23c; }
-  &.conservative { border-top-color: #67c23a; }
-  .strategy-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; h3 { margin: 0; font-size: 18px; } }
-  .strategy-desc { color: #909399; font-size: 13px; margin-bottom: 16px; line-height: 1.6; }
+  background: var(--bg-secondary); border-radius: var(--radius-lg); padding: 24px;
+  box-shadow: var(--shadow-sm); border: 1px solid var(--border-secondary);
+  border-top: 4px solid var(--border-primary);
+  transition: all var(--transition-base);
+  &.aggressive { border-top-color: var(--accent-danger); }
+  &.moderate { border-top-color: var(--accent-warning); }
+  &.conservative { border-top-color: var(--accent-success); }
+  &:hover { box-shadow: var(--shadow-card); }
+  .strategy-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; h3 { margin: 0; font-size: 17px; color: var(--text-primary); } }
+  .strategy-desc { color: var(--text-tertiary); font-size: 13px; margin-bottom: 16px; line-height: 1.6; }
 }
-.card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; .card-title { font-size: 16px; font-weight: 600; } }
-.backtest-result { margin-top: 20px; .result-item { text-align: center; padding: 16px; background: #f5f7fa; border-radius: 8px; span { display: block; color: #909399; font-size: 13px; margin-bottom: 8px; } strong { font-size: 22px; color: #303133; } } }
+.backtest-result {
+  margin-top: 20px;
+  .result-item {
+    text-align: center; padding: 14px;
+    background: var(--bg-tertiary); border-radius: var(--radius-sm);
+    span { display: block; color: var(--text-tertiary); font-size: 12px; margin-bottom: 6px; }
+    strong { font-size: 20px; color: var(--text-primary); font-family: var(--font-mono); }
+  }
+}
 .params-cell { display: flex; flex-wrap: wrap; gap: 4px; }
 </style>

@@ -1,100 +1,91 @@
 <template>
   <div class="app-container">
-    <!-- 侧边栏 -->
-    <div class="sidebar">
+    <!-- Sidebar -->
+    <aside class="sidebar">
       <div class="logo">
         <el-icon class="logo-icon"><TrendCharts /></el-icon>
-        <span>轮动策略</span>
+        <span class="logo-text">轮动策略</span>
       </div>
-      <el-menu
-        :default-active="currentRoute"
-        router
-        background="transparent"
-        text-color="rgba(255,255,255,0.7)"
-        active-text-color="#fff"
-      >
-        <el-menu-item index="/">
-          <el-icon><DataBoard /></el-icon>
-          <span>仪表盘</span>
-        </el-menu-item>
-        <el-menu-item index="/strategy">
-          <el-icon><Setting /></el-icon>
-          <span>策略管理</span>
-        </el-menu-item>
-        <el-menu-item index="/signals">
-          <el-icon><Bell /></el-icon>
-          <span>交易信号</span>
-        </el-menu-item>
-        <el-menu-item index="/fund">
-          <el-icon><Wallet /></el-icon>
-          <span>资金管理</span>
-        </el-menu-item>
-        <el-menu-item index="/monitor">
-          <el-icon><Monitor /></el-icon>
-          <span>系统监控</span>
-        </el-menu-item>
-        <el-menu-item index="/data-replay">
-          <el-icon><VideoPlay /></el-icon>
-          <span>数据回放</span>
-        </el-menu-item>
-        <el-menu-item index="/factor-analysis">
-          <el-icon><Histogram /></el-icon>
-          <span>因子分析</span>
-        </el-menu-item>
-        <el-menu-item index="/factor-ranking">
-          <el-icon><Histogram /></el-icon>
-          <span>板块因子排名</span>
-        </el-menu-item>
-        <el-menu-item index="/settings">
-          <el-icon><Tools /></el-icon>
-          <span>系统设置</span>
-        </el-menu-item>
-      </el-menu>
-    </div>
+      <nav class="nav-menu">
+        <router-link
+          v-for="item in navItems"
+          :key="item.path"
+          :to="item.path"
+          class="nav-item"
+          :class="{ 'is-active': currentRoute === item.path }"
+        >
+          <span class="nav-icon"><el-icon><component :is="item.icon" /></el-icon></span>
+          <span>{{ item.label }}</span>
+        </router-link>
+      </nav>
+      <div class="sidebar-footer">
+        <span class="version-badge">v2.0</span>
+      </div>
+    </aside>
 
-    <!-- 主内容区 -->
+    <!-- Main Content -->
     <div class="main-content">
-      <div class="header">
+      <header class="header">
         <div class="header-left">
+          <span class="header-dot" />
           <span>{{ currentPageTitle }}</span>
         </div>
         <div class="header-right">
+          <!-- Theme Toggle -->
+          <button class="btn-ghost" :title="theme.mode === 'light' ? '切换深色模式' : '切换浅色模式'" @click="theme.toggle()">
+            <el-icon :size="18"><Sunny v-if="theme.mode === 'dark'" /><Moon v-else /></el-icon>
+          </button>
+
+          <!-- Signal Indicator -->
           <el-badge :is-dot="signalStore.currentSignals.length > 0" class="signal-badge">
-            <el-icon :size="20"><Bell /></el-icon>
+            <button class="btn-ghost" title="交易信号">
+              <el-icon :size="18"><Bell /></el-icon>
+            </button>
           </el-badge>
+
+          <!-- AI Assistant Toggle -->
           <el-tooltip content="AI 投研助手" placement="bottom">
-            <el-button :icon="ChatDotRound" circle size="small" @click="toggleAiSidebar" />
+            <button class="btn-ghost" @click="toggleAiSidebar">
+              <el-icon :size="18"><ChatDotRound /></el-icon>
+            </button>
           </el-tooltip>
-          <el-dropdown @command="handleCommand">
-            <span class="user-info">
-              <el-icon><User /></el-icon>
-              {{ userStore.userInfo?.username || '用户' }}
-            </span>
+
+          <!-- User Menu -->
+          <el-dropdown @command="handleCommand" trigger="click">
+            <button class="user-btn">
+              <el-icon :size="16"><User /></el-icon>
+              <span class="user-name">{{ userStore.userInfo?.username || '用户' }}</span>
+              <el-icon :size="12"><ArrowDown /></el-icon>
+            </button>
             <template #dropdown>
               <el-dropdown-menu>
-                <el-dropdown-item command="logout">退出登录</el-dropdown-item>
+                <el-dropdown-item command="logout">
+                  <el-icon><SwitchButton /></el-icon>
+                  <span>退出登录</span>
+                </el-dropdown-item>
               </el-dropdown-menu>
             </template>
           </el-dropdown>
         </div>
-      </div>
-      <div class="page-content">
+      </header>
+
+      <main class="page-content">
         <router-view />
-      </div>
+      </main>
     </div>
 
-    <!-- AI 助手侧边栏 -->
+    <!-- AI Sidebar -->
     <div class="ai-sidebar" :class="{ open: aiSidebarOpen }">
       <div class="ai-sidebar-header">
         <span>AI 投研助手</span>
-        <el-button :icon="Close" circle size="small" @click="aiSidebarOpen = false" />
+        <button class="btn-ghost" @click="aiSidebarOpen = false">
+          <el-icon :size="16"><Close /></el-icon>
+        </button>
       </div>
       <div class="ai-sidebar-content">
         <ChatAssistant />
       </div>
     </div>
-
-    <!-- AI 侧边栏遮罩 -->
     <div class="ai-sidebar-mask" :class="{ visible: aiSidebarOpen }" @click="aiSidebarOpen = false" />
   </div>
 </template>
@@ -102,20 +93,34 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ChatDotRound, Close } from '@element-plus/icons-vue'
+import { ChatDotRound, Close, SwitchButton } from '@element-plus/icons-vue'
 import { useUserStore } from '@/stores/user'
 import { useSignalStore } from '@/stores/signal'
+import { useThemeStore } from '@/stores/theme'
 import ChatAssistant from '@/components/ChatAssistant.vue'
 
 const route = useRoute()
 const router = useRouter()
 const userStore = useUserStore()
 const signalStore = useSignalStore()
+const theme = useThemeStore()
 
 const currentRoute = computed(() => route.path)
 const currentPageTitle = computed(() => (route.meta.title as string) || '仪表盘')
 
 const aiSidebarOpen = ref(false)
+
+const navItems = [
+  { path: '/', label: '仪表盘', icon: 'DataBoard' },
+  { path: '/strategy', label: '策略管理', icon: 'Setting' },
+  { path: '/signals', label: '交易信号', icon: 'Bell' },
+  { path: '/fund', label: '资金管理', icon: 'Wallet' },
+  { path: '/monitor', label: '系统监控', icon: 'Monitor' },
+  { path: '/data-replay', label: '数据回放', icon: 'VideoPlay' },
+  { path: '/factor-analysis', label: '因子分析', icon: 'Histogram' },
+  { path: '/factor-ranking', label: '板块因子排名', icon: 'Histogram' },
+  { path: '/settings', label: '系统设置', icon: 'Tools' },
+]
 
 function toggleAiSidebar() {
   aiSidebarOpen.value = !aiSidebarOpen.value
@@ -141,131 +146,46 @@ onUnmounted(() => {
 })
 </script>
 
-<style lang="scss">
-.app-container {
-  display: flex;
-  height: 100vh;
-  overflow: hidden;
-  position: relative;
-}
-
-.sidebar {
-  width: 200px;
-  min-width: 200px;
-  background: #1f2d3d;
-  display: flex;
-  flex-direction: column;
-  overflow-y: auto;
-}
-
-.main-content {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  min-width: 0;
-}
-
-.header {
-  height: 50px;
-  line-height: 50px;
-  padding: 0 20px;
-  background: #fff;
-  border-bottom: 1px solid #e4e7ed;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  flex-shrink: 0;
-}
-
-.header-right {
+<style lang="scss" scoped>
+.sidebar-footer {
+  padding: 12px 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
   display: flex;
   align-items: center;
-  gap: 12px;
+
+  .version-badge {
+    font-size: 11px;
+    color: var(--text-sidebar);
+    opacity: 0.4;
+    letter-spacing: 1px;
+  }
 }
 
-.page-content {
-  flex: 1;
-  padding: 16px;
-  overflow-y: auto;
-  background: #f5f7fa;
-}
+.user-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px 5px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-primary);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  font-size: 13px;
+  font-family: var(--font-sans);
 
-// AI 助手侧边栏
-.ai-sidebar {
-  position: fixed;
-  top: 0;
-  right: 0;
-  width: 520px;
-  height: 100vh;
-  background: #fff;
-  box-shadow: -4px 0 20px rgba(0, 0, 0, 0.08);
-  z-index: 1001;
-  display: flex;
-  flex-direction: column;
-  transform: translateX(100%);
-  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-  will-change: transform;
-
-  &.open {
-    transform: translateX(0);
+  &:hover {
+    background: var(--bg-secondary);
+    border-color: var(--accent-primary);
+    color: var(--accent-primary);
   }
 
-  .ai-sidebar-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 12px 16px;
-    border-bottom: 1px solid #e4e7ed;
-    font-weight: 600;
-    font-size: 15px;
-    background: #f5f7fa;
-  }
-
-  .ai-sidebar-content {
-    flex: 1;
+  .user-name {
+    max-width: 100px;
     overflow: hidden;
-
-    .chat-assistant {
-      height: 100%;
-      border: none;
-      border-radius: 0;
-    }
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
-}
-
-.ai-sidebar-mask {
-  position: fixed;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  background: rgba(0, 0, 0, 0);
-  z-index: 1000;
-  pointer-events: none;
-  transition: background 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-
-  &.visible {
-    background: rgba(0, 0, 0, 0.35);
-    pointer-events: auto;
-  }
-}
-
-@media (max-width: 768px) {
-  .sidebar {
-    width: 60px;
-    min-width: 60px;
-    .logo span { display: none; }
-    .el-menu-item span { display: none; }
-  }
-
-  .ai-sidebar {
-    width: 100%;
-    right: -100%;
-  }
-}
-
-@media (max-width: 480px) {
-  .sidebar { display: none; }
 }
 </style>

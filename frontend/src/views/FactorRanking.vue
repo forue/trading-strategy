@@ -117,8 +117,11 @@ import { BarChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent } from 'echarts/components'
 import VChart from 'vue-echarts'
 import { strategyApi } from '@/api/strategy'
+import { useThemeStore } from '@/stores/theme'
 
 use([CanvasRenderer, BarChart, GridComponent, TooltipComponent])
+
+const themeStore = useThemeStore()
 
 const loading = ref(false)
 const selectedStrategy = ref('MODERATE')
@@ -134,6 +137,7 @@ const strategyLabel = computed(() => {
 const chartOption = computed(() => {
   if (ranking.value.length === 0) return {}
   const top20 = ranking.value.slice(0, 20)
+  const isDark = themeStore.mode === 'dark'
   return {
     tooltip: {
       trigger: 'axis',
@@ -146,9 +150,15 @@ const chartOption = computed(() => {
     xAxis: {
       type: 'category',
       data: top20.map(r => r.sector_name),
-      axisLabel: { rotate: 45, fontSize: 11, interval: 0 },
+      axisLabel: { rotate: 45, fontSize: 11, interval: 0, color: isDark ? '#9da1b0' : '#5a5f6e' },
+      axisLine: { lineStyle: { color: isDark ? '#2a2d38' : '#e4e7ed' } },
     },
-    yAxis: { type: 'value', name: '综合评分', min: 0, max: 10 },
+    yAxis: {
+      type: 'value', name: '综合评分', min: 0, max: 10,
+      nameTextStyle: { color: isDark ? '#9da1b0' : '#5a5f6e' },
+      axisLabel: { color: isDark ? '#646878' : '#9499a6' },
+      splitLine: { lineStyle: { color: isDark ? '#2a2d38' : '#ebeef5' } },
+    },
     series: [{
       type: 'bar',
       data: top20.map(r => ({
@@ -215,19 +225,22 @@ onMounted(() => {
 
 <style lang="scss" scoped>
 .factor-ranking { padding: 0; }
-.page-card { background: #fff; border-radius: 12px; padding: 20px; box-shadow: 0 2px 12px rgba(0, 0, 0, 0.05); }
 .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
-.card-title { font-size: 16px; font-weight: 600; }
+.card-title { font-size: 16px; font-weight: 600; color: var(--text-primary); }
 .header-actions { display: flex; gap: 8px; align-items: center; }
 .chart-section { margin-bottom: 20px; }
 .rank-badge {
   display: inline-block; width: 24px; height: 24px; line-height: 24px; text-align: center;
   border-radius: 50%; font-size: 12px; font-weight: 600;
-  &.top { background: #fef0f0; color: #f56c6c; }
-  &.good { background: #fdf6ec; color: #e6a23c; }
+  &.top { background: var(--accent-danger-light); color: var(--accent-danger); }
+  &.good { background: var(--accent-warning-light); color: var(--accent-warning); }
 }
 .category-scores { display: flex; flex-wrap: wrap; gap: 4px; }
-.cat-tag { font-size: 11px; padding: 2px 6px; background: #f5f7fa; border-radius: 4px; color: #606266; }
-:deep(.top-row) { background: #fef0f0 !important; }
-:deep(.good-row) { background: #fdf6ec !important; }
+.cat-tag {
+  font-size: 11px; padding: 2px 6px;
+  background: var(--bg-tertiary); border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+}
+:deep(.top-row) { background: var(--accent-danger-light) !important; }
+:deep(.good-row) { background: var(--accent-warning-light) !important; }
 </style>

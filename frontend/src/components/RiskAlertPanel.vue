@@ -75,9 +75,10 @@ defineExpose({ refresh: loadAlerts })
 
 <style lang="scss" scoped>
 .risk-alert-panel {
-  background: #fff;
-  border-radius: 8px;
-  border: 1px solid #e4e7ed;
+  background: var(--bg-primary);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-secondary);
+  box-shadow: var(--shadow-card);
   overflow: hidden;
 
   .panel-header {
@@ -87,19 +88,19 @@ defineExpose({ refresh: loadAlerts })
     padding: 12px 16px;
     font-weight: 600;
     font-size: 14px;
-    background: #f5f7fa;
+    background: var(--bg-tertiary);
 
     &.high, &.critical {
-      background: linear-gradient(135deg, #f56c6c 0%, #e6a23c 100%);
-      color: #fff;
+      background: linear-gradient(135deg, var(--accent-danger) 0%, var(--accent-warning) 100%);
+      color: var(--text-inverse);
     }
     &.medium {
-      background: linear-gradient(135deg, #e6a23c 0%, #f9ae3d 100%);
-      color: #fff;
+      background: linear-gradient(135deg, var(--accent-warning) 0%, #f9ae3d 100%);
+      color: var(--text-inverse);
     }
     &.low {
-      background: linear-gradient(135deg, #67c23a 0%, #95d475 100%);
-      color: #fff;
+      background: linear-gradient(135deg, var(--accent-success) 0%, #95d475 100%);
+      color: var(--text-inverse);
     }
   }
 
@@ -109,7 +110,7 @@ defineExpose({ refresh: loadAlerts })
     justify-content: center;
     gap: 8px;
     padding: 24px;
-    color: #67c23a;
+    color: var(--accent-success);
     font-size: 14px;
   }
 
@@ -128,16 +129,16 @@ defineExpose({ refresh: loadAlerts })
       }
 
       &.critical {
-        background: #fef0f0;
-        border-left: 3px solid #f56c6c;
+        background: var(--accent-danger-light);
+        border-left: 3px solid var(--accent-danger);
       }
       &.warning {
-        background: #fdf6ec;
-        border-left: 3px solid #e6a23c;
+        background: var(--accent-warning-light);
+        border-left: 3px solid var(--accent-warning);
       }
       &.info {
-        background: #f4f4f5;
-        border-left: 3px solid #909399;
+        background: var(--bg-tertiary);
+        border-left: 3px solid var(--text-tertiary);
       }
 
       .alert-icon {
@@ -155,12 +156,12 @@ defineExpose({ refresh: loadAlerts })
         }
         .alert-desc {
           font-size: 12px;
-          color: #606266;
+          color: var(--text-secondary);
           margin-bottom: 4px;
         }
         .alert-suggestion {
           font-size: 12px;
-          color: #409eff;
+          color: var(--accent-primary);
         }
       }
     }

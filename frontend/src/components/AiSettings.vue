@@ -57,7 +57,7 @@
             <el-option label="（使用默认模型）" value="" />
             <el-option v-for="m in signalProviderModels" :key="m.value" :label="m.label" :value="m.value">
               <span>{{ m.label }}</span>
-              <span v-if="m.desc" style="float: right; color: #8492a6; font-size: 11px">{{ m.desc }}</span>
+              <span v-if="m.desc" style="float: right; color: var(--text-tertiary); font-size: 11px">{{ m.desc }}</span>
             </el-option>
           </el-select>
           <div class="form-hint">{{ signalModelHint }}</div>
@@ -322,7 +322,7 @@ async function saveGlobalConfig() {
 .ai-settings {
   .form-hint {
     font-size: 12px;
-    color: #909399;
+    color: var(--text-tertiary);
     margin-top: 4px;
   }
 }
