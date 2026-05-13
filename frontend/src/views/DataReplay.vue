@@ -20,7 +20,7 @@
               start-placeholder="开始日期"
               end-placeholder="结束日期"
               :disabled-date="disableDate"
-              style="width: 260px"
+              class="control-date-range"
               @change="onDateRangeChange"
             />
             <el-select v-model="selectedSector" placeholder="全部板块" clearable filterable style="width: 160px" @change="onSectorFilterChange">
@@ -63,7 +63,7 @@
 
         <el-tab-pane label="按板块回放" name="bySector">
           <div class="replay-controls">
-            <el-select v-model="selectedSectorForHistory" placeholder="选择板块" filterable style="width: 200px" @change="onSectorHistoryChange">
+            <el-select v-model="selectedSectorForHistory" placeholder="选择板块" filterable class="control-select-wide" @change="onSectorHistoryChange">
               <el-option v-for="s in sectorList" :key="s.sector_code" :label="`${s.sector_name} (${s.sector_code})`" :value="s.sector_code" />
             </el-select>
             <el-date-picker
@@ -72,7 +72,7 @@
               value-format="YYYY-MM-DD"
               start-placeholder="开始日期"
               end-placeholder="结束日期"
-              style="width: 260px"
+              class="control-date-range"
               @change="loadSectorHistory"
             />
             <el-button type="primary" @click="loadSectorHistory" :loading="sectorLoading" size="default">加载历史</el-button>
@@ -87,16 +87,16 @@
               value-format="YYYY-MM-DD"
               start-placeholder="开始日期"
               end-placeholder="结束日期"
-              style="width: 260px"
+              class="control-date-range"
             />
-            <el-select v-model="overlayStrategyType" placeholder="选择策略" style="width: 150px">
+            <el-select v-model="overlayStrategyType" placeholder="选择策略" class="control-select-small">
               <el-option label="激进轮动" value="AGGRESSIVE" />
               <el-option label="稳健轮动" value="MODERATE" />
               <el-option label="保守轮动" value="CONSERVATIVE" />
             </el-select>
             <el-checkbox v-model="autoOptimize" :disabled="overlayLoading">自动寻优</el-checkbox>
-            <el-input-number v-model="overlayCapital" :min="100000" :max="100000000" :step="100000" :controls="false" style="width: 140px" placeholder="初始资金" />
-            <el-input-number v-if="autoOptimize" v-model="nTrials" :min="20" :max="200" :step="10" style="width: 120px" placeholder="试验次数" />
+            <el-input-number v-model="overlayCapital" :min="100000" :max="100000000" :step="100000" :controls="false" class="control-input-num" placeholder="初始资金" />
+            <el-input-number v-if="autoOptimize" v-model="nTrials" :min="20" :max="200" :step="10" class="control-input-num-small" placeholder="试验次数" />
             <el-button type="primary" @click="loadStrategyOverlay" :loading="overlayLoading" size="default">
               {{ autoOptimize ? '自动寻优' : '运行策略回放' }}
             </el-button>
@@ -109,23 +109,23 @@
     </div>
 
     <!-- ============ 按日期回放 ============ -->
-    <div v-if="replayMode === 'byDate' && dayData" class="page-card" style="margin-top: 16px">
+    <div v-if="replayMode === 'byDate' && dayData" class="page-card page-section">
       <div class="card-header">
         <span class="card-title">{{ dayData.date }} 板块数据</span>
         <el-tag size="small">{{ dayData.count }} 个板块</el-tag>
       </div>
 
       <el-row :gutter="16" style="margin-bottom: 16px">
-        <el-col :span="6">
+        <el-col :xs="12" :sm="6">
           <div class="stat-box rise"><div class="stat-value">{{ riseCount }}</div><div class="stat-label">上涨板块</div></div>
         </el-col>
-        <el-col :span="6">
+        <el-col :xs="12" :sm="6">
           <div class="stat-box fall"><div class="stat-value">{{ fallCount }}</div><div class="stat-label">下跌板块</div></div>
         </el-col>
-        <el-col :span="6">
+        <el-col :xs="12" :sm="6">
           <div class="stat-box"><div class="stat-value">{{ avgChangeStr }}</div><div class="stat-label">平均涨跌幅</div></div>
         </el-col>
-        <el-col :span="6">
+        <el-col :xs="12" :sm="6">
           <div class="stat-box">
             <div class="stat-value" :style="{ color: maxRiseSector?.index_change_pct >= 0 ? '#f56c6c' : '#67c23a' }">
               {{ maxRiseSector?.sector_name || '-' }}
@@ -140,7 +140,7 @@
         加载中...
       </div>
 
-      <el-table :data="dayData.sectors" stripe size="small" style="margin-top: 16px" :default-sort="{ prop: 'index_change_pct', order: 'descending' }">
+      <div class="responsive-table"><el-table :data="dayData.sectors" stripe size="small" style="margin-top: 16px" :default-sort="{ prop: 'index_change_pct', order: 'descending' }">
         <el-table-column prop="sector_name" label="板块" width="120" fixed />
         <el-table-column prop="index_change_pct" label="涨跌幅" width="100" sortable>
           <template #default="{ row }">
@@ -165,38 +165,38 @@
         <el-table-column prop="turnover" label="成交额(亿)" width="110" sortable>
           <template #default="{ row }">{{ (row.turnover / 1e8).toFixed(2) }}</template>
         </el-table-column>
-      </el-table>
+      </el-table></div>
     </div>
 
-    <div v-else-if="replayMode === 'byDate' && !loading" class="page-card" style="margin-top: 16px">
+    <div v-else-if="replayMode === 'byDate' && !loading" class="page-card page-section">
       <el-empty description="请选择时间范围并点击加载" />
     </div>
 
     <!-- ============ 按板块回放 ============ -->
-    <div v-if="replayMode === 'bySector' && sectorHistory.length > 0" class="page-card" style="margin-top: 16px">
+    <div v-if="replayMode === 'bySector' && sectorHistory.length > 0" class="page-card page-section">
       <div class="card-header">
         <span class="card-title">{{ currentSectorName }} 历史数据</span>
         <el-tag size="small">{{ sectorHistory.length }} 个交易日</el-tag>
       </div>
 
       <el-row :gutter="16" style="margin-bottom: 16px">
-        <el-col :span="6">
+        <el-col :xs="12" :sm="6">
           <div class="stat-box"><div class="stat-value">{{ sectorStats.totalReturn }}</div><div class="stat-label">区间涨跌幅</div></div>
         </el-col>
-        <el-col :span="6">
+        <el-col :xs="12" :sm="6">
           <div class="stat-box"><div class="stat-value">{{ sectorStats.maxRise }}</div><div class="stat-label">最大单日涨幅</div></div>
         </el-col>
-        <el-col :span="6">
+        <el-col :xs="12" :sm="6">
           <div class="stat-box"><div class="stat-value">{{ sectorStats.maxFall }}</div><div class="stat-label">最大单日跌幅</div></div>
         </el-col>
-        <el-col :span="6">
+        <el-col :xs="12" :sm="6">
           <div class="stat-box"><div class="stat-value">{{ sectorStats.avgChange }}</div><div class="stat-label">日均涨跌幅</div></div>
         </el-col>
       </el-row>
 
       <v-chart :option="sectorHistoryChartOption" style="height: 400px" autoresize />
 
-      <el-table :data="sectorHistory" stripe size="small" style="margin-top: 16px">
+      <div class="responsive-table"><el-table :data="sectorHistory" stripe size="small" style="margin-top: 16px">
         <el-table-column prop="date" label="日期" width="120" sortable />
         <el-table-column prop="index_change_pct" label="涨跌幅" width="100" sortable>
           <template #default="{ row }">
@@ -219,15 +219,15 @@
         <el-table-column prop="turnover" label="成交额(亿)" width="110" sortable>
           <template #default="{ row }">{{ (row.turnover / 1e8).toFixed(2) }}</template>
         </el-table-column>
-      </el-table>
+      </el-table></div>
     </div>
 
-    <div v-else-if="replayMode === 'bySector' && !sectorLoading" class="page-card" style="margin-top: 16px">
+    <div v-else-if="replayMode === 'bySector' && !sectorLoading" class="page-card page-section">
       <el-empty description="请选择板块并点击加载历史" />
     </div>
 
     <!-- ============ 策略叠加回放 ============ -->
-    <div v-if="replayMode === 'strategyOverlay' && overlayData" class="page-card" style="margin-top: 16px">
+    <div v-if="replayMode === 'strategyOverlay' && overlayData" class="page-card page-section">
       <!-- 策略参数显示 -->
       <div v-if="overlayData.summary.params" class="params-display">
         <el-tag size="small" type="info">参数: top_n={{ overlayData.summary.params.top_n }}, 持仓={{ overlayData.summary.params.max_position * 100 }}%, 持有={{ overlayData.summary.params.hold_days }}日, 止损={{ overlayData.summary.params.stop_loss * 100 }}%, 评分阈值={{ overlayData.summary.params.min_score_threshold }}, 评分差={{ overlayData.summary.params.score_gap_threshold }}, 冷却={{ overlayData.summary.params.cooldown_days }}日</el-tag>
@@ -240,37 +240,37 @@
       </div>
 
       <el-row :gutter="16" style="margin-bottom: 16px">
-        <el-col :span="4">
+        <el-col :xs="12" :sm="6" :md="4">
           <div class="stat-box" :class="{ rise: overlayData.summary.total_return >= 0, fall: overlayData.summary.total_return < 0 }">
             <div class="stat-value">{{ (overlayData.summary.total_return >= 0 ? '+' : '') + (overlayData.summary.total_return * 100).toFixed(2) }}%</div>
             <div class="stat-label">总收益</div>
           </div>
         </el-col>
-        <el-col :span="4">
+        <el-col :xs="12" :sm="6" :md="4">
           <div class="stat-box" :class="{ rise: overlayData.summary.annual_return >= 0, fall: overlayData.summary.annual_return < 0 }">
             <div class="stat-value">{{ (overlayData.summary.annual_return >= 0 ? '+' : '') + (overlayData.summary.annual_return * 100).toFixed(2) }}%</div>
             <div class="stat-label">年化收益</div>
           </div>
         </el-col>
-        <el-col :span="4">
+        <el-col :xs="12" :sm="6" :md="4">
           <div class="stat-box fall">
             <div class="stat-value">{{ (overlayData.summary.max_drawdown * 100).toFixed(2) }}%</div>
             <div class="stat-label">最大回撤</div>
           </div>
         </el-col>
-        <el-col :span="4">
+        <el-col :xs="12" :sm="6" :md="4">
           <div class="stat-box rise">
             <div class="stat-value">{{ overlayData.summary.buy_count }}</div>
             <div class="stat-label">买入信号</div>
           </div>
         </el-col>
-        <el-col :span="4">
+        <el-col :xs="12" :sm="6" :md="4">
           <div class="stat-box fall">
             <div class="stat-value">{{ overlayData.summary.sell_count }}</div>
             <div class="stat-label">卖出信号</div>
           </div>
         </el-col>
-        <el-col :span="4">
+        <el-col :xs="12" :sm="6" :md="4">
           <div class="stat-box">
             <div class="stat-value">{{ formatMoney(overlayData.summary.final_capital) }}</div>
             <div class="stat-label">最终资产(万)</div>
@@ -287,7 +287,7 @@
           <span style="font-weight: 600">调仓日信号明细</span>
           <el-tag size="small">{{ overlaySignalDays.length }} 个调仓日</el-tag>
         </div>
-        <el-table :data="overlaySignalDays" stripe size="small" max-height="400">
+        <div class="responsive-table"><el-table :data="overlaySignalDays" stripe size="small" max-height="400">
           <el-table-column prop="date" label="日期" width="120" />
           <el-table-column label="买入" min-width="200">
             <template #default="{ row }">
@@ -317,11 +317,11 @@
               <span style="color: var(--text-tertiary)">{{ row.benchmark_return >= 0 ? '+' : '' }}{{ row.benchmark_return.toFixed(4) }}%</span>
             </template>
           </el-table-column>
-        </el-table>
+        </el-table></div>
       </div>
     </div>
 
-    <div v-else-if="replayMode === 'strategyOverlay' && !overlayLoading" class="page-card" style="margin-top: 16px">
+    <div v-else-if="replayMode === 'strategyOverlay' && !overlayLoading" class="page-card page-section">
       <el-empty description="请选择时间范围和策略，点击运行策略回放" />
     </div>
   </div>
@@ -338,7 +338,10 @@ import { ElMessage } from 'element-plus'
 import { settingsApi } from '@/api/settings'
 import { strategyApi } from '@/api/strategy'
 import { useThemeStore } from '@/stores/theme'
+import { useBreakpoint } from '@/composables/useBreakpoint'
 import dayjs from 'dayjs'
+
+const bp = useBreakpoint()
 
 use([BarChart, LineChart, ScatterChart, CandlestickChart, GridComponent, TooltipComponent, LegendComponent, DataZoomComponent, MarkLineComponent, MarkPointComponent, CanvasRenderer])
 
@@ -623,7 +626,7 @@ const flowChartOption = computed(() => {
     ],
     xAxis: [
       { type: 'category', data: sectorNames, gridIndex: 0, axisLabel: { show: false }, position: 'top' },
-      { type: 'category', data: sectorNames, gridIndex: 1, axisLabel: { rotate: 45, fontSize: 10, color: textColor }, position: 'bottom' },
+      { type: 'category', data: sectorNames, gridIndex: 1, axisLabel: { rotate: bp.isMobile.value ? 90 : 45, fontSize: bp.isMobile.value ? 9 : 10, color: textColor, interval: bp.labelInterval(sectorNames.length) }, position: 'bottom' },
     ],
     yAxis: [
       { type: 'value', name: '涨跌幅(%)', position: 'left', gridIndex: 0, nameTextStyle: { color: textColor }, axisLine: { show: true, lineStyle: { color: isDark ? '#7b93f5' : '#409eff' } }, axisLabel: { formatter: '{value}%', color: isDark ? '#646878' : '#9499a6' }, splitLine: { lineStyle: { color: gridColor } } },
@@ -706,8 +709,8 @@ const sectorHistoryChartOption = computed(() => {
       { left: 70, right: 20, top: '72%', height: '20%' }, // 资金流副图
     ],
     xAxis: [
-      { type: 'category', data: dates, axisLabel: { show: false }, axisTick: { show: false } },  // 主图X轴隐藏标签
-      { type: 'category', data: dates, gridIndex: 1, axisLabel: { rotate: 30, fontSize: 10, color: textColor } },  // 副图X轴显示标签
+      { type: 'category', data: dates, axisLabel: { show: false }, axisTick: { show: false } },
+      { type: 'category', data: dates, gridIndex: 1, axisLabel: { rotate: bp.isMobile.value ? 90 : 30, fontSize: bp.isMobile.value ? 9 : 10, color: textColor, interval: bp.labelInterval(dates.length) } },
     ],
     yAxis: [
       { type: 'value', name: '指数', scale: true, nameTextStyle: { color: textColor }, axisLabel: { color: isDark ? '#646878' : '#9499a6' }, splitLine: { lineStyle: { color: gridColor } } },  // 主图Y轴
@@ -808,7 +811,7 @@ const overlayChartOption = computed(() => {
     legend: { data: ['策略净值', '基准净值', '买入点', '卖出点'], textStyle: { color: textColor } },
     grid: { left: 80, right: 30, bottom: 60, top: 40 },
     dataZoom: [{ type: 'inside' }, { type: 'slider', textStyle: { color: textColor } }],
-    xAxis: { type: 'category', data: curve.map((p: any) => p.date), axisLabel: { rotate: 30, fontSize: 10, color: textColor } },
+    xAxis: { type: 'category', data: curve.map((p: any) => p.date), axisLabel: { rotate: bp.isMobile.value ? 90 : 30, fontSize: bp.isMobile.value ? 9 : 10, interval: bp.labelInterval(curve.length), color: textColor } },
     yAxis: { type: 'value', name: '净值', scale: true, nameTextStyle: { color: textColor }, axisLabel: { formatter: (v: number) => (v / 10000).toFixed(0) + '万', color: isDark ? '#646878' : '#9499a6' }, splitLine: { lineStyle: { color: gridColor } } },
     series: [
       {
@@ -860,6 +863,12 @@ init()
 .replay-controls {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 0;
 }
+.control-date-range { width: 260px; max-width: 100%; }
+.control-select { width: 160px; max-width: 100%; }
+.control-select-wide { width: 200px; max-width: 100%; }
+.control-select-small { width: 150px; max-width: 100%; }
+.control-input-num { width: 140px; max-width: 100%; }
+.control-input-num-small { width: 120px; max-width: 100%; }
 .date-progress { font-size: 14px; color: var(--accent-primary); font-weight: 600; margin-left: 8px; }
 .stat-box {
   text-align: center; padding: 16px; background: var(--bg-tertiary); border-radius: var(--radius-sm);
@@ -878,4 +887,37 @@ init()
   background: var(--bg-tertiary); border-radius: var(--radius-sm);
 }
 :deep(.el-tabs__nav-wrap::after) { display: none; }
+
+@media (max-width: 768px) {
+  .stat-box { padding: 10px; .stat-value { font-size: 16px; } }
+  .card-header { flex-wrap: wrap; gap: 8px; }
+  .replay-controls {
+    :deep(.el-date-picker),
+    :deep(.el-select),
+    :deep(.el-input-number),
+    :deep(.el-button) {
+      max-width: 100%;
+    }
+  }
+  :deep(.el-row) { margin-left: -8px !important; margin-right: -8px !important; }
+  :deep(.el-col) { padding-left: 8px !important; padding-right: 8px !important; margin-bottom: 8px; }
+}
+@media (max-width: 480px) {
+  .replay-controls {
+    flex-direction: column; align-items: stretch;
+    :deep(.el-divider--vertical) { display: none; }
+  }
+  .control-date-range,
+  .control-select,
+  .control-select-wide,
+  .control-select-small,
+  .control-input-num,
+  .control-input-num-small { width: 100%; }
+  .stat-box { padding: 8px; .stat-value { font-size: 14px; } }
+  .card-header { flex-direction: column; align-items: flex-start; }
+  .params-display { font-size: 12px; }
+  .date-progress { margin-left: auto; font-size: 12px; }
+  :deep(.el-row) { margin-left: -4px !important; margin-right: -4px !important; }
+  :deep(.el-col) { padding-left: 4px !important; padding-right: 4px !important; margin-bottom: 6px; }
+}
 </style>

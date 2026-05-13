@@ -708,6 +708,11 @@ async function scrollToBottom() {
   }
 }
 
+@media (max-width: 480px) {
+  .content { max-width: 90% !important; }
+  .toolbar { flex-wrap: wrap; gap: 4px; }
+}
+
 @keyframes typing {
   0%, 60%, 100% { transform: translateY(0); }
   30% { transform: translateY(-4px); }

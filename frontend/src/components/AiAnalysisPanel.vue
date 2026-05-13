@@ -156,6 +156,11 @@ watch(() => [props.strategyType, props.signalDate], loadAnalyses, { immediate: t
         }
       }
 
+      @media (max-width: 480px) {
+        .card-header { flex-wrap: wrap; }
+        .confidence { margin-left: 0; }
+      }
+
       .interpretation {
         font-size: 13px;
         color: var(--text-primary);

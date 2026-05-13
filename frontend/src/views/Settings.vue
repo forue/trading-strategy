@@ -178,25 +178,25 @@
           </div>
 
           <el-row :gutter="20" v-if="cacheStats" style="margin-bottom: 20px">
-            <el-col :span="6">
+            <el-col :xs="12" :sm="6">
               <div class="stat-box">
                 <div class="stat-value">{{ cacheStats.total_keys }}</div>
                 <div class="stat-label">缓存Key总数</div>
               </div>
             </el-col>
-            <el-col :span="6">
+            <el-col :xs="12" :sm="6">
               <div class="stat-box">
                 <div class="stat-value">{{ cacheStats.used_memory_human }}</div>
                 <div class="stat-label">已用内存</div>
               </div>
             </el-col>
-            <el-col :span="6">
+            <el-col :xs="12" :sm="6">
               <div class="stat-box">
                 <div class="stat-value">{{ cacheStats.peak_memory_human }}</div>
                 <div class="stat-label">内存峰值</div>
               </div>
             </el-col>
-            <el-col :span="6">
+            <el-col :xs="12" :sm="6">
               <div class="stat-box">
                 <div class="stat-value">{{ Object.keys(cacheStats.categories).length }}</div>
                 <div class="stat-label">缓存分类数</div>
@@ -211,7 +211,7 @@
             </el-form-item>
           </el-form>
 
-          <el-table v-if="cacheStats && Object.keys(cacheStats.categories).length > 0" :data="categoryData" stripe size="small" style="margin-bottom: 20px">
+          <div class="responsive-table"><el-table v-if="cacheStats && Object.keys(cacheStats.categories).length > 0" :data="categoryData" stripe size="small" style="margin-bottom: 20px">
             <el-table-column prop="name" label="缓存分类" width="200">
               <template #default="{ row }">{{ categoryLabels[row.name] || row.name }}</template>
             </el-table-column>
@@ -219,7 +219,7 @@
             <el-table-column prop="name" label="说明">
               <template #default="{ row }">{{ categoryDescs[row.name] || '' }}</template>
             </el-table-column>
-          </el-table>
+          </el-table></div>
 
           <div style="display: flex; gap: 12px">
             <el-popconfirm title="确定清除所有无过期时间的缓存key？" @confirm="handleClearExpired">
@@ -245,7 +245,7 @@
           </div>
 
           <el-row :gutter="20" v-if="dbStatus">
-            <el-col :span="8">
+            <el-col :xs="24" :sm="12" :md="8">
               <div class="db-card">
                 <div class="db-header">
                   <el-icon :size="24" color="#336791"><Coin /></el-icon>
@@ -260,7 +260,7 @@
                 </div>
               </div>
             </el-col>
-            <el-col :span="8">
+            <el-col :xs="24" :sm="12" :md="8">
               <div class="db-card">
                 <div class="db-header">
                   <el-icon :size="24" color="#5951FF"><Clock /></el-icon>
@@ -277,7 +277,7 @@
                 </div>
               </div>
             </el-col>
-            <el-col :span="8">
+            <el-col :xs="24" :sm="12" :md="8">
               <div class="db-card">
                 <div class="db-header">
                   <el-icon :size="24" color="#DC382D"><Lightning /></el-icon>
@@ -297,7 +297,7 @@
         </div>
 
         <!-- 调度设置 -->
-        <div class="page-card" style="margin-top: 20px">
+        <div class="page-card page-section">
           <div class="card-header">
             <span class="card-title">定时任务调度</span>
             <el-switch v-model="schedulerEnabled" active-text="启用" inactive-text="关闭" @change="saveSettings" />
@@ -624,4 +624,10 @@ onMounted(() => {
 }
 .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; .card-title { font-size: 16px; font-weight: 600; color: var(--text-primary); } }
 .form-hint { font-size: 12px; color: var(--text-tertiary); margin-top: 4px; }
+
+@media (max-width: 480px) {
+  :deep(.el-form-item__label) { width: auto !important; display: block; text-align: left; }
+  .stat-box { padding: 12px; .stat-value { font-size: 18px; } }
+  .db-card { padding: 12px; .db-header { font-size: 14px; } }
+}
 </style>

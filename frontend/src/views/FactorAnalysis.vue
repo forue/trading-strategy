@@ -76,7 +76,7 @@
         <div class="card-header">
           <span class="card-title">因子详情</span>
         </div>
-        <el-table :data="factorList" stripe size="small" style="margin-bottom: 16px">
+        <div class="responsive-table"><el-table :data="factorList" stripe size="small" style="margin-bottom: 16px">
           <el-table-column prop="name" label="因子" width="160">
             <template #default="{ row }">
               <el-tooltip :content="getFactorDescription(row.name)" placement="top" :show-after="300">
@@ -112,7 +112,7 @@
               <span style="font-size: 12px; color: #909399">{{ formatDetail(row) }}</span>
             </template>
           </el-table-column>
-        </el-table>
+        </el-table></div>
 
         <!-- 权重配置 -->
         <div class="card-header" style="margin-top: 16px">
@@ -122,7 +122,7 @@
         </div>
 
         <el-row :gutter="12">
-          <el-col :span="4" v-for="(weight, key) in strategyWeights" :key="key">
+          <el-col :xs="12" :sm="6" :md="4" v-for="(weight, key) in strategyWeights" :key="key">
             <div class="weight-item">
               <div class="weight-label">{{ getCategoryLabel(String(key)) }}</div>
               <el-slider v-model="strategyWeights[key]" :min="0" :max="100" :step="5" size="small" />
@@ -340,9 +340,9 @@ loadSectors()
 .factor-analysis {
   .card-header {
     display: flex; justify-content: space-between; align-items: center;
-    margin-bottom: 12px;
+    margin-bottom: 12px; flex-wrap: wrap; gap: 8px;
     .card-title { font-size: 15px; font-weight: 600; color: var(--text-primary); }
-    .header-actions { display: flex; gap: 8px; align-items: center; }
+    .header-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   }
   .score-section { margin-bottom: 24px; }
   .score-meta {
@@ -374,5 +374,15 @@ loadSectors()
     .weight-label { font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; }
     .weight-value { font-size: 13px; font-weight: 600; color: var(--text-primary); margin-top: 4px; }
   }
+}
+
+@media (max-width: 768px) {
+  .header-actions { flex-wrap: wrap; }
+  :deep(.el-select) { max-width: 100%; }
+}
+@media (max-width: 480px) {
+  .card-header { flex-direction: column; align-items: flex-start; }
+  .header-actions { width: 100%; }
+  :deep(.el-select) { width: 100% !important; }
 }
 </style>

@@ -27,7 +27,7 @@
           </div>
           <v-chart :option="navChartOption" style="height: 350px" autoresize />
           <el-row :gutter="12" class="stats-row">
-            <el-col :span="6" v-for="s in profitStats" :key="s.label">
+            <el-col :xs="12" :sm="6" v-for="s in profitStats" :key="s.label">
               <div class="stat-item">
                 <span class="stat-label">{{ s.label }}</span>
                 <span class="stat-val" :style="{ color: s.color }">{{ s.value }}</span>
@@ -46,7 +46,7 @@
       </el-col>
     </el-row>
 
-    <el-row :gutter="20" style="margin-top: 20px">
+    <el-row :gutter="20" class="page-section">
       <el-col :xs="24" :md="16">
         <div class="page-card">
           <div class="card-header">
@@ -66,14 +66,14 @@
       </el-col>
     </el-row>
 
-    <div class="page-card" style="margin-top: 20px">
+    <div class="page-card page-section">
       <div class="card-header">
         <span class="card-title">银证转账</span>
         <el-button type="primary" size="small" @click="showTransferDialog = true">
           <el-icon><Plus /></el-icon> 新增转账
         </el-button>
       </div>
-      <el-table :data="transfers" stripe empty-text="暂无转账记录">
+      <div class="responsive-table"><el-table :data="transfers" stripe empty-text="暂无转账记录">
         <el-table-column prop="transfer_date" label="日期" width="110" />
         <el-table-column label="方向" width="80">
           <template #default="{ row }">
@@ -95,10 +95,10 @@
             <el-button type="danger" size="small" link @click="deleteTransfer(row.id)">删除</el-button>
           </template>
         </el-table-column>
-      </el-table>
+      </el-table></div>
     </div>
 
-    <div class="page-card" style="margin-top: 20px">
+    <div class="page-card page-section">
       <div class="card-header">
         <span class="card-title">当前持仓</span>
         <el-select v-model="positionStrategy" size="small" style="width: 120px" @change="loadPositions">
@@ -108,7 +108,7 @@
           <el-option label="保守" value="CONSERVATIVE" />
         </el-select>
       </div>
-      <el-table :data="positions" stripe empty-text="暂无持仓">
+      <div class="responsive-table"><el-table :data="positions" stripe empty-text="暂无持仓">
         <el-table-column prop="sector_name" label="板块" width="100" />
         <el-table-column prop="strategy_type" label="策略" width="80">
           <template #default="{ row }">
@@ -140,7 +140,7 @@
           <template #default="{ row }">{{ (row.position_ratio * 100).toFixed(1) }}%</template>
         </el-table-column>
         <el-table-column prop="opened_at" label="开仓时间" min-width="150" />
-      </el-table>
+      </el-table></div>
     </div>
 
     <el-dialog v-model="showTransferDialog" title="新增银证转账" width="420px">
@@ -380,9 +380,10 @@ onMounted(() => {
   border-radius: var(--radius-md); padding: 18px 12px; text-align: center;
   box-shadow: var(--shadow-sm);
   transition: all var(--transition-base);
+  overflow: hidden;
   &:hover { box-shadow: var(--shadow-card); }
-  .summary-label { font-size: 12px; color: var(--text-tertiary); margin-bottom: 6px; }
-  .summary-value { font-size: 20px; font-weight: 700; font-family: var(--font-mono); }
+  .summary-label { font-size: 12px; color: var(--text-tertiary); margin-bottom: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .summary-value { font-size: 20px; font-weight: 700; font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 }
 .stats-row { margin-top: 12px; }
 .stat-item {
@@ -390,5 +391,29 @@ onMounted(() => {
   background: var(--bg-tertiary); border-radius: var(--radius-sm);
   .stat-label { font-size: 12px; color: var(--text-tertiary); display: block; }
   .stat-val { font-size: 15px; font-weight: 600; }
+}
+
+@media (max-width: 768px) {
+  .summary-card {
+    padding: 12px 8px;
+    .summary-value { font-size: 16px; }
+    .summary-label { font-size: 11px; }
+  }
+  .summary-row :deep(.el-col) { margin-bottom: 8px; }
+  .stat-item { padding: 6px; .stat-val { font-size: 13px; } }
+  .stats-row :deep(.el-col) { margin-bottom: 6px; }
+  :deep(.el-row) { margin-left: -8px !important; margin-right: -8px !important; }
+  :deep(.el-col) { padding-left: 8px !important; padding-right: 8px !important; }
+}
+
+@media (max-width: 480px) {
+  .summary-card {
+    padding: 10px 6px;
+    .summary-value { font-size: 14px; }
+    .summary-label { font-size: 10px; }
+  }
+  .stat-item { padding: 6px 4px; .stat-val { font-size: 12px; } .stat-label { font-size: 11px; } }
+  :deep(.el-row) { margin-left: -4px !important; margin-right: -4px !important; }
+  :deep(.el-col) { padding-left: 4px !important; padding-right: 4px !important; }
 }
 </style>

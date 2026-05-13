@@ -326,4 +326,9 @@ async function saveGlobalConfig() {
     margin-top: 4px;
   }
 }
+
+@media (max-width: 480px) {
+  :deep(.el-dialog) { width: 95% !important; }
+  :deep(.el-form-item__label) { width: auto !important; display: block; text-align: left; }
+}
 </style>

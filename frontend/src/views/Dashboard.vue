@@ -61,11 +61,11 @@
 
     <!-- Calendar -->
     <div class="page-card">
-      <div class="card-header">
+      <div class="card-header calendar-header">
         <span class="card-title">策略信号日历</span>
-        <el-date-picker v-model="calendarMonth" type="month" placeholder="选择月份" size="small" value-format="YYYY-MM" />
+        <el-date-picker v-model="calendarMonth" type="month" placeholder="选择月份" size="small" value-format="YYYY-MM" class="calendar-picker" />
       </div>
-      <v-chart :option="calendarOption" style="height: 240px" autoresize @click="handleCalendarClick" />
+      <v-chart :option="calendarOption" class="calendar-chart" autoresize @click="handleCalendarClick" />
     </div>
 
     <!-- AI Panels -->
@@ -111,7 +111,10 @@ import { settingsApi } from '@/api/settings'
 import AiAnalysisPanel from '@/components/AiAnalysisPanel.vue'
 import RiskAlertPanel from '@/components/RiskAlertPanel.vue'
 import { useThemeStore } from '@/stores/theme'
+import { useBreakpoint } from '@/composables/useBreakpoint'
 import type { TradeSignal } from '@/api/signal'
+
+const bp = useBreakpoint()
 
 use([HeatmapChart, ScatterChart, GridComponent, TooltipComponent, VisualMapComponent, CalendarComponent, LegendComponent, CanvasRenderer])
 
@@ -137,7 +140,8 @@ const heatmapOption = computed(() => {
     '银行', '非银金融', '食品饮料', '医药生物', '电子', '计算机',
     '传媒', '通信', '电气设备', '化工', '有色金属', '采掘',
   ]
-  const displaySectors = sectors.slice(0, 12)
+  const heatmapSectorCount = bp.isMobile.value ? 8 : bp.isTablet.value ? 10 : 12
+  const displaySectors = sectors.slice(0, heatmapSectorCount)
 
   // Detect theme for text colors
   const isDark = themeStore.mode === 'dark'
@@ -157,7 +161,7 @@ const heatmapOption = computed(() => {
     xAxis: {
       type: 'category',
       data: displaySectors,
-      axisLabel: { rotate: 45, fontSize: 11, color: axisLabelColor },
+      axisLabel: { rotate: bp.isMobile.value ? 90 : 45, fontSize: bp.isMobile.value ? 10 : 11, color: axisLabelColor },
     },
     yAxis: {
       type: 'category',
@@ -387,6 +391,16 @@ watch(calendarMonth, () => loadCalendarData())
 .heatmap-card { margin-bottom: 0; }
 .signals-card { margin-bottom: 0; }
 
+.calendar-header {
+  flex-wrap: wrap; gap: 8px;
+}
+.calendar-picker {
+  max-width: 100%;
+}
+.calendar-chart {
+  height: 240px; width: 100%;
+}
+
 .signal-list {
   max-height: 340px;
   overflow-y: auto;
@@ -447,18 +461,31 @@ watch(calendarMonth, () => loadCalendarData())
   }
 }
 
-@media (max-width: 900px) {
-  .stat-grid {
-    grid-template-columns: repeat(2, 1fr);
-  }
+@media (max-width: 1024px) {
   .dashboard-grid {
     grid-template-columns: 1fr;
   }
+  .stat-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 768px) {
+  .stat-grid { gap: 10px; }
+  .stat-card { padding: 14px 16px; }
+  .heatmap-card :deep(.echarts) { height: 280px !important; }
+  .signal-list { max-height: 240px; }
+  .calendar-chart { height: 200px; }
 }
 
 @media (max-width: 480px) {
   .stat-grid {
     grid-template-columns: 1fr;
+    gap: 8px;
   }
+  .stat-card { padding: 10px 12px; }
+  .stat-value { font-size: 16px; }
+  :deep(.el-dialog) { width: 90% !important; }
+  .calendar-chart { height: 180px; }
 }
 </style>

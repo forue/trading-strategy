@@ -2,7 +2,7 @@
   <div class="strategy-page">
     <el-row :gutter="20">
       <!-- 三档策略卡片 -->
-      <el-col :span="8" v-for="strategy in strategies" :key="strategy.type">
+      <el-col :xs="24" :md="12" :lg="8" v-for="strategy in strategies" :key="strategy.type">
         <div class="strategy-card" :class="strategy.type.toLowerCase()">
           <div class="strategy-header">
             <el-icon :size="32"><component :is="strategy.icon" /></el-icon>
@@ -48,10 +48,10 @@
     </el-row>
 
     <!-- 回测区域 -->
-    <div class="page-card" style="margin-top: 20px">
+    <div class="page-card page-section">
       <div class="card-header">
         <span class="card-title">策略回测</span>
-        <div style="display: flex; align-items: center; gap: 10px;">
+        <div class="backtest-header-right">
           <el-tag v-if="dataAvailability.has_data" size="small" type="success">
             数据范围: {{ dataAvailability.min_date }} ~ {{ dataAvailability.max_date }}
           </el-tag>
@@ -86,34 +86,35 @@
 
       <div v-if="backtestResult" class="backtest-result">
         <el-row :gutter="16">
-          <el-col :span="6"><div class="result-item"><span>总收益率</span><strong>{{ (backtestResult.totalReturn * 100).toFixed(2) }}%</strong></div></el-col>
-          <el-col :span="6"><div class="result-item"><span>年化收益</span><strong>{{ (backtestResult.annualReturn * 100).toFixed(2) }}%</strong></div></el-col>
-          <el-col :span="6"><div class="result-item"><span>最大回撤</span><strong>{{ (backtestResult.maxDrawdown * 100).toFixed(2) }}%</strong></div></el-col>
-          <el-col :span="6"><div class="result-item"><span>夏普比率</span><strong>{{ backtestResult.sharpeRatio?.toFixed(2) }}</strong></div></el-col>
+          <el-col :xs="12" :sm="6"><div class="result-item"><span>总收益率</span><strong>{{ (backtestResult.totalReturn * 100).toFixed(2) }}%</strong></div></el-col>
+          <el-col :xs="12" :sm="6"><div class="result-item"><span>年化收益</span><strong>{{ (backtestResult.annualReturn * 100).toFixed(2) }}%</strong></div></el-col>
+          <el-col :xs="12" :sm="6"><div class="result-item"><span>最大回撤</span><strong>{{ (backtestResult.maxDrawdown * 100).toFixed(2) }}%</strong></div></el-col>
+          <el-col :xs="12" :sm="6"><div class="result-item"><span>夏普比率</span><strong>{{ backtestResult.sharpeRatio?.toFixed(2) }}</strong></div></el-col>
         </el-row>
-        <el-row :gutter="16" style="margin-top: 16px;">
-          <el-col :span="6"><div class="result-item"><span>累计佣金</span><strong>{{ backtestResult.totalCommission?.toFixed(2) }}元</strong></div></el-col>
-          <el-col :span="6"><div class="result-item"><span>累计印花税</span><strong>{{ backtestResult.totalStampTax?.toFixed(2) }}元</strong></div></el-col>
-          <el-col :span="6"><div class="result-item"><span>累计滑点成本</span><strong>{{ backtestResult.totalSlippageCost?.toFixed(2) }}元</strong></div></el-col>
-          <el-col :span="6"><div class="result-item"><span>总交易成本</span><strong>{{ backtestResult.totalTradeCost?.toFixed(2) }}元</strong></div></el-col>
+        <el-row :gutter="16" class="result-row">
+          <el-col :xs="12" :sm="6"><div class="result-item"><span>累计佣金</span><strong>{{ backtestResult.totalCommission?.toFixed(2) }}元</strong></div></el-col>
+          <el-col :xs="12" :sm="6"><div class="result-item"><span>累计印花税</span><strong>{{ backtestResult.totalStampTax?.toFixed(2) }}元</strong></div></el-col>
+          <el-col :xs="12" :sm="6"><div class="result-item"><span>累计滑点成本</span><strong>{{ backtestResult.totalSlippageCost?.toFixed(2) }}元</strong></div></el-col>
+          <el-col :xs="12" :sm="6"><div class="result-item"><span>总交易成本</span><strong>{{ backtestResult.totalTradeCost?.toFixed(2) }}元</strong></div></el-col>
         </el-row>
-        <el-row :gutter="16" style="margin-top: 16px;">
-          <el-col :span="6"><div class="result-item"><span>交易笔数</span><strong>{{ backtestResult.tradeCount }}</strong></div></el-col>
-          <el-col :span="6"><div class="result-item"><span>实际交易笔数</span><strong>{{ backtestResult.tradeCountActual }}</strong></div></el-col>
-          <el-col :span="6"><div class="result-item"><span>胜率</span><strong>{{ (backtestResult.winRate * 100).toFixed(2) }}%</strong></div></el-col>
-          <el-col :span="6"><div class="result-item"><span>成本/总收益比</span><strong>{{ backtestResult.totalReturn > 0 ? (backtestResult.totalTradeCost / (backtestResult.totalReturn * backtestForm.initialCapital * 10000) * 100).toFixed(2) : '0.00' }}%</strong></div></el-col>
+        <el-row :gutter="16" class="result-row">
+          <el-col :xs="12" :sm="6"><div class="result-item"><span>交易笔数</span><strong>{{ backtestResult.tradeCount }}</strong></div></el-col>
+          <el-col :xs="12" :sm="6"><div class="result-item"><span>实际交易笔数</span><strong>{{ backtestResult.tradeCountActual }}</strong></div></el-col>
+          <el-col :xs="12" :sm="6"><div class="result-item"><span>胜率</span><strong>{{ (backtestResult.winRate * 100).toFixed(2) }}%</strong></div></el-col>
+          <el-col :xs="12" :sm="6"><div class="result-item"><span>成本/总收益比</span><strong>{{ backtestResult.totalReturn > 0 ? (backtestResult.totalTradeCost / (backtestResult.totalReturn * backtestForm.initialCapital * 10000) * 100).toFixed(2) : '0.00' }}%</strong></div></el-col>
         </el-row>
-        <v-chart :option="backtestChartOption" style="height: 350px; margin-top: 20px;" autoresize />
+        <v-chart :option="backtestChartOption" class="backtest-chart" autoresize />
       </div>
     </div>
 
     <!-- 回测历史 -->
-    <div class="page-card" style="margin-top: 20px">
+    <div class="page-card page-section">
       <div class="card-header">
         <span class="card-title">回测历史</span>
         <el-button size="small" @click="loadBacktestHistory">刷新</el-button>
       </div>
-      <el-table :data="backtestHistory" stripe size="small" v-if="backtestHistory.length > 0">
+      <div v-if="backtestHistory.length > 0" class="responsive-table">
+        <el-table :data="backtestHistory" stripe size="small">
         <el-table-column prop="created_at" label="时间" width="180">
           <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
         </el-table-column>
@@ -165,6 +166,7 @@
           </template>
         </el-table-column>
       </el-table>
+      </div>
       <el-empty v-else description="暂无回测历史" />
     </div>
   </div>
@@ -467,8 +469,12 @@ const backtestChartOption = computed(() => {
   .strategy-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; h3 { margin: 0; font-size: 17px; color: var(--text-primary); } }
   .strategy-desc { color: var(--text-tertiary); font-size: 13px; margin-bottom: 16px; line-height: 1.6; }
 }
+.backtest-header-right {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}
 .backtest-result {
-  margin-top: 20px;
+  margin-top: 16px;
+  .result-row { margin-top: 12px; }
   .result-item {
     text-align: center; padding: 14px;
     background: var(--bg-tertiary); border-radius: var(--radius-sm);
@@ -477,4 +483,20 @@ const backtestChartOption = computed(() => {
   }
 }
 .params-cell { display: flex; flex-wrap: wrap; gap: 4px; }
+.backtest-chart { height: 350px; margin-top: 16px; }
+
+@media (max-width: 768px) {
+  .strategy-card { padding: 16px; }
+  .strategy-header h3 { font-size: 15px; }
+  .backtest-result .result-item { padding: 10px; strong { font-size: 16px; } }
+  .backtest-chart { height: 280px; }
+}
+
+@media (max-width: 480px) {
+  .strategy-card { padding: 12px; }
+  .backtest-result .result-item { padding: 8px; strong { font-size: 14px; } span { font-size: 11px; } }
+  .backtest-chart { height: 220px; }
+  .backtest-header-right { width: 100%; }
+  .backtest-header-right .el-tag { font-size: 11px; }
+}
 </style>

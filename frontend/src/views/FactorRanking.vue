@@ -4,7 +4,7 @@
       <div class="card-header">
         <span class="card-title">板块因子排名</span>
         <div class="header-actions">
-          <el-select v-model="selectedStrategy" size="small" style="width: 100px">
+          <el-select v-model="selectedStrategy" size="small" class="rank-strategy-select">
             <el-option label="激进" value="AGGRESSIVE" />
             <el-option label="稳健" value="MODERATE" />
             <el-option label="保守" value="CONSERVATIVE" />
@@ -15,7 +15,7 @@
             size="small"
             value-format="YYYY-MM-DD"
             placeholder="选择日期（默认最新）"
-            style="width: 160px"
+            class="rank-date-picker"
           />
           <el-button type="primary" size="small" @click="fetchRanking" :loading="loading">
             查询排名
@@ -40,7 +40,7 @@
         </div>
 
         <!-- 排名表格 -->
-        <el-table :data="ranking" stripe size="small" :row-class-name="tableRowClassName">
+        <div class="responsive-table"><el-table :data="ranking" stripe size="small" :row-class-name="tableRowClassName">
           <el-table-column label="排名" width="60" align="center">
             <template #default="{ row }">
               <span :class="['rank-badge', getRankClass(row.rank)]">{{ row.rank }}</span>
@@ -99,7 +99,7 @@
               </div>
             </template>
           </el-table-column>
-        </el-table>
+        </el-table></div>
       </div>
 
       <div v-else-if="!loading" style="padding: 40px; text-align: center; color: #909399">
@@ -118,9 +118,11 @@ import { GridComponent, TooltipComponent } from 'echarts/components'
 import VChart from 'vue-echarts'
 import { strategyApi } from '@/api/strategy'
 import { useThemeStore } from '@/stores/theme'
+import { useBreakpoint } from '@/composables/useBreakpoint'
 
 use([CanvasRenderer, BarChart, GridComponent, TooltipComponent])
 
+const bp = useBreakpoint()
 const themeStore = useThemeStore()
 
 const loading = ref(false)
@@ -136,7 +138,8 @@ const strategyLabel = computed(() => {
 
 const chartOption = computed(() => {
   if (ranking.value.length === 0) return {}
-  const top20 = ranking.value.slice(0, 20)
+  const topCount = bp.isMobile.value ? 12 : bp.isTablet.value ? 16 : 20
+  const topN = ranking.value.slice(0, topCount)
   const isDark = themeStore.mode === 'dark'
   return {
     tooltip: {
@@ -149,8 +152,8 @@ const chartOption = computed(() => {
     grid: { left: 60, right: 20, top: 30, bottom: 80 },
     xAxis: {
       type: 'category',
-      data: top20.map(r => r.sector_name),
-      axisLabel: { rotate: 45, fontSize: 11, interval: 0, color: isDark ? '#9da1b0' : '#5a5f6e' },
+      data: topN.map(r => r.sector_name),
+      axisLabel: { rotate: bp.isMobile.value ? 90 : 45, fontSize: bp.isMobile.value ? 10 : 11, interval: bp.labelInterval(topN.length), color: isDark ? '#9da1b0' : '#5a5f6e' },
       axisLine: { lineStyle: { color: isDark ? '#2a2d38' : '#e4e7ed' } },
     },
     yAxis: {
@@ -161,7 +164,7 @@ const chartOption = computed(() => {
     },
     series: [{
       type: 'bar',
-      data: top20.map(r => ({
+      data: topN.map(r => ({
         value: r.composite_score?.toFixed(2),
         itemStyle: { color: getScoreColor(r.composite_score) },
       })),
@@ -225,9 +228,11 @@ onMounted(() => {
 
 <style lang="scss" scoped>
 .factor-ranking { padding: 0; }
-.card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+.card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 8px; }
 .card-title { font-size: 16px; font-weight: 600; color: var(--text-primary); }
-.header-actions { display: flex; gap: 8px; align-items: center; }
+.header-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.rank-strategy-select { width: 100px; max-width: 100%; }
+.rank-date-picker { width: 160px; max-width: 100%; }
 .chart-section { margin-bottom: 20px; }
 .rank-badge {
   display: inline-block; width: 24px; height: 24px; line-height: 24px; text-align: center;
@@ -243,4 +248,11 @@ onMounted(() => {
 }
 :deep(.top-row) { background: var(--accent-danger-light) !important; }
 :deep(.good-row) { background: var(--accent-warning-light) !important; }
+
+@media (max-width: 480px) {
+  .card-header { flex-direction: column; align-items: flex-start; }
+  .header-actions { width: 100%; }
+  .rank-strategy-select,
+  .rank-date-picker { width: 100%; }
+}
 </style>

@@ -349,4 +349,10 @@ async function handleRegister() {
     background: var(--accent-primary-light);
   }
 }
+
+@media (max-width: 480px) {
+  .login-card { padding: 24px 16px 16px; }
+  .login-brand .brand-icon { width: 48px; height: 48px; margin-bottom: 8px; }
+  .bg-orbs .bg-orb { display: none; }
+}
 </style>

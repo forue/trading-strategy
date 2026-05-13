@@ -2,7 +2,7 @@
   <div class="signals-page">
     <!-- 筛选条件 -->
     <div class="page-card">
-      <el-form :inline="true" :model="filterForm" size="default">
+      <el-form :inline="true" :model="filterForm" size="default" class="filter-form">
         <el-form-item label="策略类型">
           <el-select v-model="filterForm.strategyType" style="width: 140px" placeholder="请选择策略">
             <el-option label="全部" value="ALL" />
@@ -51,7 +51,8 @@
         </el-button>
       </div>
 
-       <el-table :data="pagedSignals" stripe style="width: 100%" v-loading="loading">
+       <div class="responsive-table">
+        <el-table :data="pagedSignals" stripe style="width: 100%" v-loading="loading">
         <el-table-column prop="signal_date" label="信号日期" width="110" />
         <el-table-column prop="strategy_type" label="策略类型" width="90">
           <template #default="{ row }">
@@ -93,6 +94,7 @@
           </el-empty>
         </template>
       </el-table>
+      </div>
 
        <el-pagination
          v-model:current-page="pagination.page"
@@ -100,7 +102,7 @@
          :total="pagination.total"
          :page-sizes="[20, 50, 100]"
          layout="total, sizes, prev, pager, next"
-         style="margin-top: 16px; justify-content: flex-end"
+         class="pagination-bar"
          @size-change="onSizeChange"
        />
     </div>
@@ -229,4 +231,10 @@ onMounted(() => fetchSignals())
 .ws-status { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-secondary); }
 .etf-tag { cursor: pointer; display: inline-flex; align-items: center; gap: 4px; .etf-name { font-size: 12px; color: var(--text-secondary); } &:hover .el-tag { border-color: var(--accent-primary); } }
 .text-muted { color: var(--text-tertiary); }
+.pagination-bar { margin-top: 16px; justify-content: flex-end; display: flex; }
+
+@media (max-width: 768px) {
+  .filter-form { flex-wrap: wrap; }
+  .pagination-bar { justify-content: center; }
+}
 </style>

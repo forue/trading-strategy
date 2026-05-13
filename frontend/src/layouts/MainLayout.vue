@@ -1,10 +1,16 @@
 <template>
   <div class="app-container">
+    <!-- Sidebar Overlay (mobile) -->
+    <div class="sidebar-overlay" :class="{ open: sidebarOpen }" @click="sidebarOpen = false" />
+
     <!-- Sidebar -->
-    <aside class="sidebar">
+    <aside class="sidebar" :class="{ open: sidebarOpen }">
       <div class="logo">
         <el-icon class="logo-icon"><TrendCharts /></el-icon>
         <span class="logo-text">轮动策略</span>
+        <button class="sidebar-close-btn" @click="sidebarOpen = false">
+          <el-icon :size="18"><Close /></el-icon>
+        </button>
       </div>
       <nav class="nav-menu">
         <router-link
@@ -27,6 +33,9 @@
     <div class="main-content">
       <header class="header">
         <div class="header-left">
+          <button class="hamburger-btn" @click="sidebarOpen = !sidebarOpen">
+            <el-icon :size="20"><component :is="sidebarOpen ? 'Close' : 'Expand'" /></el-icon>
+          </button>
           <span class="header-dot" />
           <span>{{ currentPageTitle }}</span>
         </div>
@@ -91,9 +100,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ChatDotRound, Close, SwitchButton } from '@element-plus/icons-vue'
+import { ChatDotRound, Close, Expand, SwitchButton } from '@element-plus/icons-vue'
 import { useUserStore } from '@/stores/user'
 import { useSignalStore } from '@/stores/signal'
 import { useThemeStore } from '@/stores/theme'
@@ -108,7 +117,11 @@ const theme = useThemeStore()
 const currentRoute = computed(() => route.path)
 const currentPageTitle = computed(() => (route.meta.title as string) || '仪表盘')
 
+const sidebarOpen = ref(false)
 const aiSidebarOpen = ref(false)
+
+// Close mobile sidebar on route change
+watch(() => route.path, () => { sidebarOpen.value = false })
 
 const navItems = [
   { path: '/', label: '仪表盘', icon: 'DataBoard' },
@@ -187,5 +200,31 @@ onUnmounted(() => {
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+}
+
+.sidebar-close-btn {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  margin-left: auto;
+  border: none;
+  background: transparent;
+  color: var(--text-sidebar);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+  &:hover { background: var(--bg-sidebar-hover); }
+}
+
+@media (max-width: 768px) {
+  .sidebar-close-btn { display: flex; }
+  .user-btn .user-name { display: none; }
+}
+
+@media (max-width: 480px) {
+  .header-left .header-dot,
+  .header-left > span { font-size: 13px; }
 }
 </style>

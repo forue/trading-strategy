@@ -24,11 +24,11 @@
     </el-row>
 
     <!-- 系统日志 -->
-    <div class="page-card" style="margin-top: 20px">
+    <div class="page-card page-section">
       <div class="card-header">
         <span class="card-title">系统日志</span>
-        <div style="display: flex; gap: 8px; align-items: center">
-          <el-select v-model="logService" size="small" style="width: 140px" @change="fetchLogs">
+        <div class="log-header-controls">
+          <el-select v-model="logService" size="small" class="log-service-select" @change="fetchLogs">
             <el-option label="全部服务" value="" />
             <el-option label="策略引擎" value="backend-strategy" />
             <el-option label="数据采集" value="backend-data-collector" />
@@ -36,7 +36,7 @@
             <el-option label="AI 决策" value="backend-ai-decision" />
             <el-option label="任务调度" value="backend-scheduler" />
           </el-select>
-          <el-select v-model="logLevel" size="small" style="width: 100px" @change="fetchLogs">
+          <el-select v-model="logLevel" size="small" class="log-level-select" @change="fetchLogs">
             <el-option label="全部等级" value="" />
             <el-option label="DEBUG" value="debug" />
             <el-option label="INFO" value="info" />
@@ -183,6 +183,11 @@ onMounted(() => {
     .health-detail { color: var(--text-tertiary); font-size: 12px; margin-top: 4px; }
   }
 }
+.log-header-controls {
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+}
+.log-service-select { width: 140px; max-width: 100%; }
+.log-level-select { width: 100px; max-width: 100%; }
 .log-container {
   background: #12141a; border-radius: var(--radius-sm); padding: 16px;
   max-height: 500px; overflow-y: auto;
@@ -190,12 +195,25 @@ onMounted(() => {
 }
 .log-line {
   padding: 4px 0; color: #d4d4d4; display: flex; align-items: center;
+  flex-wrap: wrap;
   &.warn { color: var(--accent-warning); }
   &.error { color: var(--accent-danger); }
   &.debug { color: var(--text-tertiary); }
-  .log-time { color: #6a9955; min-width: 160px; }
-  .log-service { color: #569cd6; min-width: 120px; }
-  .log-message { flex: 1; word-break: break-all; }
+  .log-time { color: #6a9955; min-width: 160px; flex-shrink: 0; }
+  .log-service { color: #569cd6; min-width: 120px; flex-shrink: 0; }
+  .log-message { flex: 1; word-break: break-all; min-width: 0; }
 }
-@media (max-width: 768px) { .health-grid { grid-template-columns: 1fr; } }
+@media (max-width: 768px) {
+  .health-grid { grid-template-columns: 1fr; }
+  .log-service-select,
+  .log-level-select { width: 100%; }
+}
+
+@media (max-width: 480px) {
+  .log-time { min-width: 100px !important; font-size: 11px; }
+  .log-service { min-width: 70px !important; font-size: 11px; }
+  .log-container { padding: 8px; font-size: 11px; }
+  .log-line { gap: 4px; }
+  .log-message { flex-basis: 100%; margin-top: 2px; }
+}
 </style>

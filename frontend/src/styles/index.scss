@@ -388,6 +388,20 @@ html.theme-switching *::after {
   }
 }
 
+.page-section {
+  margin-top: 16px;
+}
+
+@media (max-width: 768px) {
+  .page-card { padding: 14px; margin-bottom: 12px; }
+  .page-section { margin-top: 12px; }
+}
+
+@media (max-width: 480px) {
+  .page-card { padding: 10px; margin-bottom: 10px; }
+  .page-section { margin-top: 10px; }
+}
+
 /* ─── Stat Card ─── */
 .stat-card {
   background: var(--bg-secondary);
@@ -559,17 +573,77 @@ html.theme-switching *::after {
 }
 
 /* ─── Responsive ─── */
-@media (max-width: 768px) {
-  .sidebar {
-    width: 62px;
-    min-width: 62px;
+/* Breakpoints:
+   mobile: < 480px    tablet: < 768px    small-desktop: < 1024px */
 
-    .logo { justify-content: center; padding: 0; }
-    .logo-text { display: none; }
+.responsive-table {
+  width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.hide-mobile { @media (max-width: 480px) { display: none !important; } }
+.hide-tablet { @media (max-width: 768px) { display: none !important; } }
+
+/* ─── Mobile Sidebar Overlay ─── */
+.sidebar-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 99;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--transition-base);
+  backdrop-filter: blur(2px);
+
+  &.open {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+.hamburger-btn {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: background var(--transition-fast);
+  font-size: 18px;
+
+  &:hover { background: var(--bg-tertiary); }
+}
+
+@media (max-width: 768px) {
+  .hamburger-btn { display: flex; }
+
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    height: 100vh;
+    z-index: 100;
+    transform: translateX(-100%);
+    transition: transform var(--transition-base);
+    width: 220px !important;
+    min-width: 220px !important;
+
+    &.open { transform: translateX(0); }
+
+    .logo { justify-content: flex-start; padding: 0 18px; }
+    .logo-text { display: block; }
     .nav-item {
-      justify-content: center;
-      padding: 10px;
-      span { display: none; }
+      justify-content: flex-start;
+      padding: 10px 14px;
+      span { display: inline; }
     }
   }
 
@@ -580,8 +654,92 @@ html.theme-switching *::after {
   .page-content {
     padding: 12px;
   }
+
+  /* Responsive form: allow inline form items to wrap */
+  .el-form--inline {
+    flex-wrap: wrap;
+    .el-form-item {
+      margin-right: 12px;
+      margin-bottom: 8px;
+      .el-date-picker,
+      .el-date-editor--daterange,
+      .el-date-editor--date,
+      .el-select { max-width: 280px; }
+    }
+  }
 }
 
 @media (max-width: 480px) {
-  .sidebar { display: none; }
+  .sidebar {
+    width: 100% !important;
+    min-width: 100% !important;
+  }
+
+  .page-content {
+    padding: 8px;
+  }
+
+  .header {
+    padding: 0 12px;
+  }
+
+  /* Full stacking for inline forms on mobile */
+  .el-form--inline {
+    flex-direction: column;
+    align-items: stretch;
+    .el-form-item {
+      margin-right: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      .el-form-item__label {
+        text-align: left;
+        padding-bottom: 4px;
+      }
+      .el-form-item__content {
+        margin-left: 0 !important;
+        & > .el-date-picker,
+        & > .el-date-editor--daterange,
+        & > .el-date-editor--date,
+        & > .el-select,
+        & > .el-input-number,
+        & > .el-button { width: 100% !important; max-width: 100%; }
+      }
+    }
+  }
+
+  /* Date range picker: two inputs stack on extremely narrow screens */
+  .el-date-editor--daterange {
+    width: 100% !important;
+    .el-range-input { width: 40%; font-size: 13px; }
+    .el-range-separator { padding: 0 4px; font-size: 11px; }
+  }
+
+  /* Date range picker popup: stack two calendar panels vertically */
+  .el-date-range-picker {
+    width: auto !important;
+    max-width: 100vw;
+    min-width: auto !important;
+    .el-picker-panel__body {
+      flex-direction: column;
+      min-width: auto;
+    }
+    .el-date-range-picker__content {
+      width: 100%;
+      padding: 8px;
+    }
+    .el-date-range-picker__header {
+      margin: 4px 0;
+    }
+  }
+
+  /* Card header: stack title and controls vertically */
+  .page-card .card-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    .el-date-picker,
+    .el-date-editor,
+    .el-select { width: 100% !important; max-width: 100%; }
+  }
 }

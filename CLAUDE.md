@@ -92,6 +92,119 @@ curl -X POST "http://localhost:8003/collect/north-bound"
 
 Vue 3 + TypeScript + Vite + Element Plus + ECharts + Pinia. Single layout (`MainLayout.vue`), 10 views, API modules in `api/`, stores in `stores/`.
 
+## Frontend Specification
+
+When modifying any frontend page or component, follow these rules exactly.
+
+### Design System
+
+All design tokens live in `frontend/src/styles/index.scss` as CSS custom properties. Never hardcode colors, spacing, or shadows in component styles — use `var(--xxx)` always.
+
+| Category | Variable prefix | Examples |
+|----------|----------------|----------|
+| Background | `--bg-*` | `--bg-primary`, `--bg-secondary`, `--bg-tertiary`, `--bg-elevated` |
+| Text | `--text-*` | `--text-primary`, `--text-secondary`, `--text-tertiary`, `--text-inverse` |
+| Border | `--border-*` | `--border-primary`, `--border-secondary`, `--border-subtle` |
+| Accent | `--accent-*` | `--accent-primary`, `--accent-success`, `--accent-danger`, `--accent-warning` |
+| Shadow | `--shadow-*` | `--shadow-sm`, `--shadow-card`, `--shadow-modal` |
+| Radius | `--radius-*` | `--radius-sm` (6px), `--radius-md` (10px), `--radius-lg` (14px) |
+| Font | `--font-sans` | System Chinese font stack. `--font-mono` for numbers/data. |
+
+Dark theme is handled automatically — all `--bg-*`, `--text-*`, etc. have dark variants under `html.dark`. Never add separate dark mode styles in components.
+
+### Breakpoints & Responsive
+
+Three breakpoints, defined in `index.scss`:
+
+| Name | Width | Target |
+|------|-------|--------|
+| Mobile | ≤ 480px | Phone |
+| Tablet | ≤ 768px | iPad / small screen |
+| Small Desktop | ≤ 1024px | Narrow laptop |
+
+**Global responsive utilities** (defined in `index.scss`):
+- `.responsive-table` — wraps `el-table` for horizontal scroll on narrow screens
+- `.page-section` — consistent top margin between card blocks (16px, auto-scales on mobile)
+- `.page-card` — the standard card container, has built-in `margin-bottom: 16px`
+
+**Global responsive behaviors** (auto-applied via `index.scss` media queries):
+- `el-form--inline` → wraps at 768px, fully stacks (column) at 480px
+- `el-date-editor--daterange` → 100% width at 480px, inner inputs at 40% each
+- `.el-date-range-picker` (popup) → two calendar panels stack vertically at 480px
+- `.page-card .card-header` → stacks vertically at 480px
+- `.sidebar` → fixed overlay mode at 768px, full-width at 480px
+
+### Composable: `useBreakpoint`
+
+Located at `@/composables/useBreakpoint.ts`. Use it when chart options need dynamic label counts:
+
+```ts
+import { useBreakpoint } from '@/composables/useBreakpoint'
+const bp = useBreakpoint()
+// bp.isMobile.value / bp.isTablet.value / bp.isDesktop.value
+// bp.labelInterval(dataLength) → how many labels to skip on x-axis
+// bp.labelCount(dataLength, minLabels) → how many labels to show total
+```
+
+Always use `bp.labelInterval()` for ECharts `axisLabel.interval` and show fewer sectors/data points on mobile (e.g., heatmap shows top 8 sectors on mobile vs 12 on desktop).
+
+### Card Layout Rules
+
+1. **Page-level cards**: always use `<div class="page-card">`. They get `margin-bottom: 16px` automatically. For the first card after a section break, add `class="page-card page-section"`.
+2. **No inline margin/padding on cards**: never write `style="margin-top: 20px"` on a page-card. Use `class="page-section"`.
+3. **Nested stat items** (inside page-cards): use `<el-row :gutter="16">` + `<el-col>` with responsive spans. El-row gutters are handled globally at 768px/480px.
+4. **Card header**: always use `<div class="card-header"><span class="card-title">Title</span>...controls...</div>`. The `card-title` auto-gets a left accent bar via `::before`.
+
+### Table Rules
+
+1. **Every `el-table` must be wrapped** in `<div class="responsive-table">` — no exceptions.
+2. **Pagination** below tables: use `class="pagination-bar"` (centers on mobile).
+3. **Column visibility**: on mobile, hide secondary columns via `:class="bp.isMobile.value ? 'hide-mobile' : ''"` if columns exceed 4-5.
+4. **`v-if`/`v-else` chain**: when wrapping a table with `v-if` in a `<div class="responsive-table">`, move the `v-if` to the wrapper div, not the table. A `<div v-if>` wrapper followed by `<el-empty v-else>` must be immediate siblings.
+
+### Form Rules
+
+1. **Use `:inline="true"` sparingly** — it puts all items on one row. Global styles auto-wrap at 768px and stack at 480px. No additional scoped overrides needed.
+2. **No fixed widths on form controls** — use CSS classes with `max-width: 100%`. For example: `.my-select { width: 160px; max-width: 100%; }`. At 480px, global styles force all form controls to 100% width.
+3. **Date pickers in card headers**: they auto-get `width: 100%` at 480px via global styles. No extra work needed.
+
+### ECharts Rules
+
+1. **Chart heights**: never use fixed `style="height: 350px"` — use CSS classes with media queries:
+   ```scss
+   .my-chart { height: 350px; }
+   @media (max-width: 768px) { .my-chart { height: 280px; } }
+   @media (max-width: 480px) { .my-chart { height: 220px; } }
+   ```
+2. **x-axis labels**: always use `bp.labelInterval(dataLength)` for `axisLabel.interval`. Rotate labels 90° on mobile (`bp.isMobile.value ? 90 : 45`).
+3. **Data volume**: reduce visible data points on mobile (fewer sectors, coarser date intervals).
+4. **Always use `autoresize`** on `<v-chart>`.
+
+### Sidebar / Layout
+
+- **Desktop**: sidebar is 220px fixed. Close button (`.sidebar-close-btn`) is hidden.
+- **Tablet (≤768px)**: sidebar becomes overlay (fixed position, slides in from left). Hamburger button appears. Close button inside sidebar becomes visible. Backdrop overlay with blur.
+- **Mobile (≤480px)**: sidebar is full-width overlay. Must be closable via: close button inside sidebar, backdrop click, or route navigation (auto-closes via route watcher).
+
+### Dialog Rules
+
+Dialogs should always have responsive width:
+```scss
+@media (max-width: 480px) {
+  :deep(.el-dialog) { width: 90% !important; }
+}
+```
+
+### Verification Checklist
+
+After any frontend change, build and test at these breakpoints:
+- **375px** (iPhone SE) — mobile
+- **768px** (iPad) — tablet
+- **1280px** (laptop) — desktop
+- **1920px** — full desktop
+
+Check: no horizontal overflow, tables scroll horizontally, forms stack vertically, sidebar works as overlay, charts resize, dialogs fit screen.
+
 ### Shared Python library (`services/shared/`)
 
 `RabbitMQManager` (singleton with threading lock, separate publish/consume channels, heartbeat=60, auto-reconnect), `RedisManager` (CRUD, JSON, pipeline), `ApiResponse` (unified `{code, data, message}` format). All Python services import it via:
