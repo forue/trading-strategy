@@ -107,8 +107,12 @@ export const useSignalStore = defineStore('signal', () => {
     }
   }
 
+  function clearSignals() {
+    currentSignals.value = []
+  }
+
   return {
     currentSignals, signalHistory, isConnected,
-    fetchTodaySignals, fetchSignalHistory, connectWebSocket, disconnectWebSocket,
+    fetchTodaySignals, fetchSignalHistory, connectWebSocket, disconnectWebSocket, clearSignals,
   }
 })
