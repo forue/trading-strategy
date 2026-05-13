@@ -47,7 +47,7 @@
 
           <!-- Signal Indicator -->
           <el-badge :is-dot="signalStore.currentSignals.length > 0" class="signal-badge">
-            <button class="btn-ghost" title="交易信号">
+            <button class="btn-ghost" title="交易信号" @click="router.push('/signals')">
               <el-icon :size="18"><Bell /></el-icon>
             </button>
           </el-badge>
