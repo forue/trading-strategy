@@ -43,7 +43,7 @@
               />
             </el-form-item>
             <el-form-item>
-              <el-button type="primary" size="large" :loading="loading" style="width: 100%; height: 44px">
+              <el-button type="primary" size="large" :loading="loading" style="width: 100%; height: 44px" @click="handleLogin">
                 {{ loading ? '登录中...' : '登 录' }}
               </el-button>
             </el-form-item>
@@ -157,7 +157,11 @@ const registerRules = {
 }
 
 async function handleLogin() {
-  await loginFormRef.value?.validate()
+  try {
+    await loginFormRef.value?.validate()
+  } catch {
+    return // 校验失败，表单已显示错误提示
+  }
   loading.value = true
   try {
     await userStore.login(loginForm)
