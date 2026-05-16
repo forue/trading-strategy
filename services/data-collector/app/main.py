@@ -64,11 +64,16 @@ async def collect_sector_flow(trade_date: str = None):
 
 
 @app.post("/collect/history")
-async def collect_history(days: int = 30):
-    """采集历史数据（当日汇总 + K线历史填充）"""
+async def collect_history(days: int = 30, date: str = None):
+    """采集历史数据（当日汇总 + K线历史填充）
+
+    Args:
+        days: K线回溯天数
+        date: 指定采集日期 YYYY-MM-DD，不传则默认今天
+    """
     try:
-        # 先采集当日汇总
-        results = data_collector.collect_sector_history(days)
+        # 先采集指定日期汇总（或当日）
+        results = data_collector.collect_sector_history(days, trade_date=date)
         # 再用K线数据填充历史
         kline_results = data_collector.collect_sector_history_via_kline(days)
         total = len(results) + len(kline_results)

@@ -261,26 +261,29 @@ class DataCollector:
 
         return results
 
-    def collect_sector_history(self, days: int = 30) -> list[dict]:
+    def collect_sector_history(self, days: int = 30, trade_date: str = None) -> list[dict]:
         """采集板块历史资金流数据（自动跳过非交易日）
 
         注意：同花顺汇总接口只有当日数据，历史数据需通过K线获取。
-        此方法仅采集当日汇总数据用于实时展示。
+        此方法仅采集指定日期（或当日）汇总数据用于实时展示。
 
         Args:
-            days: 回溯天数（实际只采集当日）
+            days: 回溯天数（实际只采集指定日期单日）
+            trade_date: 目标采集日期 YYYYMMDD 或 YYYY-MM-DD，不传则使用今日
         """
         all_data = []
-        # 只采集当日数据（同花顺汇总无历史查询能力）
-        today = datetime.now().strftime("%Y%m%d")
-        if self.is_trade_day(today):
+        if trade_date:
+            target = trade_date.replace("-", "")
+        else:
+            target = datetime.now().strftime("%Y%m%d")
+        if self.is_trade_day(target):
             try:
-                data = self.collect_sector_capital_flow(today)
+                data = self.collect_sector_capital_flow(target)
                 all_data.extend(data)
             except Exception as e:
-                logger.warning(f"采集当日数据失败: {e}")
+                logger.warning(f"采集 {target} 数据失败: {e}")
         else:
-            logger.info(f"今日 {today} 非交易日，跳过采集")
+            logger.info(f"{target} 非交易日，跳过采集")
         return all_data
 
     def collect_sector_history_via_kline(self, days: int = 30) -> list[dict]:
