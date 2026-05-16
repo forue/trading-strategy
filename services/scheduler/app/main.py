@@ -58,10 +58,29 @@ def _is_weekend() -> bool:
     return datetime.now().weekday() >= 5
 
 
+async def _is_non_trade_day() -> bool:
+    """通过数据采集器交易日历判断今天是否为非交易日。
+    同时检查周末（快速路径，避免无意义 HTTP 调用）。
+    返回 True 表示非交易日，应跳过定时任务。
+    """
+    if _is_weekend():
+        return True
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(f"{settings.data_collector_url}/trade-dates?days=7")
+            if resp.status_code == 200:
+                trade_dates = resp.json().get("data", [])
+                today = datetime.now().strftime("%Y%m%d")
+                return today not in trade_dates
+    except Exception:
+        pass
+    return _is_weekend()
+
+
 async def job_collect_data():
     """定时任务：数据采集（每个交易日15:00执行），采集成功后立即触发策略计算"""
-    if _is_weekend():
-        logger.info(">>> 今日为周末，跳过数据采集（节假日由下游服务判断）")
+    if await _is_non_trade_day():
+        logger.info(">>> 今日非交易日，跳过数据采集")
         return
     logger.info(">>> 定时任务触发: 数据采集")
     try:
@@ -93,8 +112,8 @@ async def _trigger_strategy_calculation(client: httpx.AsyncClient):
 
 async def job_calculate_strategy():
     """定时任务：策略计算（作为采集链路的备用触发，正常由采集任务链式触发）"""
-    if _is_weekend():
-        logger.info(">>> 今日为周末，跳过策略计算（节假日由下游服务判断）")
+    if await _is_non_trade_day():
+        logger.info(">>> 今日非交易日，跳过策略计算")
         return
     today = datetime.now().strftime("%Y-%m-%d")
     if not await _check_and_mark_executed(f"signal:calculated:{today}"):
@@ -110,8 +129,8 @@ async def job_calculate_strategy():
 
 async def job_collect_north_bound():
     """定时任务：北向资金采集（每个交易日16:00执行）"""
-    if _is_weekend():
-        logger.info(">>> 今日为周末，跳过北向资金采集（节假日由下游服务判断）")
+    if await _is_non_trade_day():
+        logger.info(">>> 今日非交易日，跳过北向资金采集")
         return
     logger.info(">>> 定时任务触发: 北向资金采集")
     try:
@@ -154,7 +173,7 @@ def setup_scheduler():
     job_stores = _build_job_store()
     scheduler.configure(jobstores=job_stores)
 
-    misfire_grace = 3600  # 1小时容错，避免重启后重复执行历史任务
+    misfire_grace = 14400  # 4小时容错，覆盖维护窗口，同时避免重启后重复执行历史任务
 
     scheduler.add_job(
         job_collect_data, CronTrigger(day_of_week="mon-fri", hour=15, minute=0),
