@@ -95,10 +95,14 @@ async def backfill_fund_flow(start_date: str = "20240101", end_date: str = None)
 
 
 @app.post("/collect/north-bound")
-async def collect_north_bound():
-    """采集北向资金数据"""
+async def collect_north_bound(date: str = None):
+    """采集北向资金数据
+
+    Args:
+        date: 指定采集日期 YYYY-MM-DD，不传则默认今天（非交易日自动回退）
+    """
     try:
-        results = data_collector.collect_north_bound_flow()
+        results = data_collector.collect_north_bound_flow(trade_date=date)
         return success_response(data={"count": len(results)}, message="北向资金数据采集完成")
     except Exception as e:
         logger.error(f"北向资金数据采集失败: {e}")

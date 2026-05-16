@@ -269,21 +269,27 @@ class DataCollector:
 
         Args:
             days: 回溯天数（实际只采集指定日期单日）
-            trade_date: 目标采集日期 YYYYMMDD 或 YYYY-MM-DD，不传则使用今日
+            trade_date: 目标采集日期 YYYYMMDD 或 YYYY-MM-DD，不传则使用今日。
+                        未传且今日非交易日时，自动回退到最近一个交易日。
         """
         all_data = []
         if trade_date:
             target = trade_date.replace("-", "")
         else:
             target = datetime.now().strftime("%Y%m%d")
-        if self.is_trade_day(target):
-            try:
-                data = self.collect_sector_capital_flow(target)
-                all_data.extend(data)
-            except Exception as e:
-                logger.warning(f"采集 {target} 数据失败: {e}")
-        else:
-            logger.info(f"{target} 非交易日，跳过采集")
+        # 非交易日自动回退到最近一个交易日（仅当未显式指定日期时）
+        if not self.is_trade_day(target):
+            if trade_date:
+                logger.info(f"{target} 非交易日，跳过采集")
+                return all_data
+            fallback = self._get_last_trade_date(target)
+            logger.info(f"今日 {target} 非交易日，回退到最近交易日 {fallback}")
+            target = fallback
+        try:
+            data = self.collect_sector_capital_flow(target)
+            all_data.extend(data)
+        except Exception as e:
+            logger.warning(f"采集 {target} 数据失败: {e}")
         return all_data
 
     def collect_sector_history_via_kline(self, days: int = 30) -> list[dict]:
@@ -432,17 +438,27 @@ class DataCollector:
             logger.info(f"所有板块K线数据采集完成: {len(all_data)} 条")
         return all_data
 
-    def collect_north_bound_flow(self) -> list[dict]:
+    def collect_north_bound_flow(self, trade_date: str = None) -> list[dict]:
         """采集北向资金数据
 
         使用 AkShare 的 stock_hsgt_fund_flow_summary_em() 获取当日沪深股通资金流向。
         返回单日汇总数据（北向净流入 = 沪股通 + 深股通 净买额之和）。
-        非交易日不采集。
+        未传日期且今日非交易日时，自动回退到最近一个交易日。
+
+        Args:
+            trade_date: 目标采集日期 YYYYMMDD 或 YYYY-MM-DD，不传则使用今日
         """
-        today = datetime.now().strftime("%Y%m%d")
-        if not self.is_trade_day(today):
-            logger.info(f"{today} 非交易日，跳过北向资金采集")
-            return []
+        if trade_date:
+            target = trade_date.replace("-", "")
+        else:
+            target = datetime.now().strftime("%Y%m%d")
+        if not self.is_trade_day(target):
+            if trade_date:
+                logger.info(f"{target} 非交易日，跳过北向资金采集")
+                return []
+            fallback = self._get_last_trade_date(target)
+            logger.info(f"今日 {target} 非交易日，回退到最近交易日 {fallback} 采集北向资金")
+            target = fallback
 
         try:
             df = ak.stock_hsgt_fund_flow_summary_em()
