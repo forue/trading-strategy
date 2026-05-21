@@ -18,6 +18,7 @@ class DataCollector:
 
     # 缓存交易日历
     _trade_dates_cache: list[str] | None = None
+    _trade_dates_cache_ts: datetime | None = None
     # 缓存板块名称→代码映射
     _sector_name_code_map: dict[str, str] | None = None
 
@@ -72,9 +73,15 @@ class DataCollector:
         return list(self._get_sector_name_code_map().keys())
 
     def get_trade_dates(self, days: int = 365) -> list[str]:
-        """获取A股交易日历（从新浪获取真实交易日）"""
-        if self._trade_dates_cache is not None:
-            return self._trade_dates_cache
+        """获取A股交易日历（从新浪获取真实交易日）
+
+        缓存1小时自动刷新，避免 AkShare 返回不完整数据后永久失效。
+        """
+        now = datetime.now()
+        if self._trade_dates_cache is not None and self._trade_dates_cache_ts is not None:
+            cache_age = (now - self._trade_dates_cache_ts).total_seconds()
+            if cache_age < 3600:
+                return self._trade_dates_cache
         try:
             df = ak.tool_trade_date_hist_sina()
             if df is not None and not df.empty:
@@ -83,8 +90,16 @@ class DataCollector:
                     d.strftime("%Y%m%d") if hasattr(d, "strftime") else str(d)
                     for d in dates
                 ]
-                logger.info(f"获取交易日历成功: {len(self._trade_dates_cache)} 个交易日")
-                return self._trade_dates_cache
+                self._trade_dates_cache_ts = now
+                # 校验：缓存必须覆盖当前月份，否则视为无效
+                current_month = now.strftime("%Y%m")
+                month_dates = [d for d in self._trade_dates_cache if d.startswith(current_month)]
+                if month_dates:
+                    logger.info(f"获取交易日历成功: {len(self._trade_dates_cache)} 个交易日 (当前月 {len(month_dates)} 个)")
+                    return self._trade_dates_cache
+                logger.warning(f"交易日历缺少当前月份 {current_month} 数据，回退到周末过滤")
+                self._trade_dates_cache = None
+                return None
         except Exception as e:
             logger.warning(f"获取交易日历失败: {e}，使用周末过滤")
         return None

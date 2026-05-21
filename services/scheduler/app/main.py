@@ -62,6 +62,8 @@ async def _is_non_trade_day() -> bool:
     """通过数据采集器交易日历判断今天是否为非交易日。
     同时检查周末（快速路径，避免无意义 HTTP 调用）。
     返回 True 表示非交易日，应跳过定时任务。
+
+    交易日历不可用或返回数据异常时，回退到周末判断。
     """
     if _is_weekend():
         return True
@@ -70,10 +72,14 @@ async def _is_non_trade_day() -> bool:
             resp = await client.get(f"{settings.data_collector_url}/trade-dates?days=7")
             if resp.status_code == 200:
                 trade_dates = resp.json().get("data", [])
+                # 交易日历异常（空列表或数据过少），回退到周末判断
+                if not trade_dates or len(trade_dates) < 3:
+                    logger.warning("交易日历数据异常（空或过少），回退到周末判断")
+                    return _is_weekend()
                 today = datetime.now().strftime("%Y%m%d")
                 return today not in trade_dates
     except Exception:
-        pass
+        logger.warning("交易日历接口调用失败，回退到周末判断")
     return _is_weekend()
 
 
