@@ -105,11 +105,21 @@ class DataCollector:
         return None
 
     def is_trade_day(self, date_str: str) -> bool:
-        """判断是否为交易日"""
+        """判断是否为交易日
+
+        优先用交易日历，若缓存未覆盖目标月份则回退到周末判断。
+        """
         trade_dates = self.get_trade_dates()
         date_compact = date_str.replace("-", "")
         if trade_dates:
-            return date_compact in trade_dates
+            if date_compact in trade_dates:
+                return True
+            # 缓存中没找到，检查缓存是否覆盖了目标月份（未覆盖则不可信）
+            target_month = date_compact[:6]
+            month_covered = any(d.startswith(target_month) for d in trade_dates)
+            if month_covered:
+                return False  # 缓存覆盖了该月但没这个日期 → 确认为非交易日
+            # 缓存未覆盖目标月份，不可信，回退到周末判断
         # 回退：简单跳过周末
         try:
             d = datetime.strptime(date_compact, "%Y%m%d")
