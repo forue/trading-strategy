@@ -133,14 +133,15 @@ async def collect_kline(sector_name: str = None, start_date: str = None, end_dat
 
 @app.get("/trade-dates")
 async def get_trade_dates(days: int = 365):
-    """获取交易日历"""
+    """获取交易日历（以今天为基准，返回最近 N 个交易日）"""
     try:
         trade_dates = data_collector.get_trade_dates(days)
         if trade_dates is None:
             return success_response(data=[])
-        # 只返回最近N天
-        recent = trade_dates[-days:] if len(trade_dates) > days else trade_dates
-        return success_response(data=recent)
+        today = datetime.now().strftime("%Y%m%d")
+        # 取今天及之前最近N个交易日（跳过未来日期）
+        past = [d for d in trade_dates if d <= today][-days:]
+        return success_response(data=past)
     except Exception as e:
         logger.error(f"获取交易日历失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
