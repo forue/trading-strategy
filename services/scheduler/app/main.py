@@ -69,7 +69,7 @@ async def _is_non_trade_day() -> bool:
         return True
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(f"{settings.data_collector_url}/trade-dates?days=7")
+            resp = await client.get(f"{settings.data_collector_url}/trade-dates?days=30")
             if resp.status_code == 200:
                 trade_dates = resp.json().get("data", [])
                 # 交易日历异常（空列表或数据过少），回退到周末判断
@@ -77,7 +77,16 @@ async def _is_non_trade_day() -> bool:
                     logger.warning("交易日历数据异常（空或过少），回退到周末判断")
                     return _is_weekend()
                 today = datetime.now().strftime("%Y%m%d")
-                return today not in trade_dates
+                if today in trade_dates:
+                    return False
+                # 缓存中没找到今天，检查是否覆盖了当前月份
+                # 如果缓存完全没有当前月份的日期 → 缓存不可信，回退周末
+                today_month = today[:6]
+                has_current_month = any(d.startswith(today_month) for d in trade_dates)
+                if not has_current_month:
+                    logger.warning(f"交易日历缺少 {today_month} 月份数据，回退到周末判断")
+                    return _is_weekend()
+                return True  # 覆盖了当前月份但没有今天 → 确认为非交易日
     except Exception:
         logger.warning("交易日历接口调用失败，回退到周末判断")
     return _is_weekend()
