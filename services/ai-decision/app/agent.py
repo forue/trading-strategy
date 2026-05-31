@@ -279,39 +279,50 @@ class ReActAgent:
         # 检查模型是否支持 function calling
         self._supports_tools = _model_supports_function_calling(llm_client.model)
 
+    async def _summarize_messages(self, msgs: list[dict]) -> str:
+        """用 LLM 对旧消息生成智能摘要"""
+        # 构建摘要请求：将消息转为纯文本
+        parts = []
+        for m in msgs:
+            role = m.get("role", "")
+            content = m.get("content", "")
+            if role == "user":
+                parts.append(f"用户: {content[:300]}")
+            elif role == "assistant":
+                if m.get("tool_calls"):
+                    names = [tc.get("function", {}).get("name", "") for tc in m["tool_calls"]]
+                    parts.append(f"[调用工具: {', '.join(names)}]")
+                if content:
+                    parts.append(f"助手: {content[:400]}")
+            elif role == "tool":
+                parts.append(f"[工具结果]: {content[:300]}")
+        text = "\n".join(parts[-15:])  # 最多保留最近15条
+
+        prompt = [
+            {"role": "system", "content": "你是摘要助手。将以下对话历史压缩为简洁摘要，保留：1)用户的核心问题 2)查询过的工具和关键数据（数字、板块名称）3)助手的主要结论。不超过200字。"},
+            {"role": "user", "content": text},
+        ]
+        try:
+            resp = await self.llm.chat(prompt, temperature=0.1, max_tokens=300)
+            return resp.content.strip() if resp.content else ""
+        except Exception:
+            return ""
+
     async def run(self, user_message: str, history: list[dict] = None) -> AsyncGenerator[dict, None]:
         """执行 Agent 循环，流式输出"""
         import time as _time
 
         messages = [{"role": "system", "content": AGENT_SYSTEM_PROMPT}]
         if history:
-            # 清理历史中孤立的 tool 消息（对应的 assistant(tool_calls) 可能已被截断或丢失）
             clean_history = _remove_orphaned_tool_messages(history[-10:])
 
-            # 长对话摘要：超过 8 条消息时，对前半部分生成摘要（保留工具调用和关键数据）
+            # 长对话摘要：超过 8 条消息时，用 LLM 生成智能摘要
             if len(clean_history) > 8:
                 old_msgs = clean_history[:-6]
                 recent_msgs = clean_history[-6:]
-                summary_parts = []
-                for m in old_msgs:
-                    role = m.get("role")
-                    if role == "user":
-                        summary_parts.append(f"用户: {m.get('content', '')[:120]}")
-                    elif role == "assistant":
-                        # 保留工具调用名称
-                        if m.get("tool_calls"):
-                            names = [tc.get("function", {}).get("name", "") for tc in m["tool_calls"]]
-                            summary_parts.append(f"助手调用工具: {', '.join(names)}")
-                        if m.get("content"):
-                            summary_parts.append(f"助手: {m['content'][:200]}")
-                    elif role == "tool":
-                        # 保留工具结果摘要（前200字符）
-                        content = m.get("content", "")
-                        if content:
-                            summary_parts.append(f"工具结果: {content[:200]}")
-                if summary_parts:
-                    summary = "【历史上下文摘要】\n" + "\n".join(summary_parts[-10:])
-                    messages.append({"role": "system", "content": summary})
+                summary = await self._summarize_messages(old_msgs)
+                if summary:
+                    messages.append({"role": "system", "content": f"【历史摘要】{summary}"})
                 messages.extend(recent_msgs)
             else:
                 messages.extend(clean_history)
@@ -319,6 +330,7 @@ class ReActAgent:
         messages.append({"role": "user", "content": user_message})
 
         total_tool_calls = 0
+        total_tokens = 0
         seen_tool_calls = set()  # 全局去重：跟踪所有唯一调用
         start_time = _time.monotonic()
 
@@ -352,6 +364,7 @@ class ReActAgent:
                         max_tokens=4000,
                         tools=tools_to_use,
                     )
+                    total_tokens += getattr(response, 'tokens_used', 0) or 0
                     break
                 except Exception as e:
                     if _attempt < 2:
@@ -445,15 +458,17 @@ class ReActAgent:
                     yield {"type": "thinking", "data": response.thinking}
 
                 if response.content:
-                    # 已有内容，直接输出（不需要再次调用 LLM）
                     yield {"type": "content", "data": response.content}
                 else:
-                    # 极少数情况下 content 为空，用流式重试一次
                     async for chunk in self.llm.chat_stream(messages, temperature=0.3, max_tokens=2000):
                         if chunk["type"] == "content":
                             yield {"type": "content", "data": chunk["data"]}
                         elif chunk["type"] == "thinking":
                             yield {"type": "thinking", "data": chunk["data"]}
+
+                if total_tokens > 0:
+                    yield {"type": "usage", "data": {"tokens_used": total_tokens}}
+                return
 
                 return
 

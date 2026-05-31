@@ -358,6 +358,7 @@ async function handleSend() {
   streamingContent.value = ''
   streamingThinking.value = ''
   streamingToolCalls.value = []
+  let streamingTokens = 0
 
   // 创建中断控制器
   abortController = new AbortController()
@@ -421,6 +422,7 @@ async function handleSend() {
             throw new Error(data.data)
           } else if (data.type === 'done') {
             gotDone = true
+            streamingTokens = data.tokens_used || 0
           }
           await scrollToBottom()
         } catch (e: any) {
@@ -436,7 +438,7 @@ async function handleSend() {
         thinking: streamingThinking.value,
         toolCalls: streamingToolCalls.value.length > 0 ? [...streamingToolCalls.value] : undefined,
         model: chatModel.value,
-        tokens_used: 0,
+        tokens_used: streamingTokens,
         timestamp: new Date().toISOString(),
       })
     }

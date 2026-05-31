@@ -883,6 +883,7 @@ async def chat_stream(request: ChatRequest):
             # 执行 Agent
             full_content = ""
             full_thinking = ""
+            total_tokens = 0
             async for chunk in agent.run(request.message, context_messages):
                 if chunk["type"] == "thinking":
                     full_thinking += chunk["data"]
@@ -894,6 +895,8 @@ async def chat_stream(request: ChatRequest):
                     yield f"data: {json.dumps({'type': 'tool_call', 'data': chunk['data']})}\n\n"
                 elif chunk["type"] == "tool_result":
                     yield f"data: {json.dumps({'type': 'tool_result', 'data': chunk['data']})}\n\n"
+                elif chunk["type"] == "usage":
+                    total_tokens = chunk["data"].get("tokens_used", 0)
                 elif chunk["type"] == "error":
                     yield f"data: {json.dumps({'type': 'error', 'data': chunk['data']})}\n\n"
 
@@ -905,9 +908,10 @@ async def chat_stream(request: ChatRequest):
                     content=full_content,
                     thinking=full_thinking,
                     model=request.model or settings.ai_model,
+                    tokens_used=total_tokens,
                 ))
 
-            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'tokens_used': total_tokens})}\n\n"
 
         except Exception as e:
             logger.error(f"Agent 对话失败: {e}")
