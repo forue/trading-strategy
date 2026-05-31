@@ -242,6 +242,20 @@ AGENT_SYSTEM_PROMPT = """你是一个专业的A股量化投资分析师，擅长
 2. **深度分析**：结合资金流向、技术指标、估值水平、市场情绪、宏观环境综合判断
 3. **结论输出**：给出明确结论、信心度(0-10)、风险因素、可操作建议
 
+## 示例
+用户: 分析一下半导体板块
+正确步骤:
+  1. list_sectors(keyword: "半导体") → 获取代码 THS881101
+  2. analyze_sector(sector_codes: ["THS881101"]) → 获取基础数据
+  3. get_technical_indicators(sector_code: "THS881101") → 技术面
+  4. get_sector_valuation(sector_code: "THS881101") → 估值
+  5. 综合以上数据给出分析结论
+
+用户: 今天市场怎么样
+正确步骤:
+  1. 同时调用 get_market_overview + get_market_breadth + get_global_market（并行）
+  2. 综合三个数据源给出市场概览
+
 ## 规则
 - 必须先获取数据再分析，禁止编造数据
 - 不知道板块代码时先调 list_sectors 搜索，使用返回的 `code` 字段（如 THS881101），不要用名称
@@ -273,7 +287,24 @@ class ReActAgent:
         if history:
             # 清理历史中孤立的 tool 消息（对应的 assistant(tool_calls) 可能已被截断或丢失）
             clean_history = _remove_orphaned_tool_messages(history[-10:])
-            messages.extend(clean_history)
+
+            # 长对话摘要：超过 8 条消息时，对前半部分生成摘要
+            if len(clean_history) > 8:
+                old_msgs = clean_history[:-6]
+                recent_msgs = clean_history[-6:]
+                summary_parts = []
+                for m in old_msgs:
+                    if m.get("role") == "user":
+                        summary_parts.append(f"用户问: {m.get('content', '')[:100]}")
+                    elif m.get("role") == "assistant" and m.get("content"):
+                        summary_parts.append(f"助手答: {m['content'][:150]}")
+                if summary_parts:
+                    summary = "【历史摘要】\n" + "\n".join(summary_parts[-6:])
+                    messages.append({"role": "system", "content": summary})
+                messages.extend(recent_msgs)
+            else:
+                messages.extend(clean_history)
+
         messages.append({"role": "user", "content": user_message})
 
         total_tool_calls = 0

@@ -48,13 +48,6 @@ def _df_to_records(df) -> list[dict]:
         return []
 
 
-def _run_sync_in_thread(func, *args, **kwargs):
-    """在独立线程中同步执行阻塞函数（akshare 是同步的）"""
-    import concurrent.futures
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(func, *args, **kwargs)
-        return future.result(timeout=30)
-
 
 # ============================================================
 # 全球市场指数
@@ -443,20 +436,25 @@ async def get_market_breadth_real() -> dict:
         if df is None or df.empty:
             return {"error": "获取个股数据失败"}
 
-        rows = df.to_dict(orient="records")
-        total = len(rows)
-        up = sum(1 for r in rows if float(r.get("涨跌幅", 0) or 0) > 0)
-        down = sum(1 for r in rows if float(r.get("涨跌幅", 0) or 0) < 0)
+        # 使用 pandas 向量化操作，避免 to_dict 和逐行遍历
+        import numpy as np
+        changes = df["涨跌幅"].fillna(0).astype(float)
+        codes = df["代码"].astype(str)
+        total = len(df)
+
+        up = int((changes > 0).sum())
+        down = int((changes < 0).sum())
         flat = total - up - down
 
-        # 涨跌停（A股涨跌停板一般为10%，科创板/创业板20%）
-        limit_up = sum(1 for r in rows if float(r.get("涨跌幅", 0) or 0) >= 9.9)
-        limit_down = sum(1 for r in rows if float(r.get("涨跌幅", 0) or 0) <= -9.9)
+        # 涨跌停：按板块区分阈值
+        is_gem_star = codes.str.startswith(("300", "301", "688"))  # 创业板/科创板 20%
+        is_bse = codes.str.startswith("8")  # 北交所 30%
+        thresholds = np.where(is_gem_star, 19.9, np.where(is_bse, 29.9, 9.9))
+        limit_up = int((changes >= thresholds).sum())
+        limit_down = int((-changes >= thresholds).sum())
 
-        # 涨跌幅分布
-        pct_changes = [float(r.get("涨跌幅", 0) or 0) for r in rows]
-        above_5 = sum(1 for p in pct_changes if p > 5)
-        below_neg5 = sum(1 for p in pct_changes if p < -5)
+        above_5 = int((changes > 5).sum())
+        below_neg5 = int((changes < -5).sum())
 
         result = {
             "total_stocks": total,
@@ -469,8 +467,8 @@ async def get_market_breadth_real() -> dict:
             "above_5pct": above_5,
             "below_neg5pct": below_neg5,
             "up_pct": round(up / total * 100, 1),
-            "avg_change_pct": round(sum(pct_changes) / total, 2),
-            "median_change_pct": round(sorted(pct_changes)[total // 2], 2),
+            "avg_change_pct": round(float(changes.mean()), 2),
+            "median_change_pct": round(float(changes.median()), 2),
         }
         _set_cached("market_breadth_real", result)
         return result

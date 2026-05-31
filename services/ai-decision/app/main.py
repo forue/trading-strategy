@@ -365,9 +365,10 @@ def _load_ai_config() -> dict:
     except Exception as e:
         logger.warning(f"加载 AI 配置失败: {e}")
 
-    # 修复 Ollama URL：Docker 容器内不能用 localhost
+    # 修复 Ollama URL：Docker 容器内 localhost 指向容器自身，需替换为宿主机地址
+    _ollama_host = os.environ.get("OLLAMA_HOST", "host.docker.internal")
     if "localhost:11434" in defaults.get("ollama_base_url", ""):
-        defaults["ollama_base_url"] = "http://host.docker.internal:11434"
+        defaults["ollama_base_url"] = f"http://{_ollama_host}:11434"
 
     return defaults
 
@@ -424,8 +425,9 @@ async def update_config(request: UpdateConfigRequest):
         config = request.model_dump()
 
         # 修复 Ollama URL
+        _ollama_host = os.environ.get("OLLAMA_HOST", "host.docker.internal")
         if "localhost:11434" in config.get("ollama_base_url", ""):
-            config["ollama_base_url"] = "http://host.docker.internal:11434"
+            config["ollama_base_url"] = f"http://{_ollama_host}:11434"
 
         _save_ai_config(config)
 
