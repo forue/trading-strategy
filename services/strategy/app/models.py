@@ -43,6 +43,13 @@ class StrategyParams(BaseModel):
     use_inverse_vol_weights: bool = True
     # 截面 Z-Score 归一化：将因子硬阈值评分替换为板块间相对排名得分
     use_zscore_normalization: bool = True
+    # 动态市场状态参数
+    market_bull_threshold: float = 0.5    # 上涨板块占比达到此值为牛市
+    market_bear_threshold: float = 0.4    # 上涨板块占比低于此值为熊市
+    favorable_confirm_days: int = 2       # 连续 N 天同向状态才确认
+    max_empty_days: int = 10              # 最大空仓天数，超时强制试探建仓
+    capital_pct_bull_boost: float = 0.3   # 牛市加仓比例
+    emergency_exit_score: float = 1.0     # 持仓板块评分低于此值触发紧急退出
 
 
 class TradeSignal(BaseModel):

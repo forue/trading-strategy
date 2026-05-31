@@ -181,21 +181,61 @@ class RotationScoringModel:
         denom = max(params.score_gap_epsilon, abs(max_current), abs(max_new), 1.0)
         return max(base, params.relative_score_gap_ratio * denom)
 
+    def _evaluate_market_regime(
+        self, scored_sectors: list, strategy_type: StrategyType, params: StrategyParams
+    ) -> str:
+        """评估市场状态，返回 "BULL" / "NEUTRAL" / "BEAR"
+
+        判定维度：
+        1. top10 板块中有多少评分达标
+        2. 全市场上涨板块占比（市场宽度）
+        3. 平均涨跌幅方向
+        """
+        if not scored_sectors:
+            return "BEAR"
+
+        min_score = params.min_score_threshold if params.min_score_threshold is not None else (
+            2.0 if strategy_type == StrategyType.AGGRESSIVE else 4.0
+        )
+        top10 = scored_sectors[:10]
+        top10_ok = sum(1 for s in top10 if s.get("composite_score", 0) >= min_score)
+
+        # 市场宽度：上涨板块占比
+        total = len(scored_sectors)
+        up_count = sum(1 for s in scored_sectors if s.get("index_change_pct", 0) > 0)
+        up_ratio = up_count / max(total, 1)
+
+        avg_change = sum(s.get("index_change_pct", 0) for s in scored_sectors) / max(total, 1)
+
+        bull_threshold = params.market_bull_threshold if params.market_bull_threshold is not None else 0.5
+        bear_threshold = params.market_bear_threshold if params.market_bear_threshold is not None else 0.4
+
+        if strategy_type == StrategyType.AGGRESSIVE:
+            # BULL: top10 至少 2 个达标 且 上涨占比 >= 50%
+            if top10_ok >= 2 and up_ratio >= bull_threshold:
+                return "BULL"
+            # BEAR: top10 无达标 且 上涨占比 < 40%
+            if top10_ok == 0 and up_ratio < bear_threshold:
+                return "BEAR"
+            return "NEUTRAL"
+        elif strategy_type == StrategyType.MODERATE:
+            if top10_ok >= 2 and up_ratio >= bull_threshold:
+                return "BULL"
+            if top10_ok == 0 and up_ratio < bear_threshold:
+                return "BEAR"
+            return "NEUTRAL"
+        else:  # CONSERVATIVE
+            if top10_ok >= 1 and up_ratio >= bull_threshold:
+                return "BULL"
+            if top10_ok == 0 and up_ratio < bear_threshold:
+                return "BEAR"
+            return "NEUTRAL"
+
     def _market_is_favorable(
         self, scored_sectors: list, strategy_type: StrategyType, params: StrategyParams
     ) -> bool:
-        if not scored_sectors:
-            return False
-        if strategy_type == StrategyType.AGGRESSIVE:
-            min_score = params.min_score_threshold if params.min_score_threshold is not None else 2.0
-        else:
-            min_score = params.min_score_threshold if params.min_score_threshold is not None else 4.0
-        top10 = scored_sectors[:10]
-        top10_ok = sum(1 for s in top10 if s.get("composite_score", 0) >= min_score)
-        avg_change = sum(s.get("index_change_pct", 0) for s in scored_sectors) / max(len(scored_sectors), 1)
-        if strategy_type == StrategyType.AGGRESSIVE:
-            return (top10_ok >= 3) or (avg_change > 0 and top10_ok >= 1)
-        return any(s.get("composite_score", 0) >= min_score for s in top10)
+        """向后兼容：市场非 BEAR 即视为景气"""
+        return self._evaluate_market_regime(scored_sectors, strategy_type, params) != "BEAR"
 
     def _allocate_buy_position_ratios(
         self, buy_targets: list[dict], params: StrategyParams, total_weight: float
@@ -596,7 +636,15 @@ class RotationScoringModel:
             # 后续 keep 查找使用 filtered 列表
             keep_search_pool = filtered
         else:
-            top_n = min(params.top_n, len(scored_sectors))
+            # 动态 top_n：牛市多选 1 个
+            total = len(scored_sectors)
+            up_count = sum(1 for s in scored_sectors if s.get("index_change_pct", 0) > 0)
+            up_ratio = up_count / max(total, 1)
+            avg_change = sum(s.get("index_change_pct", 0) for s in scored_sectors) / max(total, 1)
+            dynamic_top_n = params.top_n
+            if up_ratio >= 0.5 and avg_change > 0:
+                dynamic_top_n = min(params.top_n + 1, 5)  # 牛市上限 5
+            top_n = min(dynamic_top_n, len(scored_sectors))
             top_sectors = scored_sectors[:top_n]
             buy_targets = [s for s in top_sectors if s.get("composite_score", 0) >= min_score]
             keep_search_pool = scored_sectors
@@ -616,34 +664,22 @@ class RotationScoringModel:
         if current_positions:
             max_cur = max(current_scores.values()) if current_scores else 0
             max_new = max(s.get("composite_score", 0) for s in buy_targets)
-            gap_thr = self._effective_score_gap_threshold(max_new, max_cur, params, gap_floor)
+            # 动态 score_gap：根据市场宽度调整
+            total = len(scored_sectors)
+            up_count = sum(1 for s in scored_sectors if s.get("index_change_pct", 0) > 0)
+            up_ratio = up_count / max(total, 1)
+            avg_change = sum(s.get("index_change_pct", 0) for s in scored_sectors) / max(total, 1)
+            dynamic_gap_floor = gap_floor
+            if up_ratio >= 0.5 and avg_change > 0:
+                dynamic_gap_floor = gap_floor * 0.7  # 牛市降低换仓门槛
+            elif up_ratio < 0.4 and avg_change < 0:
+                dynamic_gap_floor = gap_floor * 1.5  # 熊市提高门槛
+            gap_thr = self._effective_score_gap_threshold(max_new, max_cur, params, dynamic_gap_floor)
             if max_new - max_cur < gap_thr:
                 buy_targets = [s for s in buy_targets if s.get("sector_code") in current_codes]
                 if not buy_targets:
-                    for code in current_codes:
-                        s = next((sec for sec in keep_search_pool if sec.get("sector_code") == code), None)
-                        if s and s.get("composite_score", 0) >= keep_score_min:
-                            # 保守策略保留时再次检查估值
-                            if profile["use_valuation_filter"]:
-                                pe_pct = s.get("pe_percentile")
-                                pb_pct = s.get("pb_percentile")
-                                if pe_pct is None and pb_pct is None:
-                                    continue
-                            keep_pos = params.max_position / max(len(current_positions), 1) if divide_keep else params.max_position
-                            reason = f"{label}: 持仓保留, 评分{s['composite_score']:.2f}>=保留阈值{keep_score_min:.2f}"
-                            if profile["use_valuation_filter"]:
-                                vs = s.get("valuation_score", 5.0)
-                                vpct = (10 - vs) / 10 * 100
-                                reason += f", 估值分位{vpct:.1f}%<={valuation_max}%"
-                            signals.append(self._build_signal(
-                                sector=s, strategy_type=strategy_type,
-                                direction=SignalDirection.BUY, position_ratio=keep_pos,
-                                score=s["composite_score"], signal_date=signal_date,
-                                reason=reason,
-                                rank=next((i+1 for i, x in enumerate(scored_sectors) if x.get("sector_code") == code), 0),
-                                total_sectors=len(scored_sectors),
-                            ))
-                    return signals
+                    # 评分差距不足，保留现有持仓 → 返回空信号，回测自然保持仓位
+                    return []
         else:
             should_rebalance = True
 
