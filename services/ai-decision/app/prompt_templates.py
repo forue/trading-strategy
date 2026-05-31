@@ -36,7 +36,7 @@ SIGNAL_INTERPRETATION = PromptTemplate(
 你的任务是解读量化模型生成的交易信号，给出专业的分析和风险提示。
 
 要求:
-1. 用简洁专业的语言解读信号原因
+1. 用简洁专业的语言解读信号原因，结合近期信号历史判断信号可靠性
 2. 列出关键风险因素（2-3条）
 3. 给出信心度（0-1之间的两位小数）
 4. 给出具体的操作建议
@@ -72,6 +72,9 @@ SIGNAL_INTERPRETATION = PromptTemplate(
 ## 市场环境
 - 大盘今日涨跌幅: {market_change}%
 - 市场情绪: {market_sentiment}
+
+## 近期信号历史
+{signal_history_text}
 
 请以JSON格式输出分析结果。""",
 )
@@ -188,6 +191,39 @@ CHAT_ASSISTANT = PromptTemplate(
 )
 
 # ============================================================
+# 板块对比分析模板
+# ============================================================
+
+SECTOR_COMPARISON = PromptTemplate(
+    name="sector_comparison",
+    system="""你是一个专业的板块轮动分析师，擅长对比分析多个板块的投资价值。
+
+分析维度:
+1. 资金流向：主力资金持续流入 vs 流出
+2. 涨跌趋势：近期涨跌幅、波动率
+3. 技术形态：均线排列、MACD信号
+4. 北向资金：外资动向
+
+要求:
+- 给出明确的板块排序（推荐 > 观望 > 回避）
+- 标注各板块的核心逻辑和风险
+- 输出纯文本分析报告""",
+    user_template="""请对比分析以下板块:
+
+## 对比板块
+{sector_list}
+
+## 各板块数据
+{sector_data_text}
+
+## 对比维度
+- 对比天数: {days}天
+- 重点关注: {focus}
+
+请给出对比分析和排序建议。""",
+)
+
+# ============================================================
 # 模板注册表
 # ============================================================
 
@@ -196,6 +232,7 @@ TEMPLATES = {
     "risk_analysis": RISK_ANALYSIS,
     "daily_review": DAILY_REVIEW,
     "chat": CHAT_ASSISTANT,
+    "sector_comparison": SECTOR_COMPARISON,
 }
 
 

@@ -161,7 +161,7 @@ class BaseLLMClient(ABC):
         pass
 
     @abstractmethod
-    async def chat_stream(self, messages: list[dict], temperature: float = 0.7, max_tokens: int = 2000, **kwargs) -> AsyncGenerator[dict, None]:
+    async def chat_stream(self, messages: list[dict], temperature: float = 0.7, max_tokens: int = 2000, tools: list = None, **kwargs) -> AsyncGenerator[dict, None]:
         pass
 
     @abstractmethod
@@ -274,9 +274,10 @@ class OpenAIClient(BaseLLMClient):
     async def close(self):
         await self._client.aclose()
 
-    async def chat_stream(self, messages: list[dict], temperature: float = 0.7, max_tokens: int = 2000, **kwargs) -> AsyncGenerator[dict, None]:
+    async def chat_stream(self, messages: list[dict], temperature: float = 0.7, max_tokens: int = 2000, tools: list = None, **kwargs) -> AsyncGenerator[dict, None]:
         try:
-            payload = self._build_payload(messages, temperature, max_tokens, stream=True)
+            payload = self._build_payload(messages, temperature, max_tokens, stream=True, tools=tools)
+            streaming_tool_calls: dict[int, dict] = {}
             async with self._client.stream(
                 "POST",
                 f"{self.base_url}/chat/completions",
@@ -300,11 +301,25 @@ class OpenAIClient(BaseLLMClient):
                             yield {"type": "content", "data": content}
                         if "tool_calls" in delta:
                             for tc in delta["tool_calls"]:
+                                idx = tc.get("index", 0)
+                                if idx not in streaming_tool_calls:
+                                    streaming_tool_calls[idx] = {"name": "", "arguments": "", "id": tc.get("id", "")}
                                 func = tc.get("function", {})
                                 if func.get("name"):
-                                    yield {"type": "tool_call", "data": {"name": func["name"], "arguments": func.get("arguments", "{}")}}
+                                    streaming_tool_calls[idx]["name"] = func["name"]
+                                if func.get("arguments"):
+                                    streaming_tool_calls[idx]["arguments"] += func["arguments"]
                     except json.JSONDecodeError:
                         continue
+
+            # 流结束后 yield 完整的 tool_calls
+            for idx, tc in streaming_tool_calls.items():
+                if tc["name"]:
+                    try:
+                        args = json.loads(tc["arguments"]) if tc["arguments"] else {}
+                    except json.JSONDecodeError:
+                        args = {}
+                    yield {"type": "tool_call", "data": {"name": tc["name"], "arguments": args}}
         except Exception as e:
             logger.error(f"OpenAI 流式调用失败: {e}")
             yield {"type": "error", "data": str(e)}
@@ -473,10 +488,10 @@ class OllamaClient(BaseLLMClient):
             logger.error(f"Ollama API 调用失败: {e}")
             raise
 
-    async def chat_stream(self, messages: list[dict], temperature: float = 0.7, max_tokens: int = 2000, **kwargs) -> AsyncGenerator[dict, None]:
+    async def chat_stream(self, messages: list[dict], temperature: float = 0.7, max_tokens: int = 2000, tools: list = None, **kwargs) -> AsyncGenerator[dict, None]:
         await self._ensure_probed()
         try:
-            payload = self._build_payload(messages, temperature, max_tokens, stream=True)
+            payload = self._build_payload(messages, temperature, max_tokens, stream=True, tools=tools)
             async with self._client.stream(
                 "POST",
                 f"{self.base_url}/api/chat",

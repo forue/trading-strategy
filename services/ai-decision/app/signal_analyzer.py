@@ -72,6 +72,7 @@ class SignalAnalyzer:
             turnover=round(context.turnover / 1e8, 2),
             market_change=round(context.market_change, 2),
             market_sentiment=context.market_sentiment,
+            signal_history_text=getattr(context, 'signal_history_text', '无历史信号数据'),
         )
 
         try:

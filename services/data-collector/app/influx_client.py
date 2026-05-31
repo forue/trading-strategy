@@ -1,10 +1,31 @@
 """数据采集服务 - InfluxDB客户端封装"""
+import math
 from datetime import datetime
 from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.write_api import SYNCHRONOUS
 from loguru import logger
 
 from .config import settings
+
+
+def _clean_nan_records(df) -> list[dict]:
+    """DataFrame 转 records，清理 NaN/Inf 值（JSON 不支持）"""
+    import pandas as pd
+    if df is None or (isinstance(df, pd.DataFrame) and df.empty):
+        return []
+    # 多表返回 list[DataFrame] 时合并
+    if isinstance(df, list):
+        if not df:
+            return []
+        df = pd.concat(df, ignore_index=True)
+    if df.empty:
+        return []
+    records = df.to_dict("records")
+    for rec in records:
+        for k, v in rec.items():
+            if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                rec[k] = 0
+    return records
 
 
 class InfluxDBManager:
@@ -170,9 +191,7 @@ class InfluxDBManager:
           |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
         '''
         tables = self.query_api.query_data_frame(query)
-        if tables.empty:
-            return []
-        return tables.to_dict("records")
+        return _clean_nan_records(tables)
 
     def query_all_sectors_data(self, start_date: str, end_date: str) -> list[dict]:
         """查询所有板块资金流数据"""
@@ -186,9 +205,7 @@ class InfluxDBManager:
           |> pivot(rowKey: ["_time", "sector_code"], columnKey: ["_field"], valueColumn: "_value")
         '''
         tables = self.query_api.query_data_frame(query)
-        if tables.empty:
-            return []
-        return tables.to_dict("records")
+        return _clean_nan_records(tables)
 
     def delete_by_date_range(self, measurement: str, start_date: str, end_date: str) -> int:
         """删除指定测量中某时间范围的数据
