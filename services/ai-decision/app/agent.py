@@ -288,18 +288,29 @@ class ReActAgent:
             # 清理历史中孤立的 tool 消息（对应的 assistant(tool_calls) 可能已被截断或丢失）
             clean_history = _remove_orphaned_tool_messages(history[-10:])
 
-            # 长对话摘要：超过 8 条消息时，对前半部分生成摘要
+            # 长对话摘要：超过 8 条消息时，对前半部分生成摘要（保留工具调用和关键数据）
             if len(clean_history) > 8:
                 old_msgs = clean_history[:-6]
                 recent_msgs = clean_history[-6:]
                 summary_parts = []
                 for m in old_msgs:
-                    if m.get("role") == "user":
-                        summary_parts.append(f"用户问: {m.get('content', '')[:100]}")
-                    elif m.get("role") == "assistant" and m.get("content"):
-                        summary_parts.append(f"助手答: {m['content'][:150]}")
+                    role = m.get("role")
+                    if role == "user":
+                        summary_parts.append(f"用户: {m.get('content', '')[:120]}")
+                    elif role == "assistant":
+                        # 保留工具调用名称
+                        if m.get("tool_calls"):
+                            names = [tc.get("function", {}).get("name", "") for tc in m["tool_calls"]]
+                            summary_parts.append(f"助手调用工具: {', '.join(names)}")
+                        if m.get("content"):
+                            summary_parts.append(f"助手: {m['content'][:200]}")
+                    elif role == "tool":
+                        # 保留工具结果摘要（前200字符）
+                        content = m.get("content", "")
+                        if content:
+                            summary_parts.append(f"工具结果: {content[:200]}")
                 if summary_parts:
-                    summary = "【历史摘要】\n" + "\n".join(summary_parts[-6:])
+                    summary = "【历史上下文摘要】\n" + "\n".join(summary_parts[-10:])
                     messages.append({"role": "system", "content": summary})
                 messages.extend(recent_msgs)
             else:
