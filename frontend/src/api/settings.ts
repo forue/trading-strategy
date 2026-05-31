@@ -159,4 +159,7 @@ runStrategyOverlay(data: {
   }> {
     return request.post('/strategy/data/replay/strategy-optimize', data)
   },
+  getOptimizeProgress(): Promise<{ active: boolean; completed: number; total: number; best_return: number; best_sharpe: number }> {
+    return request.get('/strategy/data/replay/optimize-progress')
+  },
 }

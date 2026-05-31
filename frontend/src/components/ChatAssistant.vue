@@ -505,25 +505,107 @@ async function shareAsImage() {
     const el = messagesRef.value
     if (!el) return
 
-    // 保存原始样式
-    const origStyle = el.style.cssText
-    const origScrollTop = el.scrollTop
+    // 查找背景色
+    let bgTarget: HTMLElement | null = el
+    let bgColor = 'transparent'
+    while (bgTarget) {
+      const bg = getComputedStyle(bgTarget).backgroundColor
+      if (bg && bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent') { bgColor = bg; break }
+      bgTarget = bgTarget.parentElement
+    }
+    if (bgColor === 'transparent') bgColor = '#ffffff'
 
-    // 临时展开到完整高度，让 html2canvas 能截取全部内容
-    el.style.height = el.scrollHeight + 'px'
-    el.style.overflow = 'visible'
+    const rgb = bgColor.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/)
+    const isDark = rgb ? (parseInt(rgb[1]) + parseInt(rgb[2]) + parseInt(rgb[3])) / 3 < 128 : false
+    const fb = isDark ? 'rgb(45,45,45)' : '#fafafa'
+    const fBorder = isDark ? 'rgb(60,60,60)' : '#e8e8e8'
+    const fText = isDark ? 'rgb(160,160,160)' : '#999'
+    const fStrong = isDark ? 'rgb(180,180,180)' : '#888'
+    const fHint = isDark ? 'rgb(120,120,120)' : '#bbb'
+
+    // 找到 flex 父容器和兄弟元素
+    let flexParent: HTMLElement | null = el
+    while (flexParent && !flexParent.classList.contains('chat-assistant')) {
+      flexParent = flexParent.parentElement
+    }
+
+    // 保存所有需要修改的元素的原始样式
+    type Saved = { el: HTMLElement; style: string }
+    const saved: Saved[] = []
+    const save = (e: HTMLElement) => saved.push({ el: e, style: e.style.cssText })
+
+    save(el)
+    if (flexParent) {
+      save(flexParent)
+      // 隐藏 toolbar 和 model-bar（不截入分享图）
+      for (const child of Array.from(flexParent.children)) {
+        if (child !== el) save(child as HTMLElement)
+      }
+    }
+
+    // 1) 解除 flex 父容器约束
+    if (flexParent) {
+      flexParent.style.cssText += 'display:block !important;height:auto !important;min-height:0 !important;'
+      // 隐藏 toolbar / model-bar
+      for (const child of Array.from(flexParent.children)) {
+        if (child !== el) {
+          (child as HTMLElement).style.cssText += 'display:none !important;'
+        }
+      }
+    }
+
+    // 2) 展开消息容器（左右保留边距，上下取消避免多余留白）
     el.scrollTop = 0
+    el.style.cssText += 'flex:none !important;overflow:visible !important;height:auto !important;padding:0 16px !important;'
 
+    // 3) 注入 header（顶部）+ spacer + footer（底部）
+    const header = document.createElement('div')
+    header.style.cssText = 'display:flex;align-items:center;gap:12px;margin:0 -16px;padding:20px 24px 16px;border-bottom:1px solid rgba(255,255,255,0.1);background:linear-gradient(135deg,#1a1a2e 0%,#16213e 50%,#0f3460 100%);'
+    header.innerHTML = `
+      <div style="width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,#e94560,#533483);display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/>
+          <polyline points="16 7 22 7 22 13"/>
+        </svg>
+      </div>
+      <div>
+        <div style="font-size:16px;font-weight:700;color:#fff;letter-spacing:0.5px;">轮动策略</div>
+        <div style="font-size:11px;color:rgba(255,255,255,0.55);margin-top:2px;">A股板块轮动量化分析平台</div>
+      </div>`
+
+    const spacer = document.createElement('div')
+    spacer.style.height = '16px'
+
+    const footer = document.createElement('div')
+    footer.style.cssText = `margin:0 -16px;padding:14px 24px 16px;border-top:1px solid ${fBorder};background:${fb};font-size:11px;color:${fText};line-height:1.6;`
+    footer.innerHTML = `
+      <div style="color:${fHint};font-size:10px;margin-bottom:4px;">&#9888; 风险提示</div>
+      <div>以上内容由 AI 模型生成，仅供参考，<strong style="color:${fStrong};">不构成任何投资建议</strong>。投资有风险，入市需谨慎。历史数据和回测结果不代表未来收益，请结合自身风险承受能力独立判断。</div>`
+
+    el.prepend(header)
+    header.after(spacer)
+    el.appendChild(footer)
+
+    // 等两帧让浏览器完成布局
+    await new Promise(r => requestAnimationFrame(r))
+    await new Promise(r => requestAnimationFrame(r))
+
+    // 4) 截取 .chat-messages（含 header + 全部消息 + footer）
     const canvas = await html2canvas(el, {
-      backgroundColor: '#fff',
       scale: 2,
-      height: el.scrollHeight,
-      windowHeight: el.scrollHeight,
+      useCORS: true,
+      backgroundColor: bgColor,
     })
 
-    // 恢复原始样式
-    el.style.cssText = origStyle
-    el.scrollTop = origScrollTop
+    // 5) 清理临时元素
+    header.remove()
+    spacer.remove()
+    footer.remove()
+
+    // 6) 还原所有元素的原始样式
+    for (const s of saved) {
+      s.el.style.cssText = s.style
+    }
 
     canvas.toBlob(async (blob) => {
       if (!blob) return

@@ -101,7 +101,7 @@
               {{ autoOptimize ? '自动寻优' : '运行策略回放' }}
             </el-button>
             <el-tag v-if="overlayLoading && autoOptimize" size="small" type="warning">
-              寻优进度: {{ optimizationProgress }}/{{ totalCombinations }}
+              寻优进度: {{ optimizationProgress }}/{{ totalCombinations }} ({{ totalCombinations > 0 ? Math.round(optimizationProgress / totalCombinations * 100) : 0 }}%)
             </el-tag>
           </div>
         </el-tab-pane>
@@ -548,10 +548,21 @@ async function loadStrategyOverlay() {
 }
 
 async function runAutoOptimization() {
-  totalCombinations.value = 0
+  totalCombinations.value = nTrials.value
   optimizationProgress.value = 0
   overlayLoading.value = true
-  
+
+  // 启动进度轮询（每 2 秒）
+  const progressTimer = setInterval(async () => {
+    try {
+      const p = await settingsApi.getOptimizeProgress()
+      if (p.active) {
+        optimizationProgress.value = p.completed
+        totalCombinations.value = p.total
+      }
+    } catch { /* ignore poll errors */ }
+  }, 2000)
+
   try {
     const result = await settingsApi.runStrategyOptimize({
       start_date: overlayDateRange.value[0],
@@ -560,6 +571,9 @@ async function runAutoOptimization() {
       initial_capital: overlayCapital.value,
       n_trials: nTrials.value,
     })
+
+    // 确保进度显示为 100%
+    optimizationProgress.value = totalCombinations.value
     
     if (result.best_params && result.best_result) {
       overlayData.value = {
@@ -582,6 +596,7 @@ async function runAutoOptimization() {
   } catch (e: any) {
     ElMessage.error('策略寻优失败: ' + (e?.message || '未知错误'))
   } finally {
+    clearInterval(progressTimer)
     overlayLoading.value = false
   }
 }
