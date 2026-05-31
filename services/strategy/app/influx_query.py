@@ -501,6 +501,33 @@ class InfluxDBQuery:
         logger.info(f"估值分位更新完成: {updated_count} 条")
         return daily_data
 
+    def query_sh_index_returns(self, start_date: str, end_date: str) -> dict[str, float]:
+        """获取上证指数每日涨跌幅 {date_str: return_decimal}
+
+        使用 AkShare 查询上证指数 (sh000001) 历史日线数据。
+        返回格式: {"2026-01-20": 0.005, "2026-01-21": -0.003, ...}
+        """
+        try:
+            import akshare as ak
+            df = ak.stock_zh_index_daily_em(symbol="sh000001")
+            if df is None or df.empty:
+                logger.warning("上证指数数据为空")
+                return {}
+            df["date"] = df["date"].astype(str)
+            df = df[(df["date"] >= start_date[:10]) & (df["date"] <= end_date[:10])]
+            returns = {}
+            for _, row in df.iterrows():
+                date_str = str(row["date"])[:10]
+                close = float(row.get("close", 0))
+                pre_close = float(row.get("pre_close", close))
+                if pre_close > 0:
+                    returns[date_str] = (close - pre_close) / pre_close
+            logger.info(f"上证指数数据: {len(returns)} 天 ({start_date} ~ {end_date})")
+            return returns
+        except Exception as e:
+            logger.warning(f"获取上证指数失败，回退到板块等权平均: {e}")
+            return {}
+
 
 # 全局实例
 influx_query = InfluxDBQuery()

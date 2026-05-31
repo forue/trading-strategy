@@ -23,7 +23,7 @@ from .config import settings
 from .models import (
     StrategyType, StrategyParams, StrategyConfig,
     TradeSignal, BacktestRequest, BacktestResult,
-    FactorAnalyzeRequest,
+    FactorAnalyzeRequest, SignalDirection,
 )
 from .scoring import scoring_model
 from .influx_query import influx_query
@@ -75,7 +75,7 @@ app = FastAPI(title="策略引擎服务", version="1.1.0", lifespan=lifespan)
 DEFAULT_CONFIGS = {
     StrategyType.AGGRESSIVE: StrategyConfig(
         id=1, strategy_type=StrategyType.AGGRESSIVE, name="激进轮动策略",
-        params=StrategyParams(top_n=2, max_position=1.0, hold_days=3, capital_pct=0.5, stop_loss=0.12, commission_rate=0.0003, stamp_tax_rate=0.001, slippage_rate=0.001, min_score_threshold=2.0, score_gap_threshold=1.0, cooldown_days=2, keep_overlap=True, allow_empty=True, min_score_keep=3.0),
+        params=StrategyParams(top_n=2, max_position=1.0, hold_days=5, capital_pct=0.7, stop_loss=0.08, commission_rate=0.0003, stamp_tax_rate=0.001, slippage_rate=0.001, min_score_threshold=1.5, score_gap_threshold=1.0, cooldown_days=1, keep_overlap=True, allow_empty=True, min_score_keep=2.5, market_bear_threshold=0.35),
     ),
     StrategyType.MODERATE: StrategyConfig(
         id=2, strategy_type=StrategyType.MODERATE, name="稳健轮动策略",
@@ -429,10 +429,18 @@ async def run_backtest(request: BacktestRequest):
 
         # 放到线程池执行，避免阻塞事件循环
         loop = asyncio.get_event_loop()
+
+        # 获取上证指数数据作为基准
+        sh_returns = await loop.run_in_executor(
+            None,
+            lambda: influx_query.query_sh_index_returns(sorted_dates[0], sorted_dates[-1]),
+        )
+
         result_data = await loop.run_in_executor(
             None,
             lambda: _run_backtest_core(
-                daily_data, sorted_dates, request.strategy_type, params, request.initial_capital, return_full=True
+                daily_data, sorted_dates, request.strategy_type, params, request.initial_capital,
+                return_full=True, sh_index_returns=sh_returns,
             ),
         )
 
@@ -476,13 +484,18 @@ async def run_backtest(request: BacktestRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_capital, return_full=False):
-    """回测核心逻辑（统一入口，消除重复代码）"""
+def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_capital, return_full=False, sh_index_returns=None):
+    """回测核心逻辑（统一入口，消除重复代码）
+
+    Args:
+        sh_index_returns: 上证指数每日涨跌幅 {date_str: return_decimal}，为 None 时使用板块等权平均
+    """
     if not sorted_dates or initial_capital <= 0:
         return _empty_backtest_result(strategy_type, initial_capital, return_full)
 
     capital = initial_capital
     peak_capital = capital
+    daily_nav = []  # 逐日 NAV，用于精确计算最大回撤
     position_hold_counter = 0
     current_positions = {}
     stop_loss_triggered = False
@@ -496,6 +509,10 @@ def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_
     total_stamp_tax = 0.0
     total_slippage_cost = 0.0
     trade_count_actual = 0
+    # 动态市场状态追踪
+    regime_history = []  # 最近市场状态 ["BULL"/"NEUTRAL"/"BEAR"]
+    empty_days = 0       # 连续空仓天数
+    prev_regime = "NEUTRAL"
 
     for i, date in enumerate(sorted_dates):
         sector_data = daily_data.get(date, [])
@@ -515,9 +532,14 @@ def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_
                 strategy_daily_return += weight * sector_change_map.get(sector_code, 0)
 
         all_changes = [s.get("index_change_pct", 0) / 100 for s in sector_data]
-        benchmark_return = float(np.mean(all_changes)) if all_changes else 0.0
+        # 基准：优先使用上证指数，回退到板块等权平均
+        if sh_index_returns and date in sh_index_returns:
+            benchmark_return = sh_index_returns[date]
+        else:
+            benchmark_return = float(np.mean(all_changes)) if all_changes else 0.0
 
         capital *= (1 + strategy_daily_return)
+        daily_nav.append(capital)
         daily_returns.append(strategy_daily_return)
         benchmark_returns.append(benchmark_return)
 
@@ -539,18 +561,32 @@ def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_
                     trade_count_actual += 1
                 capital -= sell_trade_cost
                 stop_loss_triggered = True
-                stop_loss_cooldown = params.hold_days
+                # 动态冷静期：基础 2 天，后续根据市场状态调整
+                stop_loss_cooldown = max(params.cooldown_days if params.cooldown_days else 2, 2)
                 position_hold_counter = 0
                 current_positions = {}
 
-        # Step 3: 持仓天数递减
+        # Step 3: 紧急退出检查（持仓中板块评分暴跌则提前退出）
         if current_positions and position_hold_counter > 0:
-            position_hold_counter -= 1
+            emergency_exit = False
+            exit_score = params.emergency_exit_score if params.emergency_exit_score is not None else 1.0
+            # 预计算板块评分（用 sector_data 中的 change 作为代理）
+            for sector_code in current_positions:
+                sector_info = next((s for s in sector_data if s.get("sector_code") == sector_code), None)
+                if sector_info:
+                    change = abs(sector_info.get("index_change_pct", 0))
+                    # 单日跌幅超过 5% 视为紧急退出信号
+                    if change >= 5.0 and sector_info.get("index_change_pct", 0) < -5.0:
+                        emergency_exit = True
+                        break
+            if emergency_exit:
+                position_hold_counter = 0
+            else:
+                position_hold_counter -= 1
 
-        # Step 4: 更新冷静期
+        # Step 4: 更新止损冷静期（动态：根据市场状态调整）
         if stop_loss_cooldown > 0:
             stop_loss_cooldown -= 1
-            # 冷静期结束后自动重置止损状态，允许重新建仓
             if stop_loss_cooldown <= 0:
                 stop_loss_triggered = False
 
@@ -558,38 +594,62 @@ def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_
         if rebalance_cooldown > 0:
             rebalance_cooldown -= 1
 
-        # Step 6: 检查是否需要调仓
+        # Step 6: 计算市场状态（在信号生成之前）
         day_signals = []
+        market_regime = "NEUTRAL"
         if not stop_loss_triggered and position_hold_counter <= 0 and stop_loss_cooldown <= 0 and rebalance_cooldown <= 0:
-            signals = scoring_model.calculate_daily_signals(
+            # 先做一次快速评分以确定市场状态
+            quick_signals = scoring_model.calculate_daily_signals(
                 sector_data=sector_data,
                 strategy_type=strategy_type,
                 params=params,
                 signal_date=date,
                 current_positions=current_positions,
             )
+            # 获取评分后的板块数据（calculate_daily_signals 内部已评分）
+            # 这里需要重新获取评分结果来判断市场状态
+            # 简化方式：直接用 sector_data 的 change 统计来判断
+            total_sectors = len(sector_data)
+            up_count = sum(1 for s in sector_data if s.get("index_change_pct", 0) > 0)
+            up_ratio = up_count / max(total_sectors, 1)
+            avg_change = sum(s.get("index_change_pct", 0) for s in sector_data) / max(total_sectors, 1)
 
-            new_positions = {}
-            buy_signals = [s for s in signals if s.direction.value == "BUY"]
-            if buy_signals:
-                new_positions = {sig.sector_code: sig.position_ratio for sig in buy_signals}
+            bull_thr = params.market_bull_threshold if params.market_bull_threshold is not None else 0.5
+            bear_thr = params.market_bear_threshold if params.market_bear_threshold is not None else 0.4
 
-            for sig in signals:
-                day_signals.append({
-                    "sector_code": sig.sector_code,
-                    "sector_name": sig.sector_name,
-                    "direction": sig.direction.value,
-                    "score": round(sig.score, 2),
-                    "reason": sig.reason,
-                })
+            # 简化市场状态判断（基于涨跌比和平均涨跌）
+            if up_ratio >= bull_thr and avg_change > 0:
+                market_regime = "BULL"
+            elif up_ratio < bear_thr and avg_change < 0:
+                market_regime = "BEAR"
+            else:
+                market_regime = "NEUTRAL"
 
-            # 执行调仓（有新买入 OR 有卖出信号需要执行）
-            sell_codes = [s.sector_code for s in signals if s.direction.value == "SELL"]
-            if new_positions or sell_codes:
-                # 卖出旧持仓
-                sell_trade_cost = 0.0
-                for sector_code, weight in current_positions.items():
-                    if sector_code not in new_positions:
+            regime_history.append(market_regime)
+            if len(regime_history) > 5:
+                regime_history.pop(0)
+
+            # 空仓确认：连续 2 天 BEAR 才触发空仓
+            confirm_days = params.favorable_confirm_days if params.favorable_confirm_days is not None else 2
+            confirmed_bear = len(regime_history) >= confirm_days and all(
+                r == "BEAR" for r in regime_history[-confirm_days:]
+            )
+            # 恢复确认：连续 N 天非 BEAR，或当前为 BULL（牛市首日即入）
+            confirmed_recover = (
+                (len(regime_history) >= confirm_days and all(r != "BEAR" for r in regime_history[-confirm_days:]))
+                or market_regime == "BULL"
+            )
+
+            # 空仓超时：超过 max_empty_days 且市场非 BEAR，强制试探建仓
+            max_empty = params.max_empty_days if params.max_empty_days is not None else 10
+            force_entry = empty_days >= max_empty and market_regime != "BEAR"
+
+            if confirmed_bear and not force_entry and params.allow_empty:
+                # 确认熊市 → 空仓
+                if current_positions:
+                    # 渐进退出：清仓
+                    sell_trade_cost = 0.0
+                    for sector_code, weight in current_positions.items():
                         sell_amount = capital * weight
                         cost = _calc_trade_cost(sell_amount, params.commission_rate, params.stamp_tax_rate, params.slippage_rate, is_sell=True)
                         sell_trade_cost += cost["total"]
@@ -597,25 +657,101 @@ def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_
                         total_stamp_tax += cost["stamp_tax"]
                         total_slippage_cost += cost["slippage"]
                         trade_count_actual += 1
-
-                # 买入新持仓
-                buy_trade_cost = 0.0
-                for sector_code, weight in new_positions.items():
-                    buy_amount = capital * weight
-                    cost = _calc_trade_cost(buy_amount, params.commission_rate, params.stamp_tax_rate, params.slippage_rate, is_sell=False)
-                    buy_trade_cost += cost["total"]
-                    total_commission += cost["commission"]
-                    total_slippage_cost += cost["slippage"]
-                    trade_count_actual += 1
-
-                capital -= (sell_trade_cost + buy_trade_cost)
-                if new_positions:
-                    current_positions = new_positions
-                    position_hold_counter = params.hold_days
-                    stop_loss_triggered = False
-                    rebalance_cooldown = params.cooldown_days if params.cooldown_days else 2
-                else:
+                    capital -= sell_trade_cost
                     current_positions = {}
+                    day_signals.append({"sector_code": "ALL", "sector_name": "全部", "direction": "SELL", "score": 0, "reason": f"市场BEAR空仓, 上涨占比{up_ratio:.0%}"})
+                empty_days += 1
+            else:
+                # 非确认熊市 → 正常调仓或试探建仓
+                signals = quick_signals
+
+                # force_entry: 空仓超时 → 缩减仓位试探建仓
+                if force_entry and signals:
+                    scaled = []
+                    for sig in signals:
+                        if sig.direction == SignalDirection.BUY:
+                            scaled.append(TradeSignal(
+                                signal_date=sig.signal_date, strategy_type=sig.strategy_type,
+                                sector_code=sig.sector_code, sector_name=sig.sector_name,
+                                direction=sig.direction, position_ratio=round(sig.position_ratio * 0.5, 4),
+                                score=sig.score, reason=f"{sig.reason} [超时试探50%]",
+                                rank=sig.rank, total_sectors=sig.total_sectors,
+                            ))
+                        else:
+                            scaled.append(sig)
+                    signals = scaled
+
+                new_positions = {}
+                buy_signals = [s for s in signals if s.direction.value == "BUY"]
+                if buy_signals:
+                    new_positions = {sig.sector_code: sig.position_ratio for sig in buy_signals}
+
+                for sig in signals:
+                    day_signals.append({
+                        "sector_code": sig.sector_code,
+                        "sector_name": sig.sector_name,
+                        "direction": sig.direction.value,
+                        "score": round(sig.score, 2),
+                        "reason": sig.reason,
+                    })
+
+                # 执行调仓（跳过无变化的重平衡）
+                sell_codes = [s.sector_code for s in signals if s.direction.value == "SELL"]
+                same_codes = set(new_positions.keys()) == set(current_positions.keys()) if new_positions and current_positions else False
+                same_ratios = same_codes and all(
+                    abs(new_positions.get(k, 0) - current_positions.get(k, 0)) < 0.01
+                    for k in new_positions
+                ) if same_codes else False
+                if same_ratios and not sell_codes:
+                    # 新旧持仓完全一致，跳过调仓避免无意义交易成本
+                    pass
+                elif new_positions or sell_codes:
+                    # 卖出旧持仓
+                    sell_trade_cost = 0.0
+                    for sector_code, weight in current_positions.items():
+                        if sector_code not in new_positions:
+                            sell_amount = capital * weight
+                            cost = _calc_trade_cost(sell_amount, params.commission_rate, params.stamp_tax_rate, params.slippage_rate, is_sell=True)
+                            sell_trade_cost += cost["total"]
+                            total_commission += cost["commission"]
+                            total_stamp_tax += cost["stamp_tax"]
+                            total_slippage_cost += cost["slippage"]
+                            trade_count_actual += 1
+
+                    # 买入新持仓
+                    buy_trade_cost = 0.0
+                    for sector_code, weight in new_positions.items():
+                        buy_amount = capital * weight
+                        cost = _calc_trade_cost(buy_amount, params.commission_rate, params.stamp_tax_rate, params.slippage_rate, is_sell=False)
+                        buy_trade_cost += cost["total"]
+                        total_commission += cost["commission"]
+                        total_slippage_cost += cost["slippage"]
+                        trade_count_actual += 1
+
+                    capital -= (sell_trade_cost + buy_trade_cost)
+                    if new_positions:
+                        current_positions = new_positions
+                        # 动态持仓天数
+                        base_hold = params.hold_days
+                        if market_regime == "BULL":
+                            dynamic_hold = max(base_hold - 1, 1)
+                        elif market_regime == "BEAR":
+                            dynamic_hold = base_hold + 1
+                        else:
+                            dynamic_hold = base_hold
+                        position_hold_counter = dynamic_hold
+                        stop_loss_triggered = False
+                        rebalance_cooldown = params.cooldown_days if params.cooldown_days else 2
+                        empty_days = 0  # 建仓成功，重置空仓计数
+                    else:
+                        current_positions = {}
+                        empty_days += 1
+                else:
+                    # 无调仓信号但有持仓 → 保持
+                    if not current_positions:
+                        empty_days += 1
+                    else:
+                        empty_days = 0
 
         # 记录每日信号
         daily_signals_out.append({
@@ -646,11 +782,11 @@ def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_
     annual_return = (1 + total_return) ** (1 / trading_years) - 1 if total_return > -1 else -1.0
 
     max_drawdown = 0.0
-    if nav_curve:
-        nav_array = np.array([p["nav"] for p in nav_curve])
+    if daily_nav:
+        nav_array = np.array(daily_nav)
         peak = np.maximum.accumulate(nav_array)
         drawdown = (nav_array - peak) / np.where(peak > 0, peak, 1)
-        max_drawdown = abs(drawdown.min()) if len(drawdown) > 0 else 0
+        max_drawdown = abs(float(drawdown.min())) if len(drawdown) > 0 else 0
 
     sharpe = 0.0
     if daily_returns:
@@ -660,6 +796,45 @@ def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_
             sharpe = (np.mean(daily_arr) * TRADING_DAYS_PER_YEAR) / (std * np.sqrt(TRADING_DAYS_PER_YEAR))
 
     win_rate = float(np.mean(np.array(daily_returns) > 0)) if daily_returns else 0
+
+    # 新增统计指标
+    turnover_rate = 0.0
+    empty_days_pct = 0.0
+    profit_factor = 0.0
+    max_consecutive_wins = 0
+    max_consecutive_losses = 0
+
+    if daily_returns:
+        daily_arr = np.array(daily_returns)
+        # 换手率：总交易金额 / 初始资金
+        total_buy_amount = sum(
+            abs(daily_arr[i]) * (daily_nav[i - 1] if i > 0 else initial_capital)
+            for i in range(len(daily_arr)) if abs(daily_arr[i]) > 0.001
+        )
+        turnover_rate = round(total_buy_amount / max(initial_capital, 1), 2)
+
+        # 空仓天数占比
+        empty_days_count = sum(1 for d in daily_signals_out if not d.get("positions"))
+        empty_days_pct = round(empty_days_count / max(len(daily_signals_out), 1), 4)
+
+        # 盈亏比
+        gains = float(daily_arr[daily_arr > 0].sum()) if (daily_arr > 0).any() else 0
+        losses = float(abs(daily_arr[daily_arr < 0].sum())) if (daily_arr < 0).any() else 0
+        profit_factor = round(gains / max(losses, 1e-10), 2)
+
+        # 最大连续盈亏天数
+        cur_wins = cur_losses = 0
+        for r in daily_arr:
+            if r > 0:
+                cur_wins += 1
+                cur_losses = 0
+            elif r < 0:
+                cur_losses += 1
+                cur_wins = 0
+            else:
+                cur_wins = cur_losses = 0
+            max_consecutive_wins = max(max_consecutive_wins, cur_wins)
+            max_consecutive_losses = max(max_consecutive_losses, cur_losses)
 
     # 统计买入/卖出信号数量
     buy_count = 0
@@ -691,6 +866,11 @@ def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_
         "total_slippage_cost": round(total_slippage_cost, 2),
         "total_trade_cost": round(total_commission + total_stamp_tax + total_slippage_cost, 2),
         "trade_count_actual": trade_count_actual,
+        "turnover_rate": turnover_rate,
+        "empty_days_pct": empty_days_pct,
+        "profit_factor": profit_factor,
+        "max_consecutive_wins": max_consecutive_wins,
+        "max_consecutive_losses": max_consecutive_losses,
         "params": {
             "top_n": params.top_n,
             "max_position": params.max_position,
@@ -1294,35 +1474,72 @@ async def get_replay_day_data(date: str, sector_code: str = None):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _run_optimization(daily_data, sorted_dates, strategy_type, initial_capital, n_trials):
-    """执行 Optuna 优化（同步函数，在线程池中运行）"""
+# 全局寻优进度状态
+_optimization_progress = {
+    "active": False,
+    "completed": 0,
+    "total": 0,
+    "best_return": 0.0,
+    "best_sharpe": 0.0,
+}
+
+
+def _run_optimization(daily_data, sorted_dates, strategy_type, initial_capital, n_trials, sh_index_returns=None, n_jobs=1):
+    """执行 Optuna 优化（支持并行 + 进度日志 + 结果缓存）
+
+    Args:
+        n_jobs: 并行数。1=串行可复现，>1=并行但结果不可复现
+    """
     import optuna
     optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+    if n_jobs > 1:
+        logger.warning(f"并行模式(n_jobs={n_jobs})下结果不可复现，如需复现请设 n_jobs=1")
+    n_jobs = min(n_jobs, n_trials)
+    _optimization_progress.update({
+        "active": True, "completed": 0, "total": n_trials,
+        "best_return": 0.0, "best_sharpe": 0.0,
+    })
 
     def objective(trial):
         params_dict = _suggest_params(trial, strategy_type)
         params = StrategyParams(**params_dict)
-        result = _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_capital)
+        result = _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_capital,
+                                     sh_index_returns=sh_index_returns)
         risk_adj = result["total_return"] / max(result["max_drawdown"], 0.01)
+
+        # 缓存回测结果到 trial user attributes，避免后续重算
+        trial.set_user_attr("total_return", result["total_return"])
+        trial.set_user_attr("annual_return", result["annual_return"])
+        trial.set_user_attr("max_drawdown", result["max_drawdown"])
+        trial.set_user_attr("sharpe_ratio", result["sharpe_ratio"])
+        trial.set_user_attr("win_rate", result["win_rate"])
+        trial.set_user_attr("trade_count", result["trade_count_actual"])
+        trial.set_user_attr("params", params_dict)
+
+        # 更新全局进度
+        _optimization_progress["completed"] += 1
+        if result["total_return"] > _optimization_progress["best_return"]:
+            _optimization_progress["best_return"] = result["total_return"]
+            _optimization_progress["best_sharpe"] = result["sharpe_ratio"]
+
         return risk_adj
 
     study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=42))
-    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+    study.optimize(objective, n_trials=n_trials, n_jobs=n_jobs, show_progress_bar=False)
 
+    # 从缓存的 trial attributes 读取结果（不重跑回测）
     all_results = []
     for trial in study.trials:
-        if trial.state == optuna.trial.TrialState.COMPLETE:
-            params_dict = _suggest_params(trial, strategy_type)
-            params = StrategyParams(**params_dict)
-            result = _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_capital)
+        if trial.state == optuna.trial.TrialState.COMPLETE and trial.user_attrs:
             all_results.append({
-                "params": params_dict,
-                "total_return": result["total_return"],
-                "annual_return": result["annual_return"],
-                "max_drawdown": result["max_drawdown"],
-                "sharpe_ratio": result["sharpe_ratio"],
-                "win_rate": result["win_rate"],
-                "trade_count": result["trade_count_actual"],
+                "params": trial.user_attrs.get("params", {}),
+                "total_return": trial.user_attrs.get("total_return", 0),
+                "annual_return": trial.user_attrs.get("annual_return", 0),
+                "max_drawdown": trial.user_attrs.get("max_drawdown", 0),
+                "sharpe_ratio": trial.user_attrs.get("sharpe_ratio", 0),
+                "win_rate": trial.user_attrs.get("win_rate", 0),
+                "trade_count": trial.user_attrs.get("trade_count", 0),
                 "risk_adj_score": round(trial.value, 4) if trial.value else 0,
             })
 
@@ -1330,9 +1547,10 @@ def _run_optimization(daily_data, sorted_dates, strategy_type, initial_capital, 
 
     best_params_dict = _suggest_params(study.best_trial, strategy_type)
     best_params = StrategyParams(**best_params_dict)
-    final_result = _run_backtest_core(daily_data, sorted_dates, strategy_type, best_params, initial_capital, return_full=True)
+    final_result = _run_backtest_core(daily_data, sorted_dates, strategy_type, best_params, initial_capital, return_full=True, sh_index_returns=sh_index_returns)
 
-    logger.info(f"自动寻优完成: {len(all_results)} 次有效试验, 最优收益={final_result['total_return']*100:.2f}%, 回撤={final_result['max_drawdown']*100:.2f}%")
+    logger.info(f"自动寻优完成: {len(all_results)} 次有效试验({n_jobs}线程并行), 最优收益={final_result['total_return']*100:.2f}%, 回撤={final_result['max_drawdown']*100:.2f}%")
+    _optimization_progress["active"] = False
 
     return {
         "code": 200,
@@ -1342,6 +1560,12 @@ def _run_optimization(daily_data, sorted_dates, strategy_type, initial_capital, 
             "all_results": all_results,
         },
     }
+
+
+@app.get("/data/replay/optimize-progress")
+async def get_optimize_progress():
+    """获取当前寻优进度"""
+    return {"code": 200, "data": dict(_optimization_progress)}
 
 
 @app.post("/data/replay/strategy-optimize")
@@ -1356,6 +1580,7 @@ async def optimize_strategy_params(request_body: dict):
         strategy_type_str = request_body.get("strategy_type", "MODERATE")
         initial_capital = request_body.get("initial_capital", 1000000.0)
         n_trials = request_body.get("n_trials", 50)
+        n_jobs = request_body.get("n_jobs", 1)  # 默认串行可复现
 
         if not start_date or not end_date:
             raise HTTPException(status_code=400, detail="必须提供 start_date 和 end_date")
@@ -1374,9 +1599,16 @@ async def optimize_strategy_params(request_body: dict):
 
         # 放到线程池执行，避免阻塞事件循环
         loop = asyncio.get_event_loop()
+
+        # 获取上证指数数据作为基准
+        sh_returns = await loop.run_in_executor(
+            None,
+            lambda: influx_query.query_sh_index_returns(sorted_dates[0], sorted_dates[-1]),
+        )
+
         result = await loop.run_in_executor(
             None,
-            lambda: _run_optimization(daily_data, sorted_dates, strategy_type, initial_capital, n_trials),
+            lambda: _run_optimization(daily_data, sorted_dates, strategy_type, initial_capital, n_trials, sh_index_returns=sh_returns, n_jobs=n_jobs),
         )
         return result
     except HTTPException:
@@ -1398,18 +1630,18 @@ def _suggest_params(trial, strategy_type: StrategyType) -> dict:
     }
 
     if strategy_type == StrategyType.AGGRESSIVE:
-        min_score = trial.suggest_float("min_score_threshold", 0.5, 3.0, step=0.5)
+        min_score = trial.suggest_float("min_score_threshold", 0.5, 2.5, step=0.5)
         return {
             **base,
             "top_n": trial.suggest_int("top_n", 1, 3),
             "max_position": 1.0,
-            "hold_days": trial.suggest_int("hold_days", 2, 5),
-            "capital_pct": 0.5,
-            "stop_loss": trial.suggest_float("stop_loss", 0.05, 0.20, step=0.01),
+            "hold_days": trial.suggest_int("hold_days", 3, 6),
+            "capital_pct": trial.suggest_float("capital_pct", 0.5, 1.0, step=0.1),
+            "stop_loss": trial.suggest_float("stop_loss", 0.05, 0.12, step=0.01),
             "min_score_threshold": min_score,
             "score_gap_threshold": trial.suggest_float("score_gap_threshold", 0.5, 2.0, step=0.5),
             "cooldown_days": trial.suggest_int("cooldown_days", 1, 3),
-            "min_score_keep": min(min_score + 0.5, 3.0),
+            "min_score_keep": min(min_score + 0.5, 2.5),
         }
     elif strategy_type == StrategyType.MODERATE:
         min_score = trial.suggest_float("min_score_threshold", 1.0, 3.0, step=0.5)
@@ -1472,7 +1704,17 @@ async def replay_strategy_overlay(request_body: dict):
         sorted_dates = sorted(daily_data.keys())
         trading_days = len(sorted_dates)
 
-        result_data = _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_capital, return_full=True)
+        loop = asyncio.get_event_loop()
+        sh_returns = await loop.run_in_executor(
+            None,
+            lambda: influx_query.query_sh_index_returns(sorted_dates[0], sorted_dates[-1]),
+        )
+
+        result_data = await loop.run_in_executor(
+            None,
+            lambda: _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_capital,
+                                        return_full=True, sh_index_returns=sh_returns),
+        )
 
         # 转换为前端期望的嵌套格式
         nav_curve = result_data.pop("nav_curve", [])
