@@ -1,6 +1,6 @@
 # 策略引擎服务设计文档
 
-> 版本: v1.4 | 更新日期: 2026-05-12 | 更新: _rotation_core统一方法、use_zscore_normalization
+> 版本: v1.5 | 更新日期: 2026-05-28 | 更新: 动态市场状态、空仓管理、动态仓位/持仓/调仓
 
 ---
 
@@ -56,6 +56,12 @@ services/strategy/app/
 | `relative_score_gap_ratio` | 相对缺口：比例 × max(ε, \|当前持仓最高分\|, \|新建议最高分\|, 1) |
 | `use_inverse_vol_weights` | 入选标的中是否按波动倒数分配 `position_ratio`（无 `_history` 时近似等权） |
 | `use_zscore_normalization` | 是否对因子评分进行截面Z-Score归一化（将硬阈值分替换为板块间相对排名得分） |
+| `market_bull_threshold` | 上涨板块占比达到此值判定为牛市（默认 0.5） |
+| `market_bear_threshold` | 上涨板块占比低于此值判定为熊市（默认 0.4） |
+| `favorable_confirm_days` | 连续 N 天同向状态才确认（默认 2，防摇摆） |
+| `max_empty_days` | 最大空仓天数，超时强制试探建仓（默认 10） |
+| `capital_pct_bull_boost` | 牛市加仓比例（默认 0.3） |
+| `emergency_exit_score` | 持仓板块评分低于此值触发紧急退出（默认 1.0） |
 
 默认配置见源码；与旧「四维手写权重」文档不一致时以代码为准。
 
@@ -70,20 +76,20 @@ services/strategy/app/
 ### 3.1 激进轮动策略
 
 ```
-目标: 追求最大收益，高频率满仓轮换
+目标: 追求最大收益，高频率满仓轮换，动态适应市场状态
 
 参数:
-  top_n = 2              # 仅取前2名
+  top_n = 2              # 仅取前2名（牛市自动+1）
   max_position = 100%     # 满仓
-  hold_days = 3           # 持有1-3日
+  hold_days = 2           # 持有1-2日（动态调整）
   stop_loss = 12%         # 止损12%
-  capital_pct = 50%      # 资金使用比例
-  min_score_threshold = 2.0   # 最小评分阈值
-  score_gap_threshold = 1.0   # 与相对缺口取较大，见 StrategyParams
-  cooldown_days = 2       # 调仓冷却期
+  capital_pct = 70%      # 基础资金使用比例（牛市可达100%）
+  min_score_threshold = 1.5   # 最小评分阈值
+  score_gap_threshold = 1.0   # 与相对缺口取较大（牛市×0.7，熊市×1.5）
+  cooldown_days = 1       # 调仓冷却期
   keep_overlap = true     # 保持重叠持仓
-  allow_empty = true     # 允许空仓
-  min_score_keep = 3.0   # 保持持仓的最小评分
+  allow_empty = true     # 允许空仓（连续2天BEAR确认）
+  min_score_keep = 2.5   # 保持持仓的最小评分
   commission_rate = 0.3‰ # 佣金费率（万三）
   stamp_tax_rate = 1.0‰  # 印花税率（千一，仅卖出）
   slippage_rate = 1.0‰   # 滑点费率（千一）
@@ -452,21 +458,47 @@ POST /data/replay/strategy-overlay  - 策略叠加回放
      b. 更新资本（加上当日收益）
      c. 更新历史最高净值
      d. 止损检查（回撤超线 → 卖出所有持仓 + 计算交易成本）
-     e. 持仓天数递减（有持仓且计数器>0时才递减）
-     f. 更新冷静期（止损冷静期递减）
-     g. 检查调仓（冷静期结束且持仓天数≤0）
-        - 新仓位权重直接取自当日 BUY 信号的 `position_ratio`（与策略层一致）
-        - 计算卖出旧持仓成本
-        - 计算买入新持仓成本
-        - 扣除总交易成本
-     h. 记录净值曲线
+     e. 紧急退出检查（持仓板块单日跌幅>5% → 立即允许调仓）
+     f. 持仓天数递减（有持仓且计数器>0时才递减）
+     g. 更新冷静期（止损冷静期递减，动态根据市场状态调整）
+     h. 市场状态评估（上涨占比 → BULL/NEUTRAL/BEAR）
+     i. 检查调仓（冷静期结束且持仓天数≤0）:
+        - 连续2天BEAR确认 → 空仓（清仓）
+        - 空仓超10天 + NEUTRAL → 50%仓位试探建仓
+        - BULL → capital_pct + 0.3（上限100%），top_n + 1，hold_days - 1
+        - 动态 score_gap（牛市×0.7，熊市×1.5）
+        - 计算交易成本并扣除
+     j. 记录净值曲线（逐日记录，用于精确最大回撤）
   4. 计算绩效指标:
      - 总收益率 = 最终资本 / 初始资本 - 1
      - 年化收益率 = (1 + 总收益率)^(252/交易日数) - 1
-     - 最大回撤 = 基于净值曲线计算
+     - 最大回撤 = 基于逐日NAV计算（非采样点）
      - 夏普比率 = (日均收益 × 252) / (日收益标准差 × √252)
      - 胜率 = 正收益天数占比
+     - 新增: 换手率、空仓天数占比、盈亏比、最大连续盈/亏天数
 ```
+
+### 6.1.1 动态市场状态
+
+市场状态由上涨板块占比和平均涨跌幅决定:
+
+| 状态 | AGGRESSIVE 条件 | 行为影响 |
+|------|----------------|---------|
+| BULL | 上涨占比 ≥ 50% 且 avg > 0 | capital_pct + 30%，top_n + 1，hold_days - 1，score_gap × 0.7 |
+| NEUTRAL | 不满足 BULL/BEAR | 标准参数 |
+| BEAR | 上涨占比 < 40% 且 avg < 0 | 空仓（连续2天确认），score_gap × 1.5 |
+
+空仓管理:
+- 确认: 连续 `favorable_confirm_days`（默认2）天 BEAR 才触发空仓
+- 恢复: 连续2天非 BEAR 才恢复建仓
+- 超时: 空仓超过 `max_empty_days`（默认10）天且市场为 NEUTRAL → 强制50%仓位建仓
+- 紧急退出: 持仓板块单日跌幅 > 5% → 立即允许调仓（跳过 hold_days）
+
+动态参数计算:
+- `dynamic_capital_pct`: BULL = min(base + 0.3, 1.0)，NEUTRAL = base，BEAR = 0
+- `dynamic_top_n`: BULL = min(base + 1, 5)，其余 = base
+- `dynamic_hold_days`: BULL = max(base - 1, 1)，BEAR = base + 1，其余 = base
+- `dynamic_score_gap`: BULL = floor × 0.7，BEAR = floor × 1.5，其余 = floor
 
 ### 6.2 交易成本计算规则
 
@@ -498,12 +530,21 @@ POST /data/replay/strategy-overlay  - 策略叠加回放
 
 ### 6.3 回测结果统计
 
-回测结果包含以下交易成本统计字段:
+回测结果包含以下字段:
+
+交易成本统计:
 - `total_commission`: 累计佣金
-- `total_stamp_tax`: 累计印花税  
+- `total_stamp_tax`: 累计印花税
 - `total_slippage_cost`: 累计滑点成本
 - `total_trade_cost`: 累计总交易成本
 - `trade_count_actual`: 实际交易笔数
+
+新增统计指标:
+- `turnover_rate`: 换手率（总交易金额 / 初始资金）
+- `empty_days_pct`: 空仓天数占比
+- `profit_factor`: 盈亏比（盈利总额 / 亏损总额）
+- `max_consecutive_wins`: 最大连续盈利天数
+- `max_consecutive_losses`: 最大连续亏损天数
 
 ---
 
