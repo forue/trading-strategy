@@ -2,6 +2,7 @@
 
 负责接收策略信号，组装市场上下文，调用 LLM 生成解读。
 """
+import asyncio
 import json
 import re
 from typing import Optional
@@ -84,18 +85,26 @@ class SignalAnalyzer:
             return self._fallback_analysis(signal)
 
     async def analyze_signals(self, signals: list[dict], contexts: dict[str, MarketContext] = None) -> list[SignalAnalysis]:
-        """批量解读信号"""
+        """批量解读信号（并行执行）"""
         if contexts is None:
             contexts = {}
 
-        results = []
+        tasks = []
         for signal in signals:
             sector_code = signal.get("sector_code", "")
             context = contexts.get(sector_code, MarketContext())
-            analysis = await self.analyze_signal(signal, context)
-            results.append(analysis)
+            tasks.append(self.analyze_signal(signal, context))
 
-        return results
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # 将异常转为 fallback 分析
+        final = []
+        for i, r in enumerate(results):
+            if isinstance(r, Exception):
+                logger.error(f"信号解读异常: {r}")
+                final.append(self._fallback_analysis(signals[i]))
+            else:
+                final.append(r)
+        return final
 
     def _parse_response(self, response: LLMResponse, signal: dict) -> SignalAnalysis:
         """解析 LLM 响应"""

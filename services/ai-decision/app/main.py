@@ -144,7 +144,7 @@ def _start_consumer():
                         _handle_signals(message), _main_loop
                     )
                     try:
-                        future.result(timeout=30)
+                        future.result(timeout=120)
                     except Exception as e:
                         logger.error(f"信号处理超时: {e}")
         except Exception as e:

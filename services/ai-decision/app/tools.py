@@ -27,6 +27,14 @@ def _safe_float(val, default=0.0) -> float:
     except (TypeError, ValueError):
         return default
 
+def _clamp_days(val, default=10, maximum=60) -> int:
+    """限制 days 参数在合理范围内"""
+    try:
+        d = int(val)
+        return max(1, min(d, maximum))
+    except (TypeError, ValueError):
+        return default
+
 # 交易日历缓存（模块级，跨请求复用）
 _trade_dates_cache: list[str] = []
 _trade_dates_cache_date: str = ""  # 缓存日期 YYYY-MM-DD
@@ -832,7 +840,7 @@ class MCPToolExecutor:
 
     async def _get_sector_history(self, args: dict) -> dict:
         sector_code = args.get("sector_code", "")
-        days = args.get("days", 20)
+        days = _clamp_days(args.get("days"), default=20, maximum=60)
         try:
             await self._ensure_trade_dates()
             end = _get_latest_trading_day()
@@ -955,7 +963,7 @@ class MCPToolExecutor:
 
     async def get_trading_dates(self, args: dict) -> dict:
         """获取交易日历"""
-        days = args.get("days", 20)
+        days = _clamp_days(args.get("days"), default=20, maximum=60)
         try:
             resp = await self._client.get(f"{self.data_collector_url}/trade-dates", params={"days": days}, timeout=10)
             data = resp.json()
@@ -976,14 +984,14 @@ class MCPToolExecutor:
     async def compare_sectors(self, args: dict) -> dict:
         """对比多个板块的近期表现"""
         sector_codes = args.get("sector_codes", [])
-        days = args.get("days", 5)
+        days = _clamp_days(args.get("days"), default=5, maximum=30)
         if not sector_codes:
             return {"error": "请提供至少一个板块代码"}
         if len(sector_codes) > 10:
             return {"error": "最多对比10个板块"}
 
-        results = []
-        for code in sector_codes:
+        # 并行获取所有板块数据
+        async def _fetch_one(code):
             try:
                 end = _get_latest_trading_day()
                 start = (datetime.now() - timedelta(days=days * 2)).strftime("%Y-%m-%d")
@@ -997,7 +1005,7 @@ class MCPToolExecutor:
                     if records:
                         changes = [r.get("index_change_pct", 0) for r in records]
                         inflows = [r.get("main_net_inflow", 0) for r in records]
-                        results.append({
+                        return {
                             "sector_code": code,
                             "sector_name": records[-1].get("sector_name", code),
                             "latest_date": records[-1].get("date", ""),
@@ -1008,9 +1016,13 @@ class MCPToolExecutor:
                             "total_main_inflow_yi": round(sum(inflows) / 1e8, 2),
                             "consecutive_up": _count_consecutive(changes, lambda x: x > 0),
                             "consecutive_down": _count_consecutive(changes, lambda x: x < 0),
-                        })
+                        }
             except Exception as e:
-                results.append({"sector_code": code, "error": str(e)})
+                return {"sector_code": code, "error": str(e)}
+            return None
+
+        all_results = await asyncio.gather(*[_fetch_one(c) for c in sector_codes])
+        results = [r for r in all_results if r is not None]
 
         # 按总涨跌幅排序
         results.sort(key=lambda x: x.get("total_change_pct", 0) or 0, reverse=True)
@@ -1019,7 +1031,7 @@ class MCPToolExecutor:
     async def get_capital_flow_trend(self, args: dict) -> dict:
         """分析资金流向趋势"""
         sector_code = args.get("sector_code")
-        days = args.get("days", 10)
+        days = _clamp_days(args.get("days"), default=10, maximum=60)
 
         try:
             if sector_code:
@@ -1069,7 +1081,7 @@ class MCPToolExecutor:
     async def get_signal_history(self, args: dict) -> dict:
         """获取历史信号记录"""
         strategy_type = args.get("strategy_type", "MODERATE")
-        days = args.get("days", 30)
+        days = _clamp_days(args.get("days"), default=30, maximum=90)
         try:
             end_date = datetime.now().strftime("%Y-%m-%d")
             start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
@@ -1101,7 +1113,7 @@ class MCPToolExecutor:
         """计算技术指标"""
         sector_code = args.get("sector_code", "")
         indicators = args.get("indicators", ["MA", "MACD", "RSI", "BOLL"])
-        days = args.get("days", 60)
+        days = _clamp_days(args.get("days"), default=60, maximum=120)
         if not sector_code:
             return {"error": "请提供板块代码"}
 
@@ -1333,7 +1345,7 @@ class MCPToolExecutor:
 
     async def _get_sector_rotation(self, args: dict) -> dict:
         """板块轮动检测：动量加速/减速、资金方向转变"""
-        days = args.get("days", 10)
+        days = _clamp_days(args.get("days"), default=10, maximum=60)
         try:
             await self._ensure_trade_dates()
             end = _get_latest_trading_day()
@@ -1351,11 +1363,11 @@ class MCPToolExecutor:
             sectors_today = all_data["data"][:20]
             start = (datetime.now() - timedelta(days=days * 2)).strftime("%Y-%m-%d")
 
-            rotation_signals = []
-            for s in sectors_today:
+            # 并行获取所有板块历史数据
+            async def _fetch_one(s):
                 code = s.get("sector_code", "")
                 if not code:
-                    continue
+                    return None
                 try:
                     hist_resp = await self._client.get(
                         f"{self.data_collector_url}/query/sector-data",
@@ -1363,21 +1375,19 @@ class MCPToolExecutor:
                     )
                     hist_data = hist_resp.json()
                     if not (hist_data.get("code") == 200 and hist_data.get("data")):
-                        continue
+                        return None
                     records = hist_data["data"][-days:]
                     if len(records) < 5:
-                        continue
+                        return None
 
                     changes = [r.get("index_change_pct", 0) for r in records]
                     inflows = [r.get("main_net_inflow", 0) for r in records]
 
-                    # 前半段 vs 后半段动量
                     mid = len(changes) // 2
                     early_momentum = sum(changes[:mid]) / max(mid, 1)
                     late_momentum = sum(changes[mid:]) / max(len(changes) - mid, 1)
                     momentum_change = late_momentum - early_momentum
 
-                    # 资金方向变化
                     early_flow = sum(inflows[:mid])
                     late_flow = sum(inflows[mid:])
                     flow_reversal = (early_flow > 0 and late_flow < 0) or (early_flow < 0 and late_flow > 0)
@@ -1393,16 +1403,20 @@ class MCPToolExecutor:
                         signal = "资金转向流出（警惕）"
 
                     if signal:
-                        rotation_signals.append({
+                        return {
                             "sector_code": code,
                             "sector_name": s.get("sector_name", ""),
                             "signal": signal,
                             "momentum_change": round(momentum_change, 2),
                             "recent_flow_yi": round(late_flow / 1e8, 2),
                             "latest_change_pct": round(changes[-1], 2),
-                        })
+                        }
                 except Exception:
-                    continue
+                    pass
+                return None
+
+            all_results = await asyncio.gather(*[_fetch_one(s) for s in sectors_today])
+            rotation_signals = [r for r in all_results if r is not None]
 
             # 按动量变化排序
             rotation_signals.sort(key=lambda x: abs(x.get("momentum_change", 0)), reverse=True)
@@ -1571,13 +1585,13 @@ class MCPToolExecutor:
     async def get_bond_spread(self, args: dict) -> dict:
         """中美国债收益率对比"""
         from .external_data import get_china_us_bond_spread
-        days = args.get("days", 30)
+        days = _clamp_days(args.get("days"), default=30, maximum=90)
         return await get_china_us_bond_spread(days=days)
 
     async def get_margin_data(self, args: dict) -> dict:
         """融资融券数据"""
         from .external_data import get_margin_trading_data
-        days = args.get("days", 10)
+        days = _clamp_days(args.get("days"), default=10, maximum=60)
         return await get_margin_trading_data(days=days)
 
 

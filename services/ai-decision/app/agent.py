@@ -19,16 +19,33 @@ from .prompt_templates import get_template
 
 
 def _estimate_tokens(text: str) -> int:
-    """粗略估算 token 数（中文约 1.5 token/字，英文约 1.33 token/word）"""
+    """粗略估算 token 数（中文约 1.5 token/字，英文约 0.25 token/char）"""
     if not text:
         return 0
     cn_chars = len(re.findall(r'[一-鿿]', text))
-    en_words = len(re.findall(r'[a-zA-Z]+', text))
-    other = len(text) - cn_chars * 3 - en_words * 5
-    return int(cn_chars * 1.5 + en_words * 1.33 + max(0, other) * 0.5)
+    en_chars = len(re.findall(r'[a-zA-Z]', text))
+    other = len(text) - cn_chars - en_chars
+    return int(cn_chars * 1.5 + en_chars * 0.25 + max(0, other) * 0.5)
 
 
-def _truncate_messages(messages: list[dict], max_tokens: int = 12000) -> list[dict]:
+def _get_context_budget(model: str) -> int:
+    """根据模型名称返回截断 token 预算（保守估计，预留 40% 给工具调用和输出）"""
+    m = model.lower()
+    if "128k" in m or "deepseek-v4" in m:
+        return 50000
+    if "64k" in m or "qwen-max" in m:
+        return 25000
+    if "32k" in m:
+        return 12000
+    if "16k" in m or "gpt-4o" in m:
+        return 8000
+    if "8k" in m or "gpt-4" in m:
+        return 4000
+    # 默认：假设 8k 上下文
+    return 4000
+
+
+def _truncate_messages(messages: list[dict], max_tokens: int = 4000) -> list[dict]:
     """按 token 数截断消息历史，保留 system 和最后一条 user 消息"""
     if len(messages) <= 2:
         return messages
@@ -280,19 +297,29 @@ class ReActAgent:
             # 支持原生 function calling 的模型每轮都发送工具定义
             tools_to_use = MCP_TOOLS if self._supports_tools else None
 
-            try:
-                messages = _truncate_messages(messages)
-                logger.info(f"发送消息数量: {len(messages)}, 工具: {tools_to_use is not None}")
-                response = await self.llm.chat(
-                    messages=messages,
-                    temperature=0.3,
-                    max_tokens=4000,
-                    tools=tools_to_use,
-                )
-            except Exception as e:
-                logger.error(f"LLM 调用失败: {e}")
-                yield {"type": "content", "data": f"AI 服务暂时不可用: {str(e)}"}
-                return
+            messages = _truncate_messages(messages, max_tokens=_get_context_budget(self.llm.model))
+            logger.info(f"发送消息数量: {len(messages)}, 工具: {tools_to_use is not None}")
+
+            # LLM 调用，指数退避重试最多 3 次
+            response = None
+            for _attempt in range(3):
+                try:
+                    response = await self.llm.chat(
+                        messages=messages,
+                        temperature=0.3,
+                        max_tokens=4000,
+                        tools=tools_to_use,
+                    )
+                    break
+                except Exception as e:
+                    if _attempt < 2:
+                        wait = 2 ** _attempt
+                        logger.warning(f"LLM 调用失败(第{_attempt+1}次)，{wait}秒后重试: {e}")
+                        await asyncio.sleep(wait)
+                    else:
+                        logger.error(f"LLM 调用失败(已重试3次): {e}")
+                        yield {"type": "content", "data": f"AI 服务暂时不可用: {str(e)}"}
+                        return
 
             if response.tool_calls:
                 # 构建 assistant 消息，包含 reasoning_content（DeepSeek API 要求）

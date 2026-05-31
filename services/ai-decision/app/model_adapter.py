@@ -142,7 +142,22 @@ def _parse_tool_calls_from_text(content: str, known_tools: list[dict] = None) ->
         try:
             args = json.loads(args_str) if args_str else {}
         except (json.JSONDecodeError, ValueError):
+            # 尝试解析 key=value 格式
             args = {}
+            if args_str:
+                for part in args_str.split(","):
+                    part = part.strip().strip("'\"")
+                    if "=" in part:
+                        k, v = part.split("=", 1)
+                        v = v.strip().strip("'\"")
+                        try:
+                            v = json.loads(v)
+                        except (json.JSONDecodeError, ValueError):
+                            pass
+                        args[k.strip()] = v
+                if not args:
+                    # 无法解析，保留原始文本
+                    args = {"_raw": args_str}
 
         tool_calls.append(ToolCall(
             id=f"call_{func_name}_{len(tool_calls)}",
@@ -261,15 +276,7 @@ class OpenAIClient(BaseLLMClient):
             resp = await self._client.get(f"{self.base_url}/models", timeout=5)
             return resp.status_code == 200
         except Exception:
-            try:
-                resp = await self._client.post(
-                    f"{self.base_url}/chat/completions",
-                    json={"model": self.model, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1},
-                    timeout=10,
-                )
-                return resp.status_code in [200, 400, 401]
-            except Exception:
-                return False
+            return False
 
     async def close(self):
         await self._client.aclose()
