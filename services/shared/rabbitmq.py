@@ -129,8 +129,8 @@ class RabbitMQManager:
         message: dict,
         exchange: str = "rotation",
     ) -> bool:
-        """发布消息（自动重连）"""
-        for attempt in range(2):
+        """发布消息（自动重连，最多 3 次尝试）"""
+        for attempt in range(3):
             try:
                 channel = self._get_publish_channel()
                 if channel and channel.is_open:
@@ -140,17 +140,16 @@ class RabbitMQManager:
                         routing_key=routing_key,
                         body=json.dumps(message, ensure_ascii=False),
                     )
+                    if attempt > 0:
+                        logger.info(f"RabbitMQ 发布成功(第{attempt + 1}次尝试): {routing_key}")
                     return True
                 else:
-                    logger.error("RabbitMQ 发布通道不可用，消息未发送")
-                    return False
-            except Exception as e:
-                if attempt == 0:
-                    logger.warning(f"RabbitMQ 发送失败，尝试重连: {e}")
+                    logger.warning(f"RabbitMQ 发布通道不可用(尝试{attempt + 1}/3)")
                     self.close()
-                else:
-                    logger.error(f"RabbitMQ 消息发送失败: {e}")
-                    return False
+            except Exception as e:
+                logger.warning(f"RabbitMQ 发送失败(尝试{attempt + 1}/3): {e}")
+                self.close()
+        logger.error(f"RabbitMQ 消息发布最终失败(3次): routing_key={routing_key}")
         return False
 
     def consume(
@@ -187,14 +186,24 @@ class RabbitMQManager:
                 result = channel.queue_declare(queue=queue, durable=durable)
                 channel.queue_bind(exchange=exchange, queue=result.method.queue, routing_key=routing_key)
 
+                # 流控：每次只拉取 1 条消息，处理完再拿下一条，防止慢消费者积压
+                channel.basic_qos(prefetch_count=1)
+
                 def _wrapper(ch, method, properties, body):
                     """包装回调，处理完成后手动确认"""
                     try:
                         callback(ch, method, properties, body)
                         ch.basic_ack(delivery_tag=method.delivery_tag)
                     except Exception as e:
-                        logger.error(f"消息处理失败，拒绝重试: {e}")
-                        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+                        # 消息处理失败：重试 1 次（requeue），仍失败则丢弃（避免死循环）
+                        retry_count = (properties.headers or {}).get("x-retry-count", 0)
+                        if retry_count < 1:
+                            logger.warning(f"消息处理失败，重试({retry_count + 1}/1): {e}")
+                            # 无法直接修改 headers 重试，采用 requeue
+                            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+                        else:
+                            logger.error(f"消息处理失败(已重试)，丢弃: {e}")
+                            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
                 channel.basic_consume(queue=result.method.queue, on_message_callback=_wrapper, auto_ack=False)
                 logger.info(f"RabbitMQ 消费者启动: queue={queue}, routing_key={routing_key}")

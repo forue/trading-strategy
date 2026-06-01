@@ -89,11 +89,18 @@ class SignalAnalyzer:
         if contexts is None:
             contexts = {}
 
+        # 限制并发为 3，避免同时发起过多 LLM 请求
+        sem = asyncio.Semaphore(3)
+
+        async def _limited(signal, context):
+            async with sem:
+                return await self.analyze_signal(signal, context)
+
         tasks = []
         for signal in signals:
             sector_code = signal.get("sector_code", "")
             context = contexts.get(sector_code, MarketContext())
-            tasks.append(self.analyze_signal(signal, context))
+            tasks.append(_limited(signal, context))
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
         # 将异常转为 fallback 分析

@@ -25,12 +25,15 @@ class ConnectionManager:
         logger.info(f"WebSocket连接断开: user={user_id}, 当前连接数={len(self.active_connections)}")
 
     async def send_personal_message(self, message: dict, user_id: str):
-        """发送个人消息"""
+        """发送个人消息（5秒超时，避免慢客户端阻塞广播）"""
         websocket = self.active_connections.get(user_id)
         if websocket:
             try:
-                import json
-                await websocket.send_json(message)
+                import asyncio
+                await asyncio.wait_for(websocket.send_json(message), timeout=5)
+            except asyncio.TimeoutError:
+                logger.warning(f"WebSocket 发送超时(5s)，断开: user={user_id}")
+                self.disconnect(user_id)
             except Exception as e:
                 logger.error(f"发送消息失败: user={user_id}, error={e}")
                 self.disconnect(user_id)

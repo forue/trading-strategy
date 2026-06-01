@@ -1017,7 +1017,12 @@ class MCPToolExecutor:
                 return {"sector_code": code, "error": str(e)}
             return None
 
-        all_results = await asyncio.gather(*[_fetch_one(c) for c in sector_codes])
+        # 限制并发为 5，避免过多同时请求打垮 data-collector
+        sem = asyncio.Semaphore(5)
+        async def _limited(c):
+            async with sem:
+                return await _fetch_one(c)
+        all_results = await asyncio.gather(*[_limited(c) for c in sector_codes])
         results = [r for r in all_results if r is not None]
 
         # 按总涨跌幅排序
@@ -1405,7 +1410,11 @@ class MCPToolExecutor:
                     pass
                 return None
 
-            all_results = await asyncio.gather(*[_fetch_one(s) for s in sectors_today])
+            sem = asyncio.Semaphore(5)
+            async def _limited(s):
+                async with sem:
+                    return await _fetch_one(s)
+            all_results = await asyncio.gather(*[_limited(s) for s in sectors_today])
             rotation_signals = [r for r in all_results if r is not None]
 
             # 按动量变化排序
