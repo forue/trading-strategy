@@ -22,6 +22,7 @@ async def _run_with_timeout(func, *args, timeout: int = 20, **kwargs):
 
 # 缓存: {key: (data, timestamp)}
 _cache: dict[str, tuple[Any, float]] = {}
+_MAX_CACHE_ENTRIES = 200
 # 默认 TTL（秒）
 _CACHE_TTL = {
     "global_market": 300,     # 5分钟（全球市场实时行情）
@@ -35,18 +36,29 @@ _CACHE_TTL = {
 
 
 def _get_cached(key: str, category: str = "global_market") -> Any | None:
-    """获取缓存数据"""
+    """获取缓存数据，自动淘汰过期条目"""
     if key in _cache:
         data, ts = _cache[key]
         ttl = _CACHE_TTL.get(category, 300)
         if time.time() - ts < ttl:
             return data
+        else:
+            del _cache[key]  # 过期，删除
     return None
 
 
 def _set_cached(key: str, data: Any):
-    """设置缓存"""
-    _cache[key] = (data, time.time())
+    """设置缓存，超限时淘汰最老条目"""
+    # 淘汰过期条目
+    now = time.time()
+    expired = [k for k, (_, ts) in _cache.items() if now - ts > 3600]  # 超过 1 小时的直接删
+    for k in expired:
+        del _cache[k]
+    # 超限时淘汰最老的
+    if len(_cache) >= _MAX_CACHE_ENTRIES:
+        oldest_key = min(_cache, key=lambda k: _cache[k][1])
+        del _cache[oldest_key]
+    _cache[key] = (data, now)
 
 
 def _df_to_records(df) -> list[dict]:
@@ -165,21 +177,24 @@ async def get_china_macro_indicators() -> dict:
     ]
 
     import akshare as ak
-    for name, func_name in indicators:
+    sem = asyncio.Semaphore(4)  # 限制并发为 4，避免打垮外部 API
+
+    async def _fetch_one(name, func_name):
         try:
             func = getattr(ak, func_name, None)
             if func is None:
-                continue
-            df = await asyncio.get_event_loop().run_in_executor(None, func)
+                return None
+            async with sem:
+                df = await _run_with_timeout(func, timeout=15)
             if df is not None and not df.empty:
                 latest = df.tail(1).to_dict(orient="records")[0]
-                result["indicators"].append({
-                    "name": name,
-                    "latest": latest,
-                })
+                return {"name": name, "latest": latest}
         except Exception as e:
             logger.warning(f"获取 {name} 失败: {e}")
-            continue
+        return None
+
+    results = await asyncio.gather(*[_fetch_one(n, f) for n, f in indicators])
+    result["indicators"] = [r for r in results if r is not None]
 
     _set_cached("china_macro", result)
     return result

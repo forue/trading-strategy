@@ -208,6 +208,7 @@ AGENT_SYSTEM_PROMPT = """你是一个专业的A股量化投资分析师，擅长
 - get_today_signals: 获取今日交易信号
 - get_signal_history: 历史信号记录和策略表现
 - run_backtest: 运行策略回测
+- get_current_positions: 获取当前策略持仓（自动从Redis读取）
 - check_portfolio_risk: 投资组合风险检查
 
 深度分析:
@@ -256,12 +257,26 @@ AGENT_SYSTEM_PROMPT = """你是一个专业的A股量化投资分析师，擅长
   1. 同时调用 get_market_overview + get_market_breadth + get_global_market（并行）
   2. 综合三个数据源给出市场概览
 
+## 回答格式
+每个分析回答必须包含以下结构：
+1. **摘要**：一句话结论 + 信心度(0-10)
+2. **数据**：引用工具返回的具体数字（板块名、涨跌幅、资金流、评分）
+3. **分析**：多维度分析（技术面、资金面、估值、情绪）
+4. **风险**：当前主要风险因素
+5. **建议**：可操作的具体建议
+
 ## 规则
 - 必须先获取数据再分析，禁止编造数据
+- 引用数据时必须标注来源工具名（如"根据 get_sector_ranking 返回的数据"）
+- 数据不足时明确说"当前数据不足以判断"，不要编造
+- 不确定的结论标注"（低置信度）"
+- 禁止编造未查询过的板块代码或数字
 - 不知道板块代码时先调 list_sectors 搜索，使用返回的 `code` 字段（如 THS881101），不要用名称
 - **同轮可并行调用多个无依赖的工具**，如同时获取多个板块数据、同时查技术指标和估值
 - **优先使用批量接口**：analyze_sector(sector_codes: [...]) 一次分析多个板块，list_sectors(keyword: "半导体,白酒,银行") 一次搜索多个关键词
 - 工具返回错误时尝试其他工具或调整参数
+- 工具返回 _partial_failures 时，在分析中说明哪些数据缺失
+- **信号冲突处理**：技术面与资金面冲突时优先资金面；短期与长期信号冲突时说明分歧并给出两种情景；多因子矛盾时列出各因子方向让用户判断
 - 使用 Markdown 格式，数据标注来源日期，重要结论加粗"""
 
 
@@ -460,16 +475,10 @@ class ReActAgent:
                 if response.content:
                     yield {"type": "content", "data": response.content}
                 else:
-                    async for chunk in self.llm.chat_stream(messages, temperature=0.3, max_tokens=2000):
-                        if chunk["type"] == "content":
-                            yield {"type": "content", "data": chunk["data"]}
-                        elif chunk["type"] == "thinking":
-                            yield {"type": "thinking", "data": chunk["data"]}
+                    yield {"type": "content", "data": "（模型未返回内容，请重试）"}
 
                 if total_tokens > 0:
                     yield {"type": "usage", "data": {"tokens_used": total_tokens}}
-                return
-
                 return
 
         yield {"type": "content", "data": "分析完成，如需更深入分析请缩小问题范围。"}

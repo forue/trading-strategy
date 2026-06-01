@@ -752,18 +752,13 @@ class ChatRequest(BaseModel):
 
 @app.post("/api/ai/chat")
 async def chat(request: ChatRequest):
-    """对话式投研（支持多轮对话）"""
+    """对话式投研（非流式，走 Agent 支持工具调用）"""
     try:
-        # 动态获取 LLM 客户端（支持运行时切换提供商）
-        client = _get_llm_client(request.provider, request.model)
-        if not client:
-            raise HTTPException(status_code=503, detail="AI 服务未就绪，请先配置模型提供商")
-
         mgr = _get_chat_mgr()
         conv_id = request.conversation_id
         save = not request.no_save
 
-        # 创建或获取对话（仅在需要保存时）
+        # 创建或获取对话
         if save:
             if not conv_id:
                 conv = mgr.create_conversation(
@@ -780,11 +775,9 @@ async def chat(request: ChatRequest):
                     )
                     conv_id = conv.id
 
-            # 保存用户消息
             from .chat_manager import ChatMessage
             mgr.add_message(conv_id, ChatMessage(role="user", content=request.message))
 
-            # 构建上下文（最近10条消息）
             context_messages = []
             if conv and conv.messages:
                 for msg in conv.messages[-10:]:
@@ -792,39 +785,35 @@ async def chat(request: ChatRequest):
         else:
             context_messages = []
 
-        # 调用 LLM
-        from .prompt_templates import get_template
-        template = get_template("chat")
-        prompt_messages = template.to_messages(
-            user_message=request.message,
-            context_text="",
-        )
+        # 通过 Agent 执行（支持工具调用）
+        agent = _get_agent(request.provider, request.model)
+        full_content = ""
+        full_thinking = ""
+        total_tokens = 0
+        async for chunk in agent.run(request.message, context_messages):
+            if chunk["type"] == "content":
+                full_content += chunk["data"]
+            elif chunk["type"] == "thinking":
+                full_thinking += chunk["data"]
+            elif chunk["type"] == "usage":
+                total_tokens = chunk["data"].get("tokens_used", 0)
 
-        # 插入历史上下文
-        if context_messages:
-            system_msg = prompt_messages[0]
-            user_msg = prompt_messages[-1]
-            history = [{"role": m["role"], "content": m["content"]} for m in context_messages[:-1]]
-            prompt_messages = [system_msg] + history + [user_msg]
-
-        response = await client.chat(prompt_messages)
-
-        # 保存 AI 回复（仅在需要保存时）
-        if save:
+        if save and full_content:
             from .chat_manager import ChatMessage
             mgr.add_message(conv_id, ChatMessage(
                 role="assistant",
-                content=response.content,
-                model=response.model,
-                tokens_used=response.tokens_used,
+                content=full_content,
+                thinking=full_thinking,
+                model=request.model or settings.ai_model,
+                tokens_used=total_tokens,
             ))
 
         return success_response(data={
             "conversation_id": conv_id,
-            "reply": response.content,
-            "thinking": response.thinking,
-            "model": response.model,
-            "tokens_used": response.tokens_used,
+            "reply": full_content,
+            "thinking": full_thinking,
+            "model": request.model or settings.ai_model,
+            "tokens_used": total_tokens,
         })
     except HTTPException:
         raise

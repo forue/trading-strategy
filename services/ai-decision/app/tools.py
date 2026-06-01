@@ -483,6 +483,20 @@ MCP_TOOLS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_current_positions",
+            "description": "获取当前策略持仓列表，返回各板块的持仓权重和盈亏情况",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "strategy_type": {"type": "string", "description": "策略类型: AGGRESSIVE/MODERATE/CONSERVATIVE，默认 MODERATE"}
+                },
+                "required": []
+            }
+        }
+    },
 ]
 
 
@@ -652,7 +666,22 @@ class MCPToolExecutor:
             except Exception:
                 continue
 
-        return None, start_date
+        # 构建上下文丰富的错误信息
+        sector = params.get("sector_code", "")
+        dates_tried = [(current - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(MAX_FALLBACK_DAYS + 1)]
+        err = f"近{MAX_FALLBACK_DAYS + 1}天({dates_tried[-1]}~{dates_tried[0]})无数据"
+        if sector:
+            err = f"板块{sector} {err}"
+        logger.warning(f"数据查询失败: {url} - {err}")
+        # 返回标准格式错误响应，调用方无需特殊处理
+        return {"code": 0, "error": err, "data": None}, start_date
+
+    @staticmethod
+    def _fallback_error(data: dict, default: str = "无数据") -> dict:
+        """从 _query_with_fallback 的失败响应中提取错误信息"""
+        if data and data.get("error"):
+            return {"error": data["error"]}
+        return {"error": default}
 
     async def execute(self, tool_name: str, arguments: dict) -> dict:
         """执行工具调用"""
@@ -669,6 +698,7 @@ class MCPToolExecutor:
     async def _get_market_overview(self, args: dict) -> dict:
         date = args.get("date") or _get_latest_trading_day()
         result = {"date": date}
+        partial_failures = []
 
         # 1. 大盘指数（akshare 实时）
         try:
@@ -678,6 +708,7 @@ class MCPToolExecutor:
                 result["indices"] = idx_data["indices"]
         except Exception as e:
             logger.warning(f"获取大盘指数失败: {e}")
+            partial_failures.append("大盘指数")
 
         # 2. 个股涨跌统计（akshare 实时）
         try:
@@ -697,6 +728,7 @@ class MCPToolExecutor:
                 }
         except Exception as e:
             logger.warning(f"获取涨跌统计失败: {e}")
+            partial_failures.append("涨跌统计")
 
         # 3. 板块级数据（data-collector）
         try:
@@ -723,7 +755,10 @@ class MCPToolExecutor:
                     result["note"] = f"{date} 无数据，已回退到最近交易日 {actual_date}"
         except Exception as e:
             logger.warning(f"获取板块数据失败: {e}")
+            partial_failures.append("板块数据")
 
+        if partial_failures:
+            result["_partial_failures"] = partial_failures
         return result if len(result) > 1 else {"error": "所有数据源均不可用"}
 
     async def _get_sector_ranking(self, args: dict) -> dict:
@@ -812,6 +847,28 @@ class MCPToolExecutor:
             return {"error": "获取信号失败"}
         except Exception as e:
             return {"error": str(e)}
+
+    async def get_current_positions(self, args: dict) -> dict:
+        """获取当前策略持仓"""
+        strategy_type = args.get("strategy_type", "MODERATE")
+        try:
+            resp = await self._client.get(
+                f"{self.strategy_url}/positions",
+                params={"strategy_type": strategy_type},
+                timeout=10,
+            )
+            data = resp.json()
+            if data.get("code") == 200:
+                positions = data.get("data", {})
+                return {
+                    "strategy_type": strategy_type,
+                    "positions": positions.get("positions", {}),
+                    "total_weight": positions.get("total_weight", 0),
+                    "updated_at": positions.get("updated_at", ""),
+                }
+            return {"error": f"获取{strategy_type}持仓失败"}
+        except Exception as e:
+            return {"error": f"获取持仓失败: {str(e)}"}
 
     async def _get_north_bound(self, args: dict) -> dict:
         date = args.get("date") or _get_latest_trading_day()
@@ -953,7 +1010,7 @@ class MCPToolExecutor:
                     "date": used_date,
                     "sectors": sectors[:30],
                 }
-            return {"error": "获取板块列表失败"}
+            return self._fallback_error(data, "获取板块列表失败")
         except Exception as e:
             return {"error": str(e)}
 
@@ -1046,7 +1103,7 @@ class MCPToolExecutor:
                     records = data["data"][-days:]
                     inflows = [r.get("main_net_inflow", 0) for r in records]
                     return _build_flow_trend(sector_code, records, inflows)
-                return {"error": "无数据"}
+                return self._fallback_error(data, f"板块{sector_code}资金流向数据不足")
             else:
                 # 全部板块趋势摘要
                 data, used_date = await self._query_with_fallback(
@@ -1069,7 +1126,7 @@ class MCPToolExecutor:
                         } for s in sorted_sectors[-5:]],
                         "total_main_inflow_yi": round(sum(s.get("main_net_inflow", 0) for s in sectors) / 1e8, 2),
                     }
-                return {"error": "无数据"}
+                return self._fallback_error(data, "全市场资金流向数据不足")
         except Exception as e:
             return {"error": str(e)}
 
