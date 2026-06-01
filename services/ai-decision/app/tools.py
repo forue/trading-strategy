@@ -27,6 +27,21 @@ def _safe_float(val, default=0.0) -> float:
     except (TypeError, ValueError):
         return default
 
+def _sanitize_date(date_str: str) -> str:
+    """校验日期合理性：不在未来，不超过60天前。不合理则返回最近交易日。"""
+    if not date_str:
+        return _get_latest_trading_day()
+    try:
+        dt = datetime.strptime(date_str[:10], "%Y-%m-%d")
+        today = datetime.now()
+        max_past = today - timedelta(days=60)
+        if dt > today or dt < max_past:
+            return _get_latest_trading_day()
+        return date_str[:10]
+    except (ValueError, TypeError):
+        return _get_latest_trading_day()
+
+
 def _clamp_days(val, default=10, maximum=60) -> int:
     """限制 days 参数在合理范围内"""
     try:
@@ -649,6 +664,21 @@ class MCPToolExecutor:
             start_date = _get_latest_trading_day()
             params["start_date"] = start_date
             params["end_date"] = start_date
+        else:
+            # 校验日期合理性：不在未来，不超过60天前
+            try:
+                dt = datetime.strptime(start_date[:10], "%Y-%m-%d")
+                today = datetime.now()
+                max_past = today - timedelta(days=60)
+                if dt > today or dt < max_past:
+                    logger.warning(f"日期 {start_date} 超出范围，回退到最近交易日")
+                    start_date = _get_latest_trading_day()
+                    params["start_date"] = start_date
+                    params["end_date"] = start_date
+            except ValueError:
+                start_date = _get_latest_trading_day()
+                params["start_date"] = start_date
+                params["end_date"] = start_date
 
         current = datetime.strptime(start_date, "%Y-%m-%d")
         for i in range(MAX_FALLBACK_DAYS + 1):
@@ -696,7 +726,7 @@ class MCPToolExecutor:
             return {"error": str(e)}
 
     async def _get_market_overview(self, args: dict) -> dict:
-        date = args.get("date") or _get_latest_trading_day()
+        date = _sanitize_date(args.get("date"))
         result = {"date": date}
         partial_failures = []
 
@@ -780,7 +810,7 @@ class MCPToolExecutor:
         return result if len(result) > 1 else {"error": "所有数据源均不可用"}
 
     async def _get_sector_ranking(self, args: dict) -> dict:
-        date = args.get("date") or _get_latest_trading_day()
+        date = _sanitize_date(args.get("date"))
         metric = args.get("metric", "change")
         limit = args.get("limit", 10)
         try:
@@ -817,7 +847,7 @@ class MCPToolExecutor:
     async def _analyze_sector(self, args: dict) -> dict:
         sector_codes = args.get("sector_codes", [])
         single_code = args.get("sector_code", "")
-        date = args.get("date") or _get_latest_trading_day()
+        date = _sanitize_date(args.get("date"))
 
         # 支持批量：sector_codes 数组 或 单个 sector_code
         if single_code and not sector_codes:
@@ -889,7 +919,7 @@ class MCPToolExecutor:
             return {"error": f"获取持仓失败: {str(e)}"}
 
     async def _get_north_bound(self, args: dict) -> dict:
-        date = args.get("date") or _get_latest_trading_day()
+        date = _sanitize_date(args.get("date"))
         try:
             data, actual_date = await self._query_with_fallback(
                 f"{self.data_collector_url}/query/all-sectors",
@@ -1236,7 +1266,7 @@ class MCPToolExecutor:
     async def _get_sector_valuation(self, args: dict) -> dict:
         """获取板块估值分析：PE/PB 及历史百分位"""
         sector_code = args.get("sector_code", "")
-        date = args.get("date") or _get_latest_trading_day()
+        date = _sanitize_date(args.get("date"))
         if not sector_code:
             return {"error": "请提供板块代码"}
 
@@ -1287,7 +1317,7 @@ class MCPToolExecutor:
 
     async def _get_market_breadth(self, args: dict) -> dict:
         """市场宽度：个股涨跌统计 + 板块强弱"""
-        date = args.get("date") or _get_latest_trading_day()
+        date = _sanitize_date(args.get("date"))
         result = {"date": date}
 
         # 1. 个股级涨跌统计（akshare 真实数据）
@@ -1364,7 +1394,7 @@ class MCPToolExecutor:
 
     async def _get_fund_flow_distribution(self, args: dict) -> dict:
         """资金流向分布：主力资金在各板块的分布"""
-        date = args.get("date") or _get_latest_trading_day()
+        date = _sanitize_date(args.get("date"))
         top_n = args.get("top_n", 10)
         try:
             data, actual_date = await self._query_with_fallback(
@@ -1508,7 +1538,7 @@ class MCPToolExecutor:
         """多因子评分：调用 strategy service 的因子分析接口"""
         sector_code = args.get("sector_code")
         strategy_type = args.get("strategy_type", "MODERATE")
-        date = args.get("date") or _get_latest_trading_day()
+        date = _sanitize_date(args.get("date"))
 
         try:
             if sector_code:
@@ -1579,7 +1609,7 @@ class MCPToolExecutor:
 
     async def _get_market_heatmap(self, args: dict) -> dict:
         """市场热力图：全部板块涨跌幅+资金流概览"""
-        date = args.get("date") or _get_latest_trading_day()
+        date = _sanitize_date(args.get("date"))
         try:
             data, actual_date = await self._query_with_fallback(
                 f"{self.data_collector_url}/query/all-sectors",
