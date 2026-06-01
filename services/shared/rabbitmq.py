@@ -161,28 +161,46 @@ class RabbitMQManager:
         routing_key: str = "#",
         durable: bool = True,
     ) -> None:
-        """消费消息（阻塞式，使用独立 channel，手动确认）"""
-        try:
-            channel = self._get_consume_channel()
-            if not channel:
-                logger.error("RabbitMQ 消费通道不可用")
-                return
+        """消费消息（阻塞式，自动重连，使用独立 channel，手动确认）"""
+        import time as _time
+        retry_delay = 5  # 初始重连间隔（秒）
+        max_delay = 60   # 最大重连间隔
 
-            channel.exchange_declare(exchange=exchange, exchange_type="topic", durable=True)
-            result = channel.queue_declare(queue=queue, durable=durable)
-            channel.queue_bind(exchange=exchange, queue=result.method.queue, routing_key=routing_key)
+        while True:
+            try:
+                # 重连前先重置消费 channel
+                if self._consume_channel and not self._consume_channel.is_closed:
+                    try:
+                        self._consume_channel.close()
+                    except Exception:
+                        pass
+                self._consume_channel = None
 
-            def _wrapper(ch, method, properties, body):
-                """包装回调，处理完成后手动确认"""
-                try:
-                    callback(ch, method, properties, body)
-                    ch.basic_ack(delivery_tag=method.delivery_tag)
-                except Exception as e:
-                    logger.error(f"消息处理失败，拒绝重试: {e}")
-                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+                channel = self._get_consume_channel()
+                if not channel:
+                    logger.error(f"RabbitMQ 消费通道不可用，{retry_delay}秒后重试")
+                    _time.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 2, max_delay)
+                    continue
 
-            channel.basic_consume(queue=result.method.queue, on_message_callback=_wrapper, auto_ack=False)
-            logger.info(f"RabbitMQ 消费者启动: queue={queue}, routing_key={routing_key}")
-            channel.start_consuming()
-        except Exception as e:
-            logger.error(f"RabbitMQ 消费失败: {e}")
+                channel.exchange_declare(exchange=exchange, exchange_type="topic", durable=True)
+                result = channel.queue_declare(queue=queue, durable=durable)
+                channel.queue_bind(exchange=exchange, queue=result.method.queue, routing_key=routing_key)
+
+                def _wrapper(ch, method, properties, body):
+                    """包装回调，处理完成后手动确认"""
+                    try:
+                        callback(ch, method, properties, body)
+                        ch.basic_ack(delivery_tag=method.delivery_tag)
+                    except Exception as e:
+                        logger.error(f"消息处理失败，拒绝重试: {e}")
+                        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+
+                channel.basic_consume(queue=result.method.queue, on_message_callback=_wrapper, auto_ack=False)
+                logger.info(f"RabbitMQ 消费者启动: queue={queue}, routing_key={routing_key}")
+                retry_delay = 5  # 连接成功，重置重连间隔
+                channel.start_consuming()
+            except Exception as e:
+                logger.error(f"RabbitMQ 消费断开: {e}，{retry_delay}秒后重连")
+                _time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, max_delay)
