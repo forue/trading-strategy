@@ -720,7 +720,7 @@ async function scrollToBottom() {
         }
         .md-body {
           padding: 12px 16px; background: var(--bg-tertiary); border-radius: 12px 12px 12px 2px;
-          font-size: 14px; line-height: 1.7; word-break: break-word; max-width: 100%;
+          font-size: 14px; line-height: 1.7; word-break: break-word; max-width: 100%; overflow-x: auto;
           :deep(p) { margin: 0 0 8px 0; &:last-child { margin-bottom: 0; } }
           :deep(h1), :deep(h2), :deep(h3) { margin: 12px 0 6px 0; font-weight: 600; }
           :deep(code) { background: var(--bg-elevated); padding: 1px 4px; border-radius: 3px; font-size: 13px; }
