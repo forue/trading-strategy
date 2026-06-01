@@ -720,13 +720,14 @@ async function scrollToBottom() {
         }
         .md-body {
           padding: 12px 16px; background: var(--bg-tertiary); border-radius: 12px 12px 12px 2px;
-          font-size: 14px; line-height: 1.7; word-break: break-word; max-width: 100%; overflow-x: auto;
+          font-size: 14px; line-height: 1.7; word-break: break-word; max-width: 100%;
           :deep(p) { margin: 0 0 8px 0; &:last-child { margin-bottom: 0; } }
           :deep(h1), :deep(h2), :deep(h3) { margin: 12px 0 6px 0; font-weight: 600; }
           :deep(code) { background: var(--bg-elevated); padding: 1px 4px; border-radius: 3px; font-size: 13px; }
           :deep(pre) { background: #1e1e1e; color: #d4d4d4; padding: 10px 14px; border-radius: 6px; overflow-x: auto; margin: 8px 0; code { background: none; padding: 0; color: inherit; } }
           :deep(table) {
-            border-collapse: collapse; margin: 8px 0; width: 100%; font-size: 13px;
+            border-collapse: collapse; margin: 8px 0; font-size: 13px;
+            display: block; overflow-x: auto; max-width: 100%;
             th, td {
               border: 1px solid var(--border-primary); padding: 6px 10px;
               text-align: left; white-space: nowrap;
