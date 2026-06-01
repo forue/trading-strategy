@@ -1,6 +1,7 @@
 """策略引擎服务 - 板块轮动评分模型核心算法"""
 from collections import defaultdict
 import json
+import time
 import numpy as np
 from datetime import datetime
 from loguru import logger
@@ -171,6 +172,167 @@ SECTOR_ETF_MAP.update({
     "THS881283": {"code": "512070", "name": "非银ETF"},     # 多元金融
     "THS881284": {"code": "159611", "name": "公用事业ETF"},  # 环保设备
 })
+
+# 多ETF候选列表：每个板块可推荐多个ETF，运行时按表现排序选最优
+SECTOR_ETF_CANDIDATES = {
+    "软件开发": [
+        {"code": "159035", "name": "软件ETF天弘"},
+        {"code": "562930", "name": "软件ETF易方达"},
+        {"code": "560360", "name": "软件ETF万家"},
+        {"code": "515230", "name": "软件ETF国泰"},
+    ],
+    "半导体": [
+        {"code": "159995", "name": "芯片ETF华夏"},
+        {"code": "512480", "name": "半导体ETF国联安"},
+        {"code": "159813", "name": "芯片ETF鹏华"},
+    ],
+    "白酒": [
+        {"code": "512690", "name": "酒ETF鹏华"},
+        {"code": "515710", "name": "食品饮料ETF华宝"},
+        {"code": "159843", "name": "食品饮料ETF招商"},
+    ],
+    "光伏设备": [
+        {"code": "515790", "name": "光伏ETF华泰柏瑞"},
+        {"code": "515370", "name": "光伏ETF华夏"},
+        {"code": "159857", "name": "光伏ETF天弘"},
+    ],
+    "电池": [
+        {"code": "159755", "name": "电池ETF"},
+        {"code": "159840", "name": "锂电池ETF"},
+        {"code": "561910", "name": "动力电池ETF"},
+    ],
+    "医药": [
+        {"code": "512010", "name": "医药ETF"},
+        {"code": "159929", "name": "医药ETF恒瑞"},
+        {"code": "512170", "name": "医疗ETF华宝"},
+    ],
+    "银行": [
+        {"code": "512800", "name": "银行ETF华宝"},
+        {"code": "515020", "name": "银行ETF华夏"},
+    ],
+    "军工": [
+        {"code": "512810", "name": "军工ETF华宝"},
+        {"code": "512660", "name": "军工ETF国泰"},
+        {"code": "512680", "name": "军工ETF广发"},
+    ],
+    "证券": [
+        {"code": "512070", "name": "证券保险ETF易方达"},
+        {"code": "512880", "name": "证券ETF国泰"},
+        {"code": "159841", "name": "证券ETF天弘"},
+    ],
+    "传媒": [
+        {"code": "512980", "name": "传媒ETF广发"},
+        {"code": "516190", "name": "传媒ETF华夏"},
+        {"code": "159805", "name": "传媒ETF鹏华"},
+    ],
+    "游戏": [
+        {"code": "516770", "name": "游戏ETF华泰柏瑞"},
+        {"code": "516010", "name": "游戏ETF国泰"},
+        {"code": "159869", "name": "游戏ETF华夏"},
+    ],
+    "计算机": [
+        {"code": "512720", "name": "计算机ETF国泰"},
+        {"code": "159998", "name": "计算机ETF天弘"},
+        {"code": "159586", "name": "计算机ETF南方"},
+    ],
+    "新能源": [
+        {"code": "159611", "name": "公用事业ETF"},
+        {"code": "516160", "name": "新能源ETF"},
+        {"code": "159875", "name": "新能源车ETF"},
+    ],
+    "电子": [
+        {"code": "159997", "name": "电子ETF天弘"},
+        {"code": "159958", "name": "电子ETF"},
+    ],
+    "通信设备": [
+        {"code": "515880", "name": "通信ETF国泰"},
+        {"code": "159619", "name": "5G ETF"},
+    ],
+    "汽车": [
+        {"code": "516110", "name": "汽车ETF国泰"},
+        {"code": "159768", "name": "新能源车ETF华夏"},
+    ],
+    "机械": [
+        {"code": "159886", "name": "机械ETF富国"},
+        {"code": "516960", "name": "机械ETF国泰"},
+        {"code": "515970", "name": "工程机械ETF华夏"},
+    ],
+    "消费电子": [
+        {"code": "159732", "name": "消费电子ETF华夏"},
+        {"code": "562950", "name": "消费电子ETF易方达"},
+    ],
+}
+
+# ETF表现缓存 {code: (score, timestamp)}
+_etf_score_cache: dict[str, tuple[float, float]] = {}
+_ETF_SCORE_TTL = 1800  # 30分钟
+
+
+def _score_etf(code: str) -> float:
+    """计算ETF综合评分（基于30天数据）
+
+    评分公式: 0.4 * 流动性 + 0.3 * 收益动量 + 0.3 * 回撤控制
+    - 流动性: log10(日均成交额)，归一化到0-10
+    - 收益动量: 30日累计收益率，归一化到0-10
+    - 回撤控制: 30日最大回撤(负值)，越小越好，归一化到0-10
+    """
+    now = time.time()
+    if code in _etf_score_cache:
+        score, ts = _etf_score_cache[code]
+        if now - ts < _ETF_SCORE_TTL:
+            return score
+
+    try:
+        import akshare as ak
+        from datetime import datetime, timedelta
+        end = datetime.now().strftime("%Y%m%d")
+        start = (datetime.now() - timedelta(days=45)).strftime("%Y%m%d")
+        df = ak.fund_etf_hist_em(symbol=code, period="daily", start_date=start, end_date=end, adjust="qfq")
+
+        if df is None or df.empty or len(df) < 5:
+            _etf_score_cache[code] = (5.0, now)
+            return 5.0
+
+        closes = df["收盘"].astype(float).tolist()
+        volumes = df["成交额"].astype(float).tolist()
+
+        # 收益动量 (30日累计)
+        ret = (closes[-1] / closes[0] - 1) * 100 if closes[0] > 0 else 0
+        ret_score = max(0, min(10, 5 + ret * 0.5))
+
+        # 最大回撤
+        peak = closes[0]
+        max_dd = 0
+        for c in closes:
+            if c > peak:
+                peak = c
+            dd = (peak - c) / peak * 100 if peak > 0 else 0
+            max_dd = max(max_dd, dd)
+        dd_score = max(0, min(10, 10 - max_dd * 0.5))
+
+        # 流动性 (日均成交额)
+        avg_vol = sum(volumes) / max(len(volumes), 1)
+        liq_score = max(0, min(10, 3 + (avg_vol / 1e8) * 2))
+
+        total = ret_score * 0.3 + dd_score * 0.3 + liq_score * 0.4
+        _etf_score_cache[code] = (round(total, 2), now)
+        return round(total, 2)
+    except Exception:
+        _etf_score_cache[code] = (5.0, now)
+        return 5.0
+
+
+def _rank_etf_candidates(sector_name: str) -> list[dict]:
+    """获取板块的ETF候选列表，按评分排序"""
+    candidates = SECTOR_ETF_CANDIDATES.get(sector_name, [])
+    if not candidates:
+        return []
+    scored = []
+    for etf in candidates:
+        s = _score_etf(etf["code"])
+        scored.append({**etf, "score": s})
+    scored.sort(key=lambda x: x["score"], reverse=True)
+    return scored
 
 
 class RotationScoringModel:
@@ -566,19 +728,26 @@ class RotationScoringModel:
 
     @staticmethod
     def _get_etf_info(sector_code: str, sector_name: str = None, sector_data: dict = None) -> dict:
-        """获取板块对应的场内ETF信息
+        """获取板块对应的最优场内ETF
 
         优先级：
         1. 直接从传入的sector_data获取 etf_code/etf_name
-        2. 用sector_code精确匹配（SECTOR_ETF_MAP同时支持THS/SW前缀）
-        3. 用sector_name精确匹配中文名称
-        4. 用sector_name模糊匹配（去除"THS"/"SW"前缀后对比）
+        2. 从SECTOR_ETF_CANDIDATES获取候选列表，按表现排序选最优
+        3. 用sector_code精确匹配SECTOR_ETF_MAP
+        4. 用sector_name模糊匹配
         """
         if sector_data and (sector_data.get("etf_code") or sector_data.get("etf_name")):
             return {
                 "etf_code": sector_data.get("etf_code", ""),
                 "etf_name": sector_data.get("etf_name", ""),
             }
+
+        # 优先从候选列表中选最优
+        if sector_name:
+            ranked = _rank_etf_candidates(sector_name)
+            if ranked:
+                best = ranked[0]
+                return {"etf_code": best["code"], "etf_name": best["name"]}
 
         etf = SECTOR_ETF_MAP.get(sector_code)
         if etf:
