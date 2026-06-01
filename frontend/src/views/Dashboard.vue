@@ -75,42 +75,44 @@
     </div>
 
     <!-- Signal Detail Dialog -->
-    <el-dialog v-model="signalDialogVisible" :title="`${selectedDate} 信号详情`" width="640px">
-      <el-table :data="selectedDateSignals" max-height="200">
-        <el-table-column prop="sector_name" label="板块" />
-        <el-table-column prop="direction" label="方向">
-          <template #default="{ row }">
-            <span :class="row.direction === 'BUY' ? 'signal-buy' : 'signal-sell'">
-              {{ row.direction === 'BUY' ? '买入' : '卖出' }}
-            </span>
-          </template>
-        </el-table-column>
-        <el-table-column prop="etf_code" label="ETF" />
-        <el-table-column prop="score" label="评分">
-          <template #default="{ row }">{{ row.score?.toFixed(2) }}</template>
-        </el-table-column>
-        <el-table-column prop="position_ratio" label="仓位">
-          <template #default="{ row }">{{ ((row.position_ratio || 0) * 100).toFixed(1) }}%</template>
-        </el-table-column>
-      </el-table>
+    <el-dialog v-model="signalDialogVisible" :title="`${selectedDate} 信号详情`" width="640px" class="signal-dialog" :style="{ '--dialog-max-h': 'min(75vh, 600px)' }">
+      <div class="signal-dialog-body">
+        <el-table :data="selectedDateSignals" max-height="200">
+          <el-table-column prop="sector_name" label="板块" />
+          <el-table-column prop="direction" label="方向">
+            <template #default="{ row }">
+              <span :class="row.direction === 'BUY' ? 'signal-buy' : 'signal-sell'">
+                {{ row.direction === 'BUY' ? '买入' : '卖出' }}
+              </span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="etf_code" label="ETF" />
+          <el-table-column prop="score" label="评分">
+            <template #default="{ row }">{{ row.score?.toFixed(2) }}</template>
+          </el-table-column>
+          <el-table-column prop="position_ratio" label="仓位">
+            <template #default="{ row }">{{ ((row.position_ratio || 0) * 100).toFixed(1) }}%</template>
+          </el-table-column>
+        </el-table>
 
-      <!-- AI 分析回放 -->
-      <div v-if="selectedAnalysis.length > 0" style="margin-top: 16px; border-top: 1px solid var(--border-secondary); padding-top: 12px;">
-        <div style="font-weight: 600; font-size: 14px; margin-bottom: 10px;">AI 分析回放</div>
-        <div v-for="(a, idx) in selectedAnalysis" :key="idx" style="margin-bottom: 12px; padding: 10px; background: var(--bg-tertiary); border-radius: 8px;">
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-            <span style="font-weight: 600;">{{ a.sector_name }} ({{ a.direction === 'BUY' ? '买入' : '卖出' }})</span>
-            <span style="font-size: 12px; color: var(--text-tertiary);">信心度 {{ (a.confidence * 100).toFixed(0) }}%</span>
+        <!-- AI 分析回放 -->
+        <div v-if="selectedAnalysis.length > 0" class="analysis-section">
+          <div class="analysis-title">AI 分析回放</div>
+          <div v-for="(a, idx) in selectedAnalysis" :key="idx" class="analysis-card">
+            <div class="analysis-header">
+              <span class="analysis-sector">{{ a.sector_name }} ({{ a.direction === 'BUY' ? '买入' : '卖出' }})</span>
+              <span class="analysis-conf">信心度 {{ (a.confidence * 100).toFixed(0) }}%</span>
+            </div>
+            <div class="analysis-text">{{ a.interpretation }}</div>
+            <div v-if="a.risk_factors?.length" class="analysis-risks">
+              <div v-for="(r, ri) in a.risk_factors" :key="ri">- {{ r }}</div>
+            </div>
+            <div v-if="a.suggestion" class="analysis-suggest">建议: {{ a.suggestion }}</div>
           </div>
-          <div style="font-size: 13px; line-height: 1.6; color: var(--text-secondary);">{{ a.interpretation }}</div>
-          <div v-if="a.risk_factors?.length" style="margin-top: 6px; font-size: 12px; color: var(--accent-danger);">
-            <div v-for="(r, ri) in a.risk_factors" :key="ri">- {{ r }}</div>
-          </div>
-          <div v-if="a.suggestion" style="margin-top: 6px; font-size: 12px; color: var(--accent-primary);">建议: {{ a.suggestion }}</div>
         </div>
+        <div v-else-if="analysisLoading" class="analysis-empty">加载AI分析中...</div>
+        <div v-else-if="selectedDateSignals.length > 0" class="analysis-empty">该日期暂无AI分析记录</div>
       </div>
-      <div v-else-if="analysisLoading" style="margin-top: 16px; text-align: center; color: var(--text-tertiary);">加载AI分析中...</div>
-      <div v-else-if="selectedDateSignals.length > 0" style="margin-top: 16px; text-align: center; color: var(--text-tertiary); font-size: 13px;">该日期暂无AI分析记录</div>
     </el-dialog>
   </div>
 </template>
@@ -506,6 +508,60 @@ watch(calendarMonth, () => loadCalendarData())
   .calendar-chart { height: 200px; }
 }
 
+.signal-dialog-body {
+  padding: 16px;
+}
+.analysis-section {
+  margin-top: 16px;
+  border-top: 1px solid var(--border-secondary);
+  padding-top: 12px;
+}
+.analysis-title {
+  font-weight: 600;
+  font-size: 14px;
+  margin-bottom: 10px;
+}
+.analysis-card {
+  margin-bottom: 12px;
+  padding: 10px;
+  background: var(--bg-tertiary);
+  border-radius: 8px;
+}
+.analysis-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.analysis-sector {
+  font-weight: 600;
+}
+.analysis-conf {
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+.analysis-text {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+.analysis-risks {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--accent-danger);
+}
+.analysis-suggest {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--accent-primary);
+}
+.analysis-empty {
+  margin-top: 16px;
+  text-align: center;
+  color: var(--text-tertiary);
+  font-size: 13px;
+}
+
 @media (max-width: 480px) {
   .stat-grid {
     grid-template-columns: 1fr;
@@ -515,5 +571,26 @@ watch(calendarMonth, () => loadCalendarData())
   .stat-value { font-size: 16px; }
   :deep(.el-dialog) { width: 90% !important; }
   .calendar-chart { height: 180px; }
+}
+</style>
+
+<style lang="scss">
+.signal-dialog .el-dialog__body {
+  padding: 0 !important;
+  max-height: min(75vh, 600px);
+  overflow-y: auto;
+}
+.signal-dialog .el-dialog {
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+}
+.signal-dialog .el-dialog__header {
+  flex-shrink: 0;
+}
+.signal-dialog .el-dialog__body {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
 }
 </style>
