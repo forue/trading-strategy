@@ -132,12 +132,61 @@ async def get_global_market_overview() -> dict:
             else:
                 logger.error(f"获取全球市场行情失败(重试3次): {e}")
 
-    # 降级：返回过期缓存（如果有）
+    # 降级：尝试新浪财经API
+    sina_result = await _fetch_global_market_from_sina()
+    if sina_result and "indices" in sina_result:
+        _set_cached("global_market_overview", sina_result)
+        return sina_result
+
+    # 最终降级：返回过期缓存
     expired = _get_expired_cache("global_market_overview")
     if expired:
         expired["_stale"] = True
         return expired
-    return {"error": "全球市场数据暂不可用（东方财富API连接异常）"}
+    return {"error": "全球市场数据暂不可用"}
+
+
+async def _fetch_global_market_from_sina() -> dict:
+    """从新浪财经API获取全球主要指数（备用数据源）"""
+    import httpx
+    symbols = {
+        "int_dji": "道琼斯", "int_nasdaq": "纳斯达克", "int_sp500": "标普500",
+        "int_hangseng": "恒生指数", "int_nikkei": "日经225", "int_ftse": "富时100",
+    }
+    try:
+        url = f"https://hq.sinajs.cn/list={','.join(symbols.keys())}"
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url, headers={
+                "Referer": "https://finance.sina.com.cn/",
+                "User-Agent": "Mozilla/5.0",
+            })
+            if resp.status_code != 200:
+                return {}
+            indices = []
+            for line in resp.text.strip().split("\n"):
+                if "=" not in line:
+                    continue
+                key_part, val_part = line.split("=", 1)
+                key = key_part.split("_")[-1]
+                vals = val_part.strip('" ;\n\r').split(",")
+                if len(vals) >= 4:
+                    name = vals[0]
+                    try:
+                        price = float(vals[1])
+                        change = float(vals[2])
+                        change_pct = float(vals[3])
+                    except (ValueError, IndexError):
+                        continue
+                    indices.append({
+                        "name": name, "price": price, "change": change,
+                        "change_pct": change_pct, "open": "", "high": "",
+                        "low": "", "prev_close": round(price - change, 2) if price and change else "",
+                    })
+            if indices:
+                return {"indices": indices, "source": "sina"}
+    except Exception as e:
+        logger.warning(f"新浪财经全球指数获取失败: {e}")
+    return {}
 
 
 async def get_global_index_history(symbol: str, days: int = 30) -> dict:
@@ -465,11 +514,62 @@ async def get_market_indices() -> dict:
             else:
                 logger.error(f"获取大盘指数失败(重试3次): {e}")
 
+    # 降级：尝试新浪财经API
+    sina_indices = await _fetch_market_indices_from_sina()
+    if sina_indices:
+        result = {"indices": sina_indices, "count": len(sina_indices), "source": "sina"}
+        _set_cached("market_indices", result)
+        return result
+
     expired = _get_expired_cache("market_indices")
     if expired:
         expired["_stale"] = True
         return expired
     return {"error": "大盘指数数据暂不可用"}
+
+
+async def _fetch_market_indices_from_sina() -> list:
+    """从新浪财经API获取A股主要指数（备用数据源）"""
+    import httpx
+    codes = {
+        "s_sh000001": ("上证指数", "000001"), "s_sz399001": ("深证成指", "399001"),
+        "s_sz399006": ("创业板指", "399006"), "s_sh000688": ("科创50", "000688"),
+        "s_sh000300": ("沪深300", "000300"), "s_sh000905": ("中证500", "000905"),
+        "s_sh000852": ("中证1000", "000852"),
+    }
+    try:
+        url = f"https://hq.sinajs.cn/list={','.join(codes.keys())}"
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url, headers={"Referer": "https://finance.sina.com.cn/", "User-Agent": "Mozilla/5.0"})
+            if resp.status_code != 200:
+                return []
+            indices = []
+            for line in resp.text.strip().split("\n"):
+                if "=" not in line:
+                    continue
+                key_part, val_part = line.split("=", 1)
+                key = key_part.split("_")[-1]
+                vals = val_part.strip('" ;\n\r').split(",")
+                info = codes.get(f"s_{key}")
+                if not info or len(vals) < 4:
+                    continue
+                try:
+                    name, code = info
+                    price = float(vals[1])
+                    change = float(vals[2])
+                    change_pct = float(vals[3])
+                except (ValueError, IndexError):
+                    continue
+                indices.append({
+                    "name": name, "code": code, "price": price,
+                    "change_pct": change_pct, "change": change,
+                    "volume_yi": 0, "high": "", "low": "", "open": "",
+                    "prev_close": round(price - change, 2),
+                })
+            return indices
+    except Exception as e:
+        logger.warning(f"新浪大盘指数获取失败: {e}")
+    return []
 
 
 async def get_market_breadth_real() -> dict:
