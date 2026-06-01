@@ -58,6 +58,10 @@ class InfluxDBQuery:
         return []
 
     def __init__(self):
+        self._connect()
+
+    def _connect(self):
+        """建立 InfluxDB 连接"""
         self.client = InfluxDBClient(
             url=settings.influxdb_url,
             token=settings.influxdb_token,
@@ -66,6 +70,29 @@ class InfluxDBQuery:
         self.query_api = self.client.query_api()
         self.bucket = settings.influxdb_bucket
         self.org = settings.influxdb_org
+
+    def _ensure_connected(self):
+        """检查连接，断开则自动重连"""
+        try:
+            health = self.client.health()
+            if health.status != "pass":
+                logger.warning("InfluxDB 连接异常，尝试重连")
+                self._connect()
+        except Exception:
+            logger.warning("InfluxDB 连接检测失败，尝试重连")
+            try:
+                self.client.close()
+            except Exception:
+                pass
+            self._connect()
+
+    def health_check(self) -> dict:
+        """返回 InfluxDB 连接状态"""
+        try:
+            health = self.client.health()
+            return {"status": health.status, "message": health.message}
+        except Exception as e:
+            return {"status": "fail", "message": str(e)}
 
     @staticmethod
     def _date_to_flux_range(start_date: str, end_date: str) -> tuple[str, str]:
@@ -127,6 +154,7 @@ class InfluxDBQuery:
             {date_str: [{sector_code, sector_name, main_net_inflow, north_net_inflow,
                          index_close, index_change_pct, turnover}, ...]}
         """
+        self._ensure_connected()
         flux_start, flux_stop = self._date_to_flux_range(start_date, end_date)
 
         # 构建板块过滤条件
@@ -353,6 +381,7 @@ class InfluxDBQuery:
         Returns:
             [{date, sector_code, sector_name, open, close, high, low, volume, amount, change_pct}, ...]
         """
+        self._ensure_connected()
         flux_start, flux_stop = self._date_to_flux_range(start_date, end_date)
 
         query = f'''

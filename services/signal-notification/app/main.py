@@ -25,6 +25,7 @@ app = FastAPI(title="信号通知服务", version="1.2.0")
 # 初始化连接管理器
 rmq = RabbitMQManager()
 redis_mgr = RedisManager()
+_mq_thread = None
 
 # 主事件循环引用（供 RabbitMQ 消费线程使用）
 _main_loop: asyncio.AbstractEventLoop = None
@@ -52,8 +53,9 @@ async def startup_event():
     )
     _load_notify_config()
     # 连接建立后启动 RabbitMQ 消费者
-    mq_thread = threading.Thread(target=start_rabbitmq_consumer, daemon=True)
-    mq_thread.start()
+    global _mq_thread
+    _mq_thread = threading.Thread(target=start_rabbitmq_consumer, daemon=True)
+    _mq_thread.start()
     logger.info("信号通知服务启动完成")
 
 
@@ -155,14 +157,33 @@ def start_rabbitmq_consumer():
 
 @app.get("/health")
 async def health_check():
+    checks = {}
+    # RabbitMQ consumer thread
+    mq_alive = _mq_thread is not None and _mq_thread.is_alive()
+    checks["mq_consumer"] = {"status": "pass" if mq_alive else "fail"}
+    # RabbitMQ connection
+    try:
+        rmq_ok = rmq._connection and rmq._connection.is_open
+        checks["rabbitmq"] = {"status": "pass" if rmq_ok else "fail"}
+    except Exception as e:
+        checks["rabbitmq"] = {"status": "fail", "message": str(e)}
+    # Redis
+    try:
+        redis_mgr._client.ping()
+        checks["redis"] = {"status": "pass"}
+    except Exception as e:
+        checks["redis"] = {"status": "fail", "message": str(e)}
+
+    all_ok = all(c.get("status") == "pass" for c in checks.values())
     return {
-        "status": "healthy",
+        "status": "healthy" if all_ok else "degraded",
         "service": "signal-notification",
         "ws_connections": ws_manager.connection_count,
         "notify_channels": {
             "dingtalk": notify_manager.dingtalk.enabled,
             "wecom": notify_manager.wecom.enabled,
         },
+        "checks": checks,
         "timestamp": datetime.now().isoformat(),
     }
 

@@ -95,7 +95,32 @@ def publish_message(routing_key: str, message: dict):
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "service": "strategy", "timestamp": datetime.now().isoformat()}
+    checks = {}
+    # InfluxDB
+    try:
+        checks["influxdb"] = influx_query.health_check()
+    except Exception as e:
+        checks["influxdb"] = {"status": "fail", "message": str(e)}
+    # Redis
+    try:
+        redis_mgr._client.ping()
+        checks["redis"] = {"status": "pass"}
+    except Exception as e:
+        checks["redis"] = {"status": "fail", "message": str(e)}
+    # RabbitMQ
+    try:
+        rmq_ok = rmq._connection and rmq._connection.is_open
+        checks["rabbitmq"] = {"status": "pass" if rmq_ok else "fail"}
+    except Exception as e:
+        checks["rabbitmq"] = {"status": "fail", "message": str(e)}
+
+    all_ok = all(c.get("status") == "pass" for c in checks.values())
+    return {
+        "status": "healthy" if all_ok else "degraded",
+        "service": "strategy",
+        "checks": checks,
+        "timestamp": datetime.now().isoformat(),
+    }
 
 
 @app.get("/trade-day/check")

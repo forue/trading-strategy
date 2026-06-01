@@ -42,7 +42,28 @@ async def shutdown():
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "service": "data-collector", "timestamp": datetime.now().isoformat()}
+    checks = {}
+    # InfluxDB
+    try:
+        from .influx_client import influx_manager
+        h = influx_manager.client.health()
+        checks["influxdb"] = {"status": h.status}
+    except Exception as e:
+        checks["influxdb"] = {"status": "fail", "message": str(e)}
+    # RabbitMQ
+    try:
+        rmq_ok = rmq._connection and rmq._connection.is_open
+        checks["rabbitmq"] = {"status": "pass" if rmq_ok else "fail"}
+    except Exception as e:
+        checks["rabbitmq"] = {"status": "fail", "message": str(e)}
+
+    all_ok = all(c.get("status") in ("pass", "pass") for c in checks.values())
+    return {
+        "status": "healthy" if all_ok else "degraded",
+        "service": "data-collector",
+        "checks": checks,
+        "timestamp": datetime.now().isoformat(),
+    }
 
 
 @app.post("/collect/sector-flow")

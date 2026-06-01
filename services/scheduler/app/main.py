@@ -93,24 +93,35 @@ async def _is_non_trade_day() -> bool:
 
 
 async def job_collect_data():
-    """定时任务：数据采集（每个交易日15:00执行），采集成功后立即触发策略计算"""
+    """定时任务：数据采集（每个交易日15:00执行），采集成功后立即触发策略计算，失败最多重试3次"""
     if await _is_non_trade_day():
         logger.info(">>> 今日非交易日，跳过数据采集")
         return
     logger.info(">>> 定时任务触发: 数据采集")
-    try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(f"{settings.data_collector_url}/collect/sector-flow")
-            result = resp.json()
-            logger.info(f"数据采集结果: {result}")
-            if result.get("code") == 200:
-                logger.info(">>> 数据采集完成，立即触发策略计算")
-                await _trigger_strategy_calculation(client)
-                # 采集+计算成功后设置去重标记
-                today = datetime.now().strftime("%Y-%m-%d")
-                await _check_and_mark_executed(f"signal:calculated:{today}")
-    except Exception as e:
-        logger.error(f"数据采集任务失败: {e}")
+
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.post(f"{settings.data_collector_url}/collect/sector-flow")
+                result = resp.json()
+                logger.info(f"数据采集结果: {result}")
+                if result.get("code") == 200:
+                    logger.info(">>> 数据采集完成，立即触发策略计算")
+                    await _trigger_strategy_calculation(client)
+                    today = datetime.now().strftime("%Y-%m-%d")
+                    await _check_and_mark_executed(f"signal:calculated:{today}")
+                    return
+                else:
+                    logger.warning(f"数据采集返回非200(尝试{attempt+1}/3): {result}")
+        except Exception as e:
+            logger.warning(f"数据采集任务失败(尝试{attempt+1}/3): {e}")
+
+        if attempt < 2:
+            wait = 60 * (attempt + 1)  # 60s, 120s
+            logger.info(f"等待{wait}秒后重试数据采集")
+            await asyncio.sleep(wait)
+
+    logger.error("数据采集任务最终失败(已重试3次)")
 
 
 async def _trigger_strategy_calculation(client: httpx.AsyncClient):

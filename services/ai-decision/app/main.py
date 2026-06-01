@@ -22,6 +22,7 @@ logger.add(sys.stderr, level=settings.log_level)
 
 rmq = RabbitMQManager()
 redis_mgr = RedisManager()
+_mq_thread = None
 llm_client: BaseLLMClient = None
 signal_llm_client: BaseLLMClient = None  # 信号分析专用 LLM 客户端
 analyzer: SignalAnalyzer = None
@@ -105,8 +106,9 @@ async def lifespan(app: FastAPI):
         db=settings.redis_db,
     )
     _init_llm()
-    mq_thread = threading.Thread(target=_start_consumer, daemon=True)
-    mq_thread.start()
+    global _mq_thread
+    _mq_thread = threading.Thread(target=_start_consumer, daemon=True)
+    _mq_thread.start()
     yield
     # 关闭所有 httpx 客户端，避免连接泄漏
     if llm_client and hasattr(llm_client, 'close'):
@@ -199,17 +201,38 @@ async def _handle_signals(message: dict):
 
 @app.get("/health")
 async def health_check():
-    llm_ok = False
+    checks = {}
+    # LLM
     if llm_client:
         try:
             llm_ok = await llm_client.health_check()
+            checks["llm"] = {"status": "pass" if llm_ok else "fail"}
         except Exception as e:
-            logger.warning(f"LLM 健康检查失败: {e}")
+            checks["llm"] = {"status": "fail", "message": str(e)}
+    else:
+        checks["llm"] = {"status": "fail", "message": "未初始化"}
+    # RabbitMQ consumer thread
+    mq_alive = _mq_thread is not None and _mq_thread.is_alive()
+    checks["mq_consumer"] = {"status": "pass" if mq_alive else "fail"}
+    # RabbitMQ connection
+    try:
+        rmq_ok = rmq._connection and rmq._connection.is_open
+        checks["rabbitmq"] = {"status": "pass" if rmq_ok else "fail"}
+    except Exception as e:
+        checks["rabbitmq"] = {"status": "fail", "message": str(e)}
+    # Redis
+    try:
+        redis_mgr._client.ping()
+        checks["redis"] = {"status": "pass"}
+    except Exception as e:
+        checks["redis"] = {"status": "fail", "message": str(e)}
+
+    all_ok = all(c.get("status") == "pass" for c in checks.values())
     return {
-        "status": "healthy",
+        "status": "healthy" if all_ok else "degraded",
         "service": "ai-decision",
-        "llm_status": "connected" if llm_ok else "unavailable",
         "provider": settings.ai_provider,
+        "checks": checks,
         "timestamp": datetime.now().isoformat(),
     }
 
