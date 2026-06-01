@@ -75,8 +75,8 @@
     </div>
 
     <!-- Signal Detail Dialog -->
-    <el-dialog v-model="signalDialogVisible" :title="`${selectedDate} 信号详情`" width="580px">
-      <el-table :data="selectedDateSignals" max-height="400">
+    <el-dialog v-model="signalDialogVisible" :title="`${selectedDate} 信号详情`" width="640px">
+      <el-table :data="selectedDateSignals" max-height="200">
         <el-table-column prop="sector_name" label="板块" />
         <el-table-column prop="direction" label="方向">
           <template #default="{ row }">
@@ -93,6 +93,24 @@
           <template #default="{ row }">{{ ((row.position_ratio || 0) * 100).toFixed(1) }}%</template>
         </el-table-column>
       </el-table>
+
+      <!-- AI 分析回放 -->
+      <div v-if="selectedAnalysis.length > 0" style="margin-top: 16px; border-top: 1px solid var(--border-secondary); padding-top: 12px;">
+        <div style="font-weight: 600; font-size: 14px; margin-bottom: 10px;">AI 分析回放</div>
+        <div v-for="(a, idx) in selectedAnalysis" :key="idx" style="margin-bottom: 12px; padding: 10px; background: var(--bg-tertiary); border-radius: 8px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+            <span style="font-weight: 600;">{{ a.sector_name }} ({{ a.direction === 'BUY' ? '买入' : '卖出' }})</span>
+            <span style="font-size: 12px; color: var(--text-tertiary);">信心度 {{ (a.confidence * 100).toFixed(0) }}%</span>
+          </div>
+          <div style="font-size: 13px; line-height: 1.6; color: var(--text-secondary);">{{ a.interpretation }}</div>
+          <div v-if="a.risk_factors?.length" style="margin-top: 6px; font-size: 12px; color: var(--accent-danger);">
+            <div v-for="(r, ri) in a.risk_factors" :key="ri">- {{ r }}</div>
+          </div>
+          <div v-if="a.suggestion" style="margin-top: 6px; font-size: 12px; color: var(--accent-primary);">建议: {{ a.suggestion }}</div>
+        </div>
+      </div>
+      <div v-else-if="analysisLoading" style="margin-top: 16px; text-align: center; color: var(--text-tertiary);">加载AI分析中...</div>
+      <div v-else-if="selectedDateSignals.length > 0" style="margin-top: 16px; text-align: center; color: var(--text-tertiary); font-size: 13px;">该日期暂无AI分析记录</div>
     </el-dialog>
   </div>
 </template>
@@ -108,6 +126,7 @@ import dayjs from 'dayjs'
 import { signalApi } from '@/api/signal'
 import { fundApi } from '@/api/fund'
 import { settingsApi } from '@/api/settings'
+import { aiApi } from '@/api/ai'
 import AiAnalysisPanel from '@/components/AiAnalysisPanel.vue'
 import RiskAlertPanel from '@/components/RiskAlertPanel.vue'
 import { useThemeStore } from '@/stores/theme'
@@ -322,19 +341,28 @@ const calendarOption = computed(() => {
 const signalDialogVisible = ref(false)
 const selectedDate = ref('')
 const selectedDateSignals = ref<any[]>([])
+const selectedAnalysis = ref<any[]>([])
+const analysisLoading = ref(false)
 
-function handleCalendarClick(params: any) {
+async function handleCalendarClick(params: any) {
   if (params.data) {
     const date = params.data[0]
-    const count = params.data[1]
-    if (count > 0) {
-      selectedDate.value = date
-      selectedDateSignals.value = calendarRealData.value.filter((sig: any) => {
-        const d = sig.signal_date || sig.created_at?.substring(0, 10)
-        return d === date
-      })
-      signalDialogVisible.value = true
-    }
+    selectedDate.value = date
+    selectedDateSignals.value = calendarRealData.value.filter((sig: any) => {
+      const d = sig.signal_date || sig.created_at?.substring(0, 10)
+      return d === date
+    })
+    // 获取AI分析
+    analysisLoading.value = true
+    selectedAnalysis.value = []
+    try {
+      const res = await aiApi.getAnalysisHistory(currentStrategy.value, date, date)
+      if (res?.history?.length > 0) {
+        selectedAnalysis.value = res.history[0].analyses || []
+      }
+    } catch { /* ignore */ }
+    analysisLoading.value = false
+    signalDialogVisible.value = true
   }
 }
 

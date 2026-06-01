@@ -95,6 +95,12 @@ export const aiApi = {
     }, { headers: { 'X-Silent': '1' } })
   },
 
+  getAnalysisHistory(strategyType: string, startDate: string, endDate: string): Promise<{ history: any[]; count: number }> {
+    return request.get('/ai/analysis-history', {
+      params: { strategy_type: strategyType, start_date: startDate, end_date: endDate },
+    }, { headers: { 'X-Silent': '1' } })
+  },
+
   getConfig(): Promise<AiConfig> {
     return request.get('/ai/config')
   },

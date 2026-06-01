@@ -203,7 +203,7 @@ async def _handle_signals(message: dict):
     analysis_dicts = [a.model_dump() for a in analyses]
 
     cache_key = f"ai:analysis:{strategy_type}:{signal_date}"
-    redis_mgr.setex(cache_key, 7 * 86400, json.dumps(analysis_dicts, ensure_ascii=False))
+    redis_mgr.setex(cache_key, 30 * 86400, json.dumps(analysis_dicts, ensure_ascii=False))
 
     rmq.publish("ai.signal.analyzed", {
         "event": "signal_analyzed",
@@ -378,13 +378,41 @@ async def analyze_signal(request: AnalyzeRequest):
         analyses = await analyzer.analyze_signals(signals, contexts=contexts)
         analysis_dicts = [a.model_dump() for a in analyses]
 
-        redis_mgr.setex(cache_key, 7 * 86400, json.dumps(analysis_dicts, ensure_ascii=False))
+        redis_mgr.setex(cache_key, 30 * 86400, json.dumps(analysis_dicts, ensure_ascii=False))
 
         return success_response(data={"analyses": analysis_dicts})
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"信号解读失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/ai/analysis-history")
+async def get_analysis_history(strategy_type: str = "AGGRESSIVE", start_date: str = "", end_date: str = ""):
+    """获取历史AI分析结果（供日历回放）"""
+    try:
+        results = []
+        # 遍历日期范围，从 Redis 缓存读取
+        from datetime import timedelta
+        start = datetime.strptime(start_date, "%Y-%m-%d") if start_date else datetime.now() - timedelta(days=30)
+        end = datetime.strptime(end_date, "%Y-%m-%d") if end_date else datetime.now()
+        current = start
+        while current <= end:
+            date_str = current.strftime("%Y-%m-%d")
+            cache_key = f"ai:analysis:{strategy_type}:{date_str}"
+            cached = redis_mgr.get(cache_key)
+            if cached:
+                analyses = json.loads(cached)
+                results.append({
+                    "date": date_str,
+                    "analyses": analyses,
+                    "count": len(analyses),
+                })
+            current += timedelta(days=1)
+        return success_response(data={"history": results, "count": len(results)})
+    except Exception as e:
+        logger.error(f"获取分析历史失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
