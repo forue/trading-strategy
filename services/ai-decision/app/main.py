@@ -177,7 +177,10 @@ async def _handle_signals(message: dict):
 
     logger.info(f"开始解读 {len(signals)} 个信号: strategy={strategy_type}")
 
-    analyses = await analyzer.analyze_signals(signals)
+    # 获取真实市场数据构建上下文
+    contexts = await _build_signal_contexts(signals)
+
+    analyses = await analyzer.analyze_signals(signals, contexts=contexts)
 
     analysis_dicts = [a.model_dump() for a in analyses]
 
@@ -193,6 +196,94 @@ async def _handle_signals(message: dict):
     })
 
     logger.info(f"信号解读完成: {len(analyses)} 个, strategy={strategy_type}")
+
+
+async def _build_signal_contexts(signals: list[dict]) -> dict:
+    """为信号解读构建真实的市场上下文"""
+    from .signal_analyzer import MarketContext
+    import httpx
+
+    contexts = {}
+    data_collector_url = settings.data_collector_url
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            # 获取当日全部板块数据
+            today = datetime.now().strftime("%Y-%m-%d")
+            resp = await client.get(f"{data_collector_url}/query/all-sectors",
+                                    params={"start_date": today, "end_date": today})
+            all_sectors = {}
+            market_avg = 0.0
+            if resp.json().get("code") == 200 and resp.json().get("data"):
+                for s in resp.json()["data"]:
+                    all_sectors[s.get("sector_code", "")] = s
+                changes = [s.get("index_change_pct", 0) or 0 for s in resp.json()["data"]]
+                market_avg = sum(changes) / max(len(changes), 1)
+
+            # 为每个信号的板块获取历史数据
+            for sig in signals:
+                code = sig.get("sector_code", "")
+                if not code:
+                    continue
+                try:
+                    hist_resp = await client.get(
+                        f"{data_collector_url}/query/sector-data",
+                        params={"sector_code": code, "start_date": today, "end_date": today},
+                    )
+                    hist_data = hist_resp.json()
+                    records = hist_data.get("data", []) if hist_data.get("code") == 200 else []
+
+                    change_5d = 0.0
+                    change_10d = 0.0
+                    change_today = 0.0
+                    main_flow = 0.0
+                    turnover = 0.0
+
+                    if records:
+                        changes = [r.get("index_change_pct", 0) or 0 for r in records]
+                        if len(changes) >= 5:
+                            change_5d = round(sum(changes[-5:]), 2)
+                        if len(changes) >= 10:
+                            change_10d = round(sum(changes[-10:]), 2)
+                        if changes:
+                            change_today = round(changes[-1], 2)
+                        main_flow = records[-1].get("main_net_inflow", 0) or 0
+                        turnover = records[-1].get("turnover", 0) or 0
+
+                    # 市场宽度
+                    up_count = sum(1 for s in all_sectors.values() if (s.get("index_change_pct", 0) or 0) > 0)
+                    total = max(len(all_sectors), 1)
+                    up_ratio = up_count / total
+                    if up_ratio >= 0.6:
+                        sentiment = "强势"
+                    elif up_ratio >= 0.5:
+                        sentiment = "偏强"
+                    elif up_ratio >= 0.4:
+                        sentiment = "中性"
+                    elif up_ratio >= 0.3:
+                        sentiment = "偏弱"
+                    else:
+                        sentiment = "弱势"
+
+                    contexts[code] = MarketContext(
+                        sector_code=code,
+                        sector_name=sig.get("sector_name", ""),
+                        change_5d=change_5d,
+                        change_10d=change_10d,
+                        change_today=change_today,
+                        main_flow=main_flow,
+                        north_flow=0.0,  # 北向资金需单独接口
+                        turnover=turnover,
+                        market_change=round(market_avg, 2),
+                        market_sentiment=sentiment,
+                    )
+                except Exception as e:
+                    logger.warning(f"获取板块{code}数据失败: {e}")
+
+    except Exception as e:
+        logger.error(f"获取市场数据失败: {e}")
+
+    return contexts
 
 
 # ============================================================
@@ -260,7 +351,8 @@ async def analyze_signal(request: AnalyzeRequest):
             return success_response(data={"analyses": [], "message": "当日无信号"})
 
         signals = json.loads(signals_raw)
-        analyses = await analyzer.analyze_signals(signals)
+        contexts = await _build_signal_contexts(signals)
+        analyses = await analyzer.analyze_signals(signals, contexts=contexts)
         analysis_dicts = [a.model_dump() for a in analyses]
 
         redis_mgr.setex(cache_key, 7 * 86400, json.dumps(analysis_dicts, ensure_ascii=False))
@@ -287,6 +379,7 @@ async def risk_check(request: RiskCheckRequest):
     """风险检查 - 使用 RiskMonitor 进行全面风险评估"""
     try:
         from .risk_monitor import RiskMonitor, PortfolioState
+        import httpx
 
         monitor = RiskMonitor()
 
@@ -299,12 +392,39 @@ async def risk_check(request: RiskCheckRequest):
                     positions = json.loads(positions_raw)
                     break
 
+        # 获取真实市场数据（如果未传入）
+        market_change = request.market_change
+        daily_pnl = request.daily_pnl
+
+        if market_change == 0.0 or daily_pnl == 0.0:
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    today = datetime.now().strftime("%Y-%m-%d")
+                    resp = await client.get(
+                        f"{settings.data_collector_url}/query/all-sectors",
+                        params={"start_date": today, "end_date": today},
+                    )
+                    if resp.json().get("code") == 200 and resp.json().get("data"):
+                        sectors = resp.json()["data"]
+                        changes = [s.get("index_change_pct", 0) or 0 for s in sectors]
+                        if market_change == 0.0:
+                            market_change = round(sum(changes) / max(len(changes), 1), 2)
+                        # 根据持仓权重估算日盈亏
+                        if daily_pnl == 0.0 and positions:
+                            sector_map = {s.get("sector_code"): s.get("index_change_pct", 0) or 0 for s in sectors}
+                            weighted_pnl = 0.0
+                            for code, weight in positions.items():
+                                weighted_pnl += weight * sector_map.get(code, 0)
+                            daily_pnl = round(weighted_pnl, 4)
+            except Exception as e:
+                logger.warning(f"获取市场数据失败: {e}")
+
         state = PortfolioState(
             positions=positions,
             total_assets=request.total_assets,
-            daily_pnl=request.daily_pnl,
+            daily_pnl=daily_pnl,
             max_drawdown=request.max_drawdown,
-            market_change=request.market_change,
+            market_change=market_change,
         )
 
         alerts = monitor.check_portfolio(state)
