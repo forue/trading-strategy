@@ -52,7 +52,7 @@
           <el-icon v-if="msg.role === 'user'"><User /></el-icon>
           <span v-else>🤖</span>
         </div>
-        <div class="content">
+        <div class="content" :class="msg.role">
           <div v-if="msg.role === 'user'" class="text user-text">{{ msg.content }}</div>
           <template v-else>
             <!-- 工具调用记录 -->
@@ -712,19 +712,31 @@ async function scrollToBottom() {
         background: var(--bg-tertiary); display: flex; align-items: center; justify-content: center; font-size: 14px;
       }
       .content {
-        display: flex; flex-direction: column; max-width: 80%;
+        display: flex; flex-direction: column; min-width: 0;
+        &.user { max-width: 80%; }
         .user-text {
           padding: 10px 14px; background: var(--accent-primary-light); border-radius: 12px 12px 2px 12px;
           font-size: 14px; line-height: 1.6; white-space: pre-wrap;
         }
         .md-body {
           padding: 12px 16px; background: var(--bg-tertiary); border-radius: 12px 12px 12px 2px;
-          font-size: 14px; line-height: 1.7; word-break: break-word;
+          font-size: 14px; line-height: 1.7; word-break: break-word; max-width: 100%;
           :deep(p) { margin: 0 0 8px 0; &:last-child { margin-bottom: 0; } }
           :deep(h1), :deep(h2), :deep(h3) { margin: 12px 0 6px 0; font-weight: 600; }
           :deep(code) { background: var(--bg-elevated); padding: 1px 4px; border-radius: 3px; font-size: 13px; }
           :deep(pre) { background: #1e1e1e; color: #d4d4d4; padding: 10px 14px; border-radius: 6px; overflow-x: auto; margin: 8px 0; code { background: none; padding: 0; color: inherit; } }
-          :deep(table) { border-collapse: collapse; margin: 8px 0; th, td { border: 1px solid var(--border-secondary); padding: 4px 8px; } th { background: var(--bg-tertiary); } }
+          :deep(table) {
+            border-collapse: collapse; margin: 8px 0; width: 100%; font-size: 13px;
+            th, td {
+              border: 1px solid var(--border-primary); padding: 6px 10px;
+              text-align: left; white-space: nowrap;
+            }
+            th {
+              background: var(--bg-elevated); font-weight: 600;
+              border-bottom: 2px solid var(--border-primary);
+            }
+            tr:hover td { background: var(--bg-secondary); }
+          }
           :deep(a) { color: var(--accent-primary); }
         }
         .meta { font-size: 11px; color: var(--text-tertiary); margin-top: 4px; }
