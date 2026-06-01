@@ -700,61 +700,79 @@ class MCPToolExecutor:
         result = {"date": date}
         partial_failures = []
 
-        # 1. 大盘指数（akshare 实时）
-        try:
-            from .external_data import get_market_indices
-            idx_data = await get_market_indices()
-            if "indices" in idx_data:
-                result["indices"] = idx_data["indices"]
-        except Exception as e:
-            logger.warning(f"获取大盘指数失败: {e}")
+        # 三个数据源并行获取（避免串行累计超时）
+        from .external_data import get_market_indices, get_market_breadth_real
+
+        async def _fetch_indices():
+            try:
+                return await get_market_indices()
+            except Exception as e:
+                logger.warning(f"获取大盘指数失败: {e}")
+                return {"error": str(e)}
+
+        async def _fetch_breadth():
+            try:
+                return await get_market_breadth_real()
+            except Exception as e:
+                logger.warning(f"获取涨跌统计失败: {e}")
+                return {"error": str(e)}
+
+        async def _fetch_sectors():
+            try:
+                return await self._query_with_fallback(
+                    f"{self.data_collector_url}/query/all-sectors",
+                    {"start_date": date, "end_date": date},
+                )
+            except Exception as e:
+                logger.warning(f"获取板块数据失败: {e}")
+                return (None, date)
+
+        idx_data, breadth, (sectors_data, actual_date) = await asyncio.gather(
+            _fetch_indices(), _fetch_breadth(), _fetch_sectors()
+        )
+
+        # 处理大盘指数
+        if "indices" in idx_data:
+            result["indices"] = idx_data["indices"]
+        elif "error" in idx_data:
             partial_failures.append("大盘指数")
 
-        # 2. 个股涨跌统计（akshare 实时）
-        try:
-            from .external_data import get_market_breadth_real
-            breadth = await get_market_breadth_real()
-            if "total_stocks" in breadth:
-                result["breadth"] = {
-                    "total_stocks": breadth["total_stocks"],
-                    "up": breadth["up"],
-                    "down": breadth["down"],
-                    "flat": breadth["flat"],
-                    "up_down_ratio": breadth["up_down_ratio"],
-                    "limit_up": breadth["limit_up"],
-                    "limit_down": breadth["limit_down"],
-                    "up_pct": breadth["up_pct"],
-                    "avg_change_pct": breadth["avg_change_pct"],
-                }
-        except Exception as e:
-            logger.warning(f"获取涨跌统计失败: {e}")
+        # 处理涨跌统计
+        if "total_stocks" in breadth:
+            result["breadth"] = {
+                "total_stocks": breadth["total_stocks"],
+                "up": breadth["up"],
+                "down": breadth["down"],
+                "flat": breadth["flat"],
+                "up_down_ratio": breadth["up_down_ratio"],
+                "limit_up": breadth["limit_up"],
+                "limit_down": breadth["limit_down"],
+                "up_pct": breadth["up_pct"],
+                "avg_change_pct": breadth["avg_change_pct"],
+            }
+        elif "error" in breadth:
             partial_failures.append("涨跌统计")
 
-        # 3. 板块级数据（data-collector）
-        try:
-            data, actual_date = await self._query_with_fallback(
-                f"{self.data_collector_url}/query/all-sectors",
-                {"start_date": date, "end_date": date},
-            )
-            if data and data.get("data"):
-                sectors = data["data"]
-                changes = [_safe_float(s.get("index_change_pct")) for s in sectors]
-                up_s = sum(1 for c in changes if c > 0)
-                down_s = sum(1 for c in changes if c < 0)
-                avg = sum(changes) / max(len(sectors), 1)
-                total_inflow = sum(_safe_float(s.get("main_net_inflow")) for s in sectors) / 1e8
-                result["sectors"] = {
-                    "total": len(sectors),
-                    "up": up_s,
-                    "down": down_s,
-                    "avg_change_pct": round(avg, 2),
-                    "total_main_inflow_yi": round(total_inflow, 2),
-                }
-                result["sentiment"] = "强势" if avg > 1 else "偏强" if avg > 0 else "偏弱" if avg > -1 else "弱势"
-                if actual_date != date:
-                    result["note"] = f"{date} 无数据，已回退到最近交易日 {actual_date}"
-        except Exception as e:
-            logger.warning(f"获取板块数据失败: {e}")
+        # 处理板块数据
+        if sectors_data and sectors_data.get("data"):
+            sectors = sectors_data["data"]
+            changes = [_safe_float(s.get("index_change_pct")) for s in sectors]
+            up_s = sum(1 for c in changes if c > 0)
+            down_s = sum(1 for c in changes if c < 0)
+            avg = sum(changes) / max(len(sectors), 1)
+            total_inflow = sum(_safe_float(s.get("main_net_inflow")) for s in sectors) / 1e8
+            result["sectors"] = {
+                "total": len(sectors),
+                "up": up_s,
+                "down": down_s,
+                "avg_change_pct": round(avg, 2),
+                "total_main_inflow_yi": round(total_inflow, 2),
+            }
+            result["sentiment"] = "强势" if avg > 1 else "偏强" if avg > 0 else "偏弱" if avg > -1 else "弱势"
+            if actual_date != date:
+                result["note"] = f"{date} 无数据，已回退到最近交易日 {actual_date}"
+        else:
+            partial_failures.append("板块数据")
             partial_failures.append("板块数据")
 
         if partial_failures:

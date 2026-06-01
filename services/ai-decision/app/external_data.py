@@ -128,7 +128,7 @@ async def get_global_market_overview() -> dict:
             return result
         except Exception as e:
             if attempt < 2:
-                await asyncio.sleep(2 * (attempt + 1))
+                await asyncio.sleep(1 * (attempt + 1))
             else:
                 logger.error(f"获取全球市场行情失败(重试3次): {e}")
 
@@ -510,7 +510,7 @@ async def get_market_indices() -> dict:
             return result
         except Exception as e:
             if attempt < 2:
-                await asyncio.sleep(2 * (attempt + 1))
+                await asyncio.sleep(1 * (attempt + 1))
             else:
                 logger.error(f"获取大盘指数失败(重试3次): {e}")
 
@@ -623,7 +623,7 @@ async def get_market_breadth_real() -> dict:
             return result
         except Exception as e:
             if attempt < 2:
-                await asyncio.sleep(2 * (attempt + 1))
+                await asyncio.sleep(1 * (attempt + 1))
             else:
                 logger.error(f"获取市场涨跌统计失败(重试3次): {e}")
 
