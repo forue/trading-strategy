@@ -191,8 +191,10 @@ def _summarize_tool_result(tool_name: str, result: dict, max_chars: int = 2000) 
     return result_str[:max_chars] + "\n...(已截断)"
 
 
-# Agent 系统提示词
+# Agent 系统提示词（{current_date} 在运行时替换为当前日期）
 AGENT_SYSTEM_PROMPT = """你是一个专业的A股量化投资分析师，擅长板块轮动分析和资金流向研究。
+
+**当前日期: {current_date}**（所有数据查询必须使用此日期附近的日期，不要使用训练数据中的历史日期）
 
 ## 可用工具
 数据查询:
@@ -272,6 +274,7 @@ AGENT_SYSTEM_PROMPT = """你是一个专业的A股量化投资分析师，擅长
 - 不确定的结论标注"（低置信度）"
 - 禁止编造未查询过的板块代码或数字
 - 不知道板块代码时先调 list_sectors 搜索，使用返回的 `code` 字段（如 THS881101），不要用名称
+- **日期参数**：所有工具的 date 参数必须使用当前日期或其附近的日期，不要使用历史日期。如果不指定日期，工具会自动使用最近交易日
 - **同轮可并行调用多个无依赖的工具**，如同时获取多个板块数据、同时查技术指标和估值
 - **优先使用批量接口**：analyze_sector(sector_codes: [...]) 一次分析多个板块，list_sectors(keyword: "半导体,白酒,银行") 一次搜索多个关键词
 - 工具返回错误时尝试其他工具或调整参数
@@ -327,7 +330,9 @@ class ReActAgent:
         """执行 Agent 循环，流式输出"""
         import time as _time
 
-        messages = [{"role": "system", "content": AGENT_SYSTEM_PROMPT}]
+        from datetime import datetime as _dt
+        system_prompt = AGENT_SYSTEM_PROMPT.replace("{current_date}", _dt.now().strftime("%Y-%m-%d %A"))
+        messages = [{"role": "system", "content": system_prompt}]
         if history:
             clean_history = _remove_orphaned_tool_messages(history[-10:])
 
