@@ -9,6 +9,17 @@ from functools import lru_cache
 from loguru import logger
 
 
+async def _run_with_timeout(func, *args, timeout: int = 20, **kwargs):
+    """在线程池中执行同步函数，带超时控制"""
+    try:
+        return await asyncio.wait_for(
+            asyncio.get_event_loop().run_in_executor(None, lambda: func(*args, **kwargs)),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        raise TimeoutError(f"AkShare 调用超时({timeout}s)")
+
+
 # 缓存: {key: (data, timestamp)}
 _cache: dict[str, tuple[Any, float]] = {}
 # 默认 TTL（秒）
@@ -61,9 +72,7 @@ async def get_global_market_overview() -> dict:
 
     try:
         import akshare as ak
-        df = await asyncio.get_event_loop().run_in_executor(
-            None, ak.index_global_spot_em
-        )
+        df = await _run_with_timeout(ak.index_global_spot_em, timeout=20)
         if df is None or df.empty:
             return {"error": "获取全球指数失败"}
 
@@ -298,15 +307,13 @@ async def get_market_news(source: str = "global", limit: int = 15) -> dict:
     import akshare as ak
     try:
         if source == "global":
-            df = await asyncio.get_event_loop().run_in_executor(None, ak.stock_info_global_em)
+            df = await _run_with_timeout(ak.stock_info_global_em, timeout=20)
         elif source == "ths":
-            df = await asyncio.get_event_loop().run_in_executor(None, ak.stock_info_global_ths)
+            df = await _run_with_timeout(ak.stock_info_global_ths, timeout=20)
         elif source == "sina":
-            df = await asyncio.get_event_loop().run_in_executor(None, ak.stock_info_global_sina)
+            df = await _run_with_timeout(ak.stock_info_global_sina, timeout=20)
         elif source == "cls":
-            df = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: ak.stock_info_global_cls(symbol="全部")
-            )
+            df = await _run_with_timeout(ak.stock_info_global_cls, symbol="全部", timeout=20)
         else:
             return {"error": f"未知新闻源: {source}"}
 

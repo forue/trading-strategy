@@ -930,15 +930,11 @@ class MCPToolExecutor:
         """获取板块列表，支持关键词搜索。返回 sector_code 和 sector_name。"""
         keyword = args.get("keyword", "")
         try:
-            # 从 all-sectors 获取代码+名称映射（/sectors 只返回名称字符串）
-            end = _get_latest_trading_day()
-            resp = await self._client.get(
-                f"{self.data_collector_url}/query/all-sectors",
-                params={"start_date": end, "end_date": end},
-                timeout=15,
+            # 从 all-sectors 获取代码+名称映射，自动回退日期
+            data, used_date = await self._query_with_fallback(
+                f"{self.data_collector_url}/query/all-sectors", {},
             )
-            data = resp.json()
-            if data.get("code") == 200 and data.get("data"):
+            if data and data.get("code") == 200 and data.get("data"):
                 seen = set()
                 sectors = []
                 for s in data["data"]:
@@ -954,7 +950,7 @@ class MCPToolExecutor:
                     )]
                 return {
                     "total": len(sectors),
-                    "date": end,
+                    "date": used_date,
                     "sectors": sectors[:30],
                 }
             return {"error": "获取板块列表失败"}
@@ -1036,32 +1032,26 @@ class MCPToolExecutor:
         try:
             if sector_code:
                 # 单个板块趋势
-                end = _get_latest_trading_day()
                 start = (datetime.now() - timedelta(days=days * 2)).strftime("%Y-%m-%d")
-                resp = await self._client.get(
+                data, used_date = await self._query_with_fallback(
                     f"{self.data_collector_url}/query/sector-data",
-                    params={"sector_code": sector_code, "start_date": start, "end_date": end},
+                    {"sector_code": sector_code, "start_date": start},
                 )
-                data = resp.json()
-                if data.get("code") == 200 and data.get("data"):
+                if data and data.get("code") == 200 and data.get("data"):
                     records = data["data"][-days:]
                     inflows = [r.get("main_net_inflow", 0) for r in records]
                     return _build_flow_trend(sector_code, records, inflows)
                 return {"error": "无数据"}
             else:
                 # 全部板块趋势摘要
-                end = _get_latest_trading_day()
-                resp = await self._client.get(
-                    f"{self.data_collector_url}/query/all-sectors",
-                    params={"start_date": end, "end_date": end},
+                data, used_date = await self._query_with_fallback(
+                    f"{self.data_collector_url}/query/all-sectors", {},
                 )
-                data = resp.json()
-                if data.get("code") == 200 and data.get("data"):
+                if data and data.get("code") == 200 and data.get("data"):
                     sectors = data["data"]
-                    # 取主力流入前5和后5
                     sorted_sectors = sorted(sectors, key=lambda x: x.get("main_net_inflow", 0), reverse=True)
                     return {
-                        "date": end,
+                        "date": used_date,
                         "top_inflow": [{
                             "name": s.get("sector_name", ""),
                             "main_inflow_yi": round(s.get("main_net_inflow", 0) / 1e8, 2),
