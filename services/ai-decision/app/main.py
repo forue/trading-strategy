@@ -162,6 +162,24 @@ def _start_consumer():
         logger.error(f"RabbitMQ 消费者启动失败: {e}")
 
 
+async def _fetch_signals_from_signal_service(strategy_type: str, signal_date: str) -> list:
+    """从信号通知服务获取信号数据（信号存在 signal 服务的 Redis 中）"""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"{settings.signal_url}/signals/today",
+                params={"strategy_type": strategy_type},
+            )
+            if resp.json().get("code") == 200:
+                signals = resp.json().get("data", [])
+                # 按日期过滤
+                return [s for s in signals if s.get("signal_date", "") == signal_date] if signals else []
+    except Exception as e:
+        logger.warning(f"从信号服务获取信号失败: {e}")
+    return []
+
+
 async def _handle_signals(message: dict):
     """处理策略信号"""
     if not analyzer:
@@ -346,11 +364,11 @@ async def analyze_signal(request: AnalyzeRequest):
         if cached:
             return success_response(data={"analyses": json.loads(cached)})
 
-        signals_raw = redis_mgr.get(f"signals:{request.strategy_type}:{signal_date}")
-        if not signals_raw:
+        # 从信号通知服务获取信号（信号存在其 Redis DB 1 中）
+        signals = await _fetch_signals_from_signal_service(request.strategy_type, signal_date)
+        if not signals:
             return success_response(data={"analyses": [], "message": "当日无信号"})
 
-        signals = json.loads(signals_raw)
         contexts = await _build_signal_contexts(signals)
         analyses = await analyzer.analyze_signals(signals, contexts=contexts)
         analysis_dicts = [a.model_dump() for a in analyses]
