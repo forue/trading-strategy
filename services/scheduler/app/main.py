@@ -250,6 +250,7 @@ app = FastAPI(title="任务调度中心", version="1.0.0", lifespan=lifespan)
 
 @app.get("/health")
 async def health_check():
+    is_running = scheduler.running
     jobs = []
     for job in scheduler.get_jobs():
         jobs.append({
@@ -257,8 +258,10 @@ async def health_check():
             "name": job.name,
             "next_run": str(job.next_run_time) if job.next_run_time else None,
         })
+    status = "healthy" if is_running else "degraded"
     return {
-        "status": "healthy",
+        "status": status,
+        "scheduler_running": is_running,
         "service": "scheduler",
         "jobs": jobs,
         "timestamp": datetime.now().isoformat(),
