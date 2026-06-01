@@ -38,16 +38,16 @@ class PortfolioState(BaseModel):
 class RiskMonitor:
     """风险监控器"""
 
-    # 风险阈值配置
+    # 风险阈值配置（百分比单位，如 2.0 = 2%）
     THRESHOLDS = {
-        "concentration_warn": 0.40,      # 单板块仓位预警线
-        "concentration_critical": 0.60,   # 单板块仓位警戒线
-        "daily_loss_warn": 0.03,          # 当日亏损预警线
-        "daily_loss_critical": 0.05,      # 当日亏损警戒线
-        "drawdown_warn": 0.08,            # 回撤预警线
-        "drawdown_critical": 0.12,        # 回撤警戒线
-        "market_drop_warn": 0.02,         # 大盘跌幅预警
-        "market_drop_critical": 0.03,     # 大盘跌幅警戒
+        "concentration_warn": 0.35,      # 单板块仓位预警线（权重0-1）
+        "concentration_critical": 0.50,   # 单板块仓位警戒线
+        "daily_loss_warn": 1.5,           # 当日亏损预警线（%）
+        "daily_loss_critical": 3.0,       # 当日亏损警戒线（%）
+        "drawdown_warn": 5.0,             # 回撤预警线（%）
+        "drawdown_critical": 10.0,        # 回撤警戒线（%）
+        "market_drop_warn": 1.0,          # 大盘跌幅预警（%）
+        "market_drop_critical": 2.5,      # 大盘跌幅警戒（%）
     }
 
     def check_portfolio(self, state: PortfolioState) -> list[RiskAlert]:
@@ -93,7 +93,7 @@ class RiskMonitor:
                 alert_type="daily_loss",
                 level=AlertLevel.CRITICAL,
                 title="当日亏损超警戒线",
-                description=f"当日亏损 {abs(state.daily_pnl)*100:.2f}%，超过 {self.THRESHOLDS['daily_loss_critical']*100:.0f}% 警戒线",
+                description=f"当日亏损 {abs(state.daily_pnl):.2f}%，超过 {self.THRESHOLDS['daily_loss_critical']:.0f}% 警戒线",
                 suggestion="建议暂停交易，评估市场状况",
                 metrics={"daily_pnl": state.daily_pnl, "threshold": self.THRESHOLDS["daily_loss_critical"]},
             ))
@@ -102,7 +102,7 @@ class RiskMonitor:
                 alert_type="daily_loss",
                 level=AlertLevel.WARNING,
                 title="当日亏损预警",
-                description=f"当日亏损 {abs(state.daily_pnl)*100:.2f}%，接近止损线",
+                description=f"当日亏损 {abs(state.daily_pnl):.2f}%，接近止损线",
                 suggestion="建议密切关注持仓，做好止损准备",
                 metrics={"daily_pnl": state.daily_pnl, "threshold": self.THRESHOLDS["daily_loss_warn"]},
             ))
@@ -116,7 +116,7 @@ class RiskMonitor:
                 alert_type="drawdown",
                 level=AlertLevel.CRITICAL,
                 title="最大回撤超警戒线",
-                description=f"最大回撤 {state.max_drawdown*100:.2f}%，超过 {self.THRESHOLDS['drawdown_critical']*100:.0f}% 警戒线",
+                description=f"最大回撤 {state.max_drawdown:.2f}%，超过 {self.THRESHOLDS['drawdown_critical']:.0f}% 警戒线",
                 suggestion="建议暂停策略，全面评估风险",
                 metrics={"max_drawdown": state.max_drawdown, "threshold": self.THRESHOLDS["drawdown_critical"]},
             ))
@@ -125,7 +125,7 @@ class RiskMonitor:
                 alert_type="drawdown",
                 level=AlertLevel.WARNING,
                 title="回撤预警",
-                description=f"最大回撤 {state.max_drawdown*100:.2f}%，接近警戒水平",
+                description=f"最大回撤 {state.max_drawdown:.2f}%，接近警戒水平",
                 suggestion="建议降低仓位，收紧止损",
                 metrics={"max_drawdown": state.max_drawdown, "threshold": self.THRESHOLDS["drawdown_warn"]},
             ))
@@ -139,7 +139,7 @@ class RiskMonitor:
                 alert_type="market_drop",
                 level=AlertLevel.CRITICAL,
                 title="市场大幅下跌",
-                description=f"大盘跌幅 {abs(state.market_change)*100:.2f}%，市场恐慌情绪蔓延",
+                description=f"大盘跌幅 {abs(state.market_change):.2f}%，市场恐慌情绪蔓延",
                 suggestion="建议减仓观望，等待企稳信号",
                 metrics={"market_change": state.market_change, "threshold": self.THRESHOLDS["market_drop_critical"]},
             ))
@@ -148,7 +148,7 @@ class RiskMonitor:
                 alert_type="market_drop",
                 level=AlertLevel.WARNING,
                 title="市场下跌预警",
-                description=f"大盘跌幅 {abs(state.market_change)*100:.2f}%，注意控制风险",
+                description=f"大盘跌幅 {abs(state.market_change):.2f}%，注意控制风险",
                 suggestion="建议关注持仓板块资金流向",
                 metrics={"market_change": state.market_change, "threshold": self.THRESHOLDS["market_drop_warn"]},
             ))

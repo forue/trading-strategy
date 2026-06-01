@@ -434,33 +434,48 @@ async def risk_check(request: RiskCheckRequest):
 
         monitor = RiskMonitor()
 
-        # 如果没有传入持仓，从 Redis 读取
+        # 如果没有传入持仓，从 Redis DB 1 读取（持仓存在 signal 服务的 DB 中）
         positions = request.positions
         if not positions:
-            for st in ["AGGRESSIVE", "MODERATE", "CONSERVATIVE"]:
-                positions_raw = redis_mgr.get(f"positions:{st}")
-                if positions_raw:
-                    positions = json.loads(positions_raw)
-                    break
+            try:
+                import redis as _redis
+                _pos_client = _redis.Redis(
+                    host=settings.redis_host, port=settings.redis_port,
+                    password=settings.redis_password or None, db=1,
+                    decode_responses=True, socket_timeout=3,
+                )
+                for st in ["AGGRESSIVE", "MODERATE", "CONSERVATIVE"]:
+                    positions_raw = _pos_client.get(f"positions:{st}")
+                    if positions_raw:
+                        positions = json.loads(positions_raw)
+                        break
+                _pos_client.close()
+            except Exception as e:
+                logger.warning(f"读取持仓数据失败: {e}")
 
-        # 获取真实市场数据（如果未传入）
+        # 获取真实市场数据（如果未传入），使用最近可用日期
         market_change = request.market_change
         daily_pnl = request.daily_pnl
 
         if market_change == 0.0 or daily_pnl == 0.0:
             try:
                 async with httpx.AsyncClient(timeout=10) as client:
-                    today = datetime.now().strftime("%Y-%m-%d")
-                    resp = await client.get(
-                        f"{settings.data_collector_url}/query/all-sectors",
-                        params={"start_date": today, "end_date": today},
-                    )
-                    if resp.json().get("code") == 200 and resp.json().get("data"):
-                        sectors = resp.json()["data"]
+                    # 往前查找最近有数据的日期
+                    from datetime import timedelta as _td
+                    sectors = []
+                    for delta in range(7):
+                        check_date = (datetime.now() - _td(days=delta)).strftime("%Y-%m-%d")
+                        resp = await client.get(
+                            f"{settings.data_collector_url}/query/all-sectors",
+                            params={"start_date": check_date, "end_date": check_date},
+                        )
+                        if resp.json().get("code") == 200 and resp.json().get("data"):
+                            sectors = resp.json()["data"]
+                            break
+                    if sectors:
                         changes = [s.get("index_change_pct", 0) or 0 for s in sectors]
                         if market_change == 0.0:
                             market_change = round(sum(changes) / max(len(changes), 1), 2)
-                        # 根据持仓权重估算日盈亏
                         if daily_pnl == 0.0 and positions:
                             sector_map = {s.get("sector_code"): s.get("index_change_pct", 0) or 0 for s in sectors}
                             weighted_pnl = 0.0
