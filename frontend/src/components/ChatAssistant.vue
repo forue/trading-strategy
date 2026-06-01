@@ -416,8 +416,13 @@ async function handleSend() {
           } else if (data.type === 'tool_call') {
             streamingToolCalls.value.push({ name: data.data.name, arguments: data.data.arguments })
           } else if (data.type === 'tool_result') {
-            const last = streamingToolCalls.value[streamingToolCalls.value.length - 1]
-            if (last) last.result = data.data.result
+            // 按名称匹配到对应的 tool_call（优先匹配无 result 的）
+            const match = streamingToolCalls.value.find(t => t.name === data.data.name && !t.result)
+            if (match) match.result = data.data.result
+            else {
+              // 同名工具多次调用，追加一条
+              streamingToolCalls.value.push({ name: data.data.name, result: data.data.result })
+            }
           } else if (data.type === 'error') {
             throw new Error(data.data)
           } else if (data.type === 'done') {
