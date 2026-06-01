@@ -61,6 +61,14 @@ def _set_cached(key: str, data: Any):
     _cache[key] = (data, now)
 
 
+def _get_expired_cache(key: str) -> Any | None:
+    """获取过期但仍存在的缓存数据（降级用）"""
+    if key in _cache:
+        data, _ = _cache[key]
+        return data
+    return None
+
+
 def _df_to_records(df) -> list[dict]:
     """DataFrame 转为 JSON 可序列化的 list[dict]"""
     if df is None or df.empty:
@@ -77,50 +85,59 @@ def _df_to_records(df) -> list[dict]:
 # ============================================================
 
 async def get_global_market_overview() -> dict:
-    """获取全球主要市场指数行情"""
+    """获取全球主要市场指数行情（含重试和过期缓存降级）"""
     cached = _get_cached("global_market_overview", "global_market")
     if cached is not None:
         return cached
 
-    try:
-        import akshare as ak
-        df = await _run_with_timeout(ak.index_global_spot_em, timeout=20)
-        if df is None or df.empty:
-            return {"error": "获取全球指数失败"}
+    import akshare as ak
+    # 重试3次，间隔递增
+    for attempt in range(3):
+        try:
+            df = await _run_with_timeout(ak.index_global_spot_em, timeout=15)
+            if df is None or df.empty:
+                continue
 
-        # 筛选主要指数
-        key_indices = ["道琼斯", "纳斯达克", "标普500", "恒生指数", "日经225",
-                       "富时100", "德国DAX30", "法国CAC40", "韩国综合指数",
-                       "澳大利亚标普200", "台湾加权指数"]
-        rows = df.to_dict(orient="records")
-        filtered = [r for r in rows if any(k in str(r.get("名称", "")) for k in key_indices)]
+            key_indices = ["道琼斯", "纳斯达克", "标普500", "恒生指数", "日经225",
+                           "富时100", "德国DAX30", "法国CAC40", "韩国综合指数",
+                           "澳大利亚标普200", "台湾加权指数"]
+            rows = df.to_dict(orient="records")
+            filtered = [r for r in rows if any(k in str(r.get("名称", "")) for k in key_indices)]
 
-        # 如果精确匹配不够，取涨跌幅最大的
-        if len(filtered) < 5:
-            for r in rows:
-                if r not in filtered:
-                    filtered.append(r)
-                if len(filtered) >= 15:
-                    break
+            if len(filtered) < 5:
+                for r in rows:
+                    if r not in filtered:
+                        filtered.append(r)
+                    if len(filtered) >= 15:
+                        break
 
-        result = {
-            "indices": [{
-                "name": r.get("名称", ""),
-                "price": r.get("最新价", ""),
-                "change": r.get("涨跌额", ""),
-                "change_pct": r.get("涨跌幅", ""),
-                "open": r.get("今开", ""),
-                "high": r.get("最高", ""),
-                "low": r.get("最低", ""),
-                "prev_close": r.get("昨收", ""),
-            } for r in filtered[:15]],
-            "timestamp": str(df.columns[0]) if len(df.columns) > 0 else "",
-        }
-        _set_cached("global_market_overview", result)
-        return result
-    except Exception as e:
-        logger.error(f"获取全球市场行情失败: {e}")
-        return {"error": str(e)}
+            result = {
+                "indices": [{
+                    "name": r.get("名称", ""),
+                    "price": r.get("最新价", ""),
+                    "change": r.get("涨跌额", ""),
+                    "change_pct": r.get("涨跌幅", ""),
+                    "open": r.get("今开", ""),
+                    "high": r.get("最高", ""),
+                    "low": r.get("最低", ""),
+                    "prev_close": r.get("昨收", ""),
+                } for r in filtered[:15]],
+                "timestamp": str(df.columns[0]) if len(df.columns) > 0 else "",
+            }
+            _set_cached("global_market_overview", result)
+            return result
+        except Exception as e:
+            if attempt < 2:
+                await asyncio.sleep(2 * (attempt + 1))
+            else:
+                logger.error(f"获取全球市场行情失败(重试3次): {e}")
+
+    # 降级：返回过期缓存（如果有）
+    expired = _get_expired_cache("global_market_overview")
+    if expired:
+        expired["_stale"] = True
+        return expired
+    return {"error": "全球市场数据暂不可用（东方财富API连接异常）"}
 
 
 async def get_global_index_history(symbol: str, days: int = 30) -> dict:
@@ -407,96 +424,114 @@ async def get_china_us_bond_spread(days: int = 30) -> dict:
 # ============================================================
 
 async def get_market_indices() -> dict:
-    """获取大盘主要指数实时行情（上证/深证/创业板/科创50/沪深300等）"""
+    """获取大盘主要指数实时行情（含重试和过期缓存降级）"""
     cached = _get_cached("market_indices", "market_index")
     if cached is not None:
         return cached
 
     import akshare as ak
-    try:
-        df = await asyncio.get_event_loop().run_in_executor(None, ak.stock_zh_index_spot_em)
-        if df is None or df.empty:
-            return {"error": "获取大盘指数失败"}
+    for attempt in range(3):
+        try:
+            df = await asyncio.get_event_loop().run_in_executor(None, ak.stock_zh_index_spot_em)
+            if df is None or df.empty:
+                continue
 
-        # 筛选主要指数
-        key_names = ["上证指数", "深证成指", "创业板指", "科创50", "沪深300", "中证500", "中证1000"]
-        rows = df.to_dict(orient="records")
-        indices = []
-        for r in rows:
-            name = str(r.get("名称", ""))
-            if any(k in name for k in key_names):
-                indices.append({
-                    "name": name,
-                    "code": r.get("代码", ""),
-                    "price": r.get("最新价", ""),
-                    "change_pct": r.get("涨跌幅", ""),
-                    "change": r.get("涨跌额", ""),
-                    "volume_yi": round(float(r.get("成交额", 0) or 0) / 1e8, 2),
-                    "high": r.get("最高", ""),
-                    "low": r.get("最低", ""),
-                    "open": r.get("今开", ""),
-                    "prev_close": r.get("昨收", ""),
-                })
+            # 筛选主要指数
+            key_names = ["上证指数", "深证成指", "创业板指", "科创50", "沪深300", "中证500", "中证1000"]
+            rows = df.to_dict(orient="records")
+            indices = []
+            for r in rows:
+                name = str(r.get("名称", ""))
+                if any(k in name for k in key_names):
+                    indices.append({
+                        "name": name,
+                        "code": r.get("代码", ""),
+                        "price": r.get("最新价", ""),
+                        "change_pct": r.get("涨跌幅", ""),
+                        "change": r.get("涨跌额", ""),
+                        "volume_yi": round(float(r.get("成交额", 0) or 0) / 1e8, 2),
+                        "high": r.get("最高", ""),
+                        "low": r.get("最低", ""),
+                        "open": r.get("今开", ""),
+                        "prev_close": r.get("昨收", ""),
+                    })
 
-        result = {"indices": indices, "count": len(indices)}
-        _set_cached("market_indices", result)
-        return result
-    except Exception as e:
-        logger.error(f"获取大盘指数失败: {e}")
-        return {"error": str(e)}
+            result = {"indices": indices, "count": len(indices)}
+            _set_cached("market_indices", result)
+            return result
+        except Exception as e:
+            if attempt < 2:
+                await asyncio.sleep(2 * (attempt + 1))
+            else:
+                logger.error(f"获取大盘指数失败(重试3次): {e}")
+
+    expired = _get_expired_cache("market_indices")
+    if expired:
+        expired["_stale"] = True
+        return expired
+    return {"error": "大盘指数数据暂不可用"}
 
 
 async def get_market_breadth_real() -> dict:
-    """获取真实市场涨跌统计（个股涨跌家数、涨跌停数）"""
+    """获取真实市场涨跌统计（含重试和过期缓存降级）"""
     cached = _get_cached("market_breadth_real", "market_breadth")
     if cached is not None:
         return cached
 
     import akshare as ak
-    try:
-        df = await asyncio.get_event_loop().run_in_executor(None, ak.stock_zh_a_spot_em)
-        if df is None or df.empty:
-            return {"error": "获取个股数据失败"}
+    for attempt in range(3):
+        try:
+            df = await asyncio.get_event_loop().run_in_executor(None, ak.stock_zh_a_spot_em)
+            if df is None or df.empty:
+                continue
 
-        # 使用 pandas 向量化操作，避免 to_dict 和逐行遍历
-        import numpy as np
-        changes = df["涨跌幅"].fillna(0).astype(float)
-        codes = df["代码"].astype(str)
-        total = len(df)
+            # 使用 pandas 向量化操作，避免 to_dict 和逐行遍历
+            import numpy as np
+            changes = df["涨跌幅"].fillna(0).astype(float)
+            codes = df["代码"].astype(str)
+            total = len(df)
 
-        up = int((changes > 0).sum())
-        down = int((changes < 0).sum())
-        flat = total - up - down
+            up = int((changes > 0).sum())
+            down = int((changes < 0).sum())
+            flat = total - up - down
 
-        # 涨跌停：按板块区分阈值
-        is_gem_star = codes.str.startswith(("300", "301", "688"))  # 创业板/科创板 20%
-        is_bse = codes.str.startswith("8")  # 北交所 30%
-        thresholds = np.where(is_gem_star, 19.9, np.where(is_bse, 29.9, 9.9))
-        limit_up = int((changes >= thresholds).sum())
-        limit_down = int((-changes >= thresholds).sum())
+            # 涨跌停：按板块区分阈值
+            is_gem_star = codes.str.startswith(("300", "301", "688"))  # 创业板/科创板 20%
+            is_bse = codes.str.startswith("8")  # 北交所 30%
+            thresholds = np.where(is_gem_star, 19.9, np.where(is_bse, 29.9, 9.9))
+            limit_up = int((changes >= thresholds).sum())
+            limit_down = int((-changes >= thresholds).sum())
 
-        above_5 = int((changes > 5).sum())
-        below_neg5 = int((changes < -5).sum())
+            above_5 = int((changes > 5).sum())
+            below_neg5 = int((changes < -5).sum())
 
-        result = {
-            "total_stocks": total,
-            "up": up,
-            "down": down,
-            "flat": flat,
-            "up_down_ratio": round(up / max(down, 1), 2),
-            "limit_up": limit_up,
-            "limit_down": limit_down,
-            "above_5pct": above_5,
-            "below_neg5pct": below_neg5,
-            "up_pct": round(up / total * 100, 1),
-            "avg_change_pct": round(float(changes.mean()), 2),
-            "median_change_pct": round(float(changes.median()), 2),
-        }
-        _set_cached("market_breadth_real", result)
-        return result
-    except Exception as e:
-        logger.error(f"获取市场涨跌统计失败: {e}")
-        return {"error": str(e)}
+            result = {
+                "total_stocks": total,
+                "up": up,
+                "down": down,
+                "flat": flat,
+                "up_down_ratio": round(up / max(down, 1), 2),
+                "limit_up": limit_up,
+                "limit_down": limit_down,
+                "above_5pct": above_5,
+                "below_neg5pct": below_neg5,
+                "up_pct": round(up / total * 100, 1),
+                "avg_change_pct": round(float(changes.mean()), 2),
+                "median_change_pct": round(float(changes.median()), 2),
+            }
+            _set_cached("market_breadth_real", result)
+            return result
+        except Exception as e:
+            if attempt < 2:
+                await asyncio.sleep(2 * (attempt + 1))
+            else:
+                logger.error(f"获取市场涨跌统计失败(重试3次): {e}")
+
+    expired = _get_expired_cache("market_breadth_real")
+    if expired:
+        expired["_stale"] = True
+        return expired
+    return {"error": "市场涨跌数据暂不可用"}
 
 
 # ============================================================
