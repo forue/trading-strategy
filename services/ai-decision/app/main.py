@@ -217,17 +217,20 @@ async def _handle_signals(message: dict):
 
 
 async def _build_signal_contexts(signals: list[dict]) -> dict:
-    """为信号解读构建真实的市场上下文"""
+    """为信号解读构建真实的市场上下文（含近15天历史数据）"""
     from .signal_analyzer import MarketContext
     import httpx
+    from datetime import timedelta
 
     contexts = {}
     data_collector_url = settings.data_collector_url
 
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            # 获取当日全部板块数据
             today = datetime.now().strftime("%Y-%m-%d")
+            start_15d = (datetime.now() - timedelta(days=25)).strftime("%Y-%m-%d")  # 25天确保覆盖15个交易日
+
+            # 获取当日全部板块数据（市场宽度）
             resp = await client.get(f"{data_collector_url}/query/all-sectors",
                                     params={"start_date": today, "end_date": today})
             all_sectors = {}
@@ -238,7 +241,7 @@ async def _build_signal_contexts(signals: list[dict]) -> dict:
                 changes = [s.get("index_change_pct", 0) or 0 for s in resp.json()["data"]]
                 market_avg = sum(changes) / max(len(changes), 1)
 
-            # 为每个信号的板块获取历史数据
+            # 为每个信号的板块获取近15天历史数据
             for sig in signals:
                 code = sig.get("sector_code", "")
                 if not code:
@@ -246,7 +249,7 @@ async def _build_signal_contexts(signals: list[dict]) -> dict:
                 try:
                     hist_resp = await client.get(
                         f"{data_collector_url}/query/sector-data",
-                        params={"sector_code": code, "start_date": today, "end_date": today},
+                        params={"sector_code": code, "start_date": start_15d, "end_date": today},
                     )
                     hist_data = hist_resp.json()
                     records = hist_data.get("data", []) if hist_data.get("code") == 200 else []
@@ -256,16 +259,18 @@ async def _build_signal_contexts(signals: list[dict]) -> dict:
                     change_today = 0.0
                     main_flow = 0.0
                     turnover = 0.0
+                    avg_flow_5d = 0.0
 
                     if records:
-                        changes = [r.get("index_change_pct", 0) or 0 for r in records]
-                        if len(changes) >= 5:
-                            change_5d = round(sum(changes[-5:]), 2)
-                        if len(changes) >= 10:
-                            change_10d = round(sum(changes[-10:]), 2)
-                        if changes:
-                            change_today = round(changes[-1], 2)
-                        main_flow = records[-1].get("main_net_inflow", 0) or 0
+                        chg = [r.get("index_change_pct", 0) or 0 for r in records]
+                        flows = [r.get("main_net_inflow", 0) or 0 for r in records]
+                        change_today = round(chg[-1], 2) if chg else 0
+                        if len(chg) >= 5:
+                            change_5d = round(sum(chg[-5:]), 2)
+                            avg_flow_5d = round(sum(flows[-5:]) / 5 / 1e8, 2)
+                        if len(chg) >= 10:
+                            change_10d = round(sum(chg[-10:]), 2)
+                        main_flow = flows[-1] if flows else 0
                         turnover = records[-1].get("turnover", 0) or 0
 
                     # 市场宽度
@@ -290,7 +295,7 @@ async def _build_signal_contexts(signals: list[dict]) -> dict:
                         change_10d=change_10d,
                         change_today=change_today,
                         main_flow=main_flow,
-                        north_flow=0.0,  # 北向资金需单独接口
+                        north_flow=0.0,
                         turnover=turnover,
                         market_change=round(market_avg, 2),
                         market_sentiment=sentiment,
