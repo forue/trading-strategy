@@ -43,7 +43,7 @@ SECTOR_ETF_MAP = {
     "THS801010": {"code": "159825", "name": "农业ETF"}, "THS801020": {"code": "516260", "name": "矿业ETF"},
     "THS801030": {"code": "159870", "name": "化工ETF"}, "THS801040": {"code": "562300", "name": "钢铁ETF"},
     "THS801050": {"code": "512400", "name": "有色金属ETF"}, "THS801080": {"code": "159997", "name": "电子ETF"},
-    "THS801110": {"code": "159746", "name": "家电ETF"}, "THS801120": {"code": "512170", "name": "食品饮料ETF"},
+    "THS801110": {"code": "159746", "name": "家电ETF"}, "THS801120": {"code": "515710", "name": "食品饮料ETF"},
     "THS801130": {"code": "159573", "name": "纺织服装ETF"}, "THS801140": {"code": "159608", "name": "轻工ETF"},
     "THS801150": {"code": "512010", "name": "医药ETF"}, "THS801160": {"code": "159611", "name": "公用事业ETF"},
     "THS801170": {"code": "159662", "name": "交运ETF"}, "THS801180": {"code": "512200", "name": "房地产ETF"},
@@ -53,13 +53,13 @@ SECTOR_ETF_MAP = {
     "THS801740": {"code": "512810", "name": "军工ETF"}, "THS801750": {"code": "512720", "name": "计算机ETF"},
     "THS801760": {"code": "512980", "name": "传媒ETF"}, "THS801770": {"code": "515880", "name": "通信ETF"},
     "THS801780": {"code": "512800", "name": "银行ETF"}, "THS801790": {"code": "512070", "name": "非银ETF"},
-    "THS801880": {"code": "516110", "name": "汽车ETF"}, "THS801890": {"code": "159883", "name": "机械ETF"},
+    "THS801880": {"code": "516110", "name": "汽车ETF"}, "THS801890": {"code": "159886", "name": "机械ETF"},
     "THS银行": {"code": "512800", "name": "银行ETF"}, "THS证券": {"code": "512070", "name": "非银ETF"},
     "THS保险": {"code": "512070", "name": "非银ETF"}, "THS医药": {"code": "512010", "name": "医药ETF"},
-    "THS食品饮料": {"code": "512170", "name": "食品饮料ETF"}, "THS电子": {"code": "159997", "name": "电子ETF"},
+    "THS食品饮料": {"code": "515710", "name": "食品饮料ETF"}, "THS电子": {"code": "159997", "name": "电子ETF"},
     "THS计算机": {"code": "512720", "name": "计算机ETF"}, "THS传媒": {"code": "512980", "name": "传媒ETF"},
     "THS通信": {"code": "515880", "name": "通信ETF"}, "THS房地产": {"code": "512200", "name": "房地产ETF"},
-    "THS汽车": {"code": "516110", "name": "汽车ETF"}, "THS机械设备": {"code": "159883", "name": "机械ETF"},
+    "THS汽车": {"code": "516110", "name": "汽车ETF"}, "THS机械设备": {"code": "159886", "name": "机械ETF"},
     "THS有色金属": {"code": "512400", "name": "有色金属ETF"}, "THS化工": {"code": "159870", "name": "化工ETF"},
     "THS钢铁": {"code": "562300", "name": "钢铁ETF"}, "THS建筑材料": {"code": "159745", "name": "建材ETF"},
     "THS建筑装饰": {"code": "159740", "name": "基建ETF"}, "THS公用事业": {"code": "159611", "name": "公用事业ETF"},
@@ -76,7 +76,7 @@ SECTOR_ETF_MAP.update({
     "SW801010": {"code": "159825", "name": "农业ETF"}, "SW801020": {"code": "516260", "name": "矿业ETF"},
     "SW801030": {"code": "159870", "name": "化工ETF"}, "SW801040": {"code": "562300", "name": "钢铁ETF"},
     "SW801050": {"code": "512400", "name": "有色金属ETF"}, "SW801080": {"code": "159997", "name": "电子ETF"},
-    "SW801110": {"code": "159746", "name": "家电ETF"}, "SW801120": {"code": "512170", "name": "食品饮料ETF"},
+    "SW801110": {"code": "159746", "name": "家电ETF"}, "SW801120": {"code": "515710", "name": "食品饮料ETF"},
     "SW801130": {"code": "159573", "name": "纺织服装ETF"}, "SW801140": {"code": "159608", "name": "轻工ETF"},
     "SW801150": {"code": "512010", "name": "医药ETF"}, "SW801160": {"code": "159611", "name": "公用事业ETF"},
     "SW801170": {"code": "159662", "name": "交运ETF"}, "SW801180": {"code": "512200", "name": "房地产ETF"},
@@ -86,7 +86,7 @@ SECTOR_ETF_MAP.update({
     "SW801740": {"code": "512810", "name": "军工ETF"}, "SW801750": {"code": "512720", "name": "计算机ETF"},
     "SW801760": {"code": "512980", "name": "传媒ETF"}, "SW801770": {"code": "515880", "name": "通信ETF"},
     "SW801780": {"code": "512800", "name": "银行ETF"}, "SW801790": {"code": "512070", "name": "非银ETF"},
-    "SW801880": {"code": "516110", "name": "汽车ETF"}, "SW801890": {"code": "159883", "name": "机械ETF"},
+    "SW801880": {"code": "516110", "name": "汽车ETF"}, "SW801890": {"code": "159886", "name": "机械ETF"},
 })
 
 # 扩充：THS同花顺细分行业代码 → 场内ETF
@@ -102,8 +102,8 @@ SECTOR_ETF_MAP.update({
     "THS881114": {"code": "512400", "name": "有色金属ETF"},  # 金属新材料
     "THS881115": {"code": "159745", "name": "建材ETF"},     # 建筑材料
     "THS881116": {"code": "159740", "name": "基建ETF"},     # 建筑装饰
-    "THS881117": {"code": "159883", "name": "机械ETF"},     # 通用设备
-    "THS881118": {"code": "159883", "name": "机械ETF"},     # 专用设备
+    "THS881117": {"code": "159886", "name": "机械ETF"},     # 通用设备
+    "THS881118": {"code": "159886", "name": "机械ETF"},     # 专用设备
     "THS881121": {"code": "159995", "name": "芯片ETF"},     # 半导体
     "THS881122": {"code": "159997", "name": "电子ETF"},     # 光学光电子
     "THS881123": {"code": "159997", "name": "电子ETF"},     # 其他电子
@@ -114,8 +114,8 @@ SECTOR_ETF_MAP.update({
     "THS881130": {"code": "512720", "name": "计算机ETF"},   # 计算机设备
     "THS881131": {"code": "159746", "name": "家电ETF"},     # 白色家电
     "THS881132": {"code": "159746", "name": "家电ETF"},     # 黑色家电
-    "THS881133": {"code": "512170", "name": "食品饮料ETF"}, # 饮料制造
-    "THS881134": {"code": "512170", "name": "食品饮料ETF"}, # 食品加工制造
+    "THS881133": {"code": "515710", "name": "食品饮料ETF"}, # 饮料制造
+    "THS881134": {"code": "515710", "name": "食品饮料ETF"}, # 食品加工制造
     "THS881135": {"code": "159573", "name": "纺织服装ETF"}, # 纺织制造
     "THS881136": {"code": "159573", "name": "纺织服装ETF"}, # 服装家纺
     "THS881139": {"code": "159828", "name": "消费ETF"},     # 家居用品
@@ -142,7 +142,7 @@ SECTOR_ETF_MAP.update({
     "THS881168": {"code": "512400", "name": "有色金属ETF"},  # 工业金属
     "THS881169": {"code": "512400", "name": "有色金属ETF"},  # 贵金属
     "THS881170": {"code": "512400", "name": "有色金属ETF"},  # 小金属
-    "THS881171": {"code": "159883", "name": "机械ETF"},     # 自动化设备
+    "THS881171": {"code": "159886", "name": "机械ETF"},     # 自动化设备
     "THS881172": {"code": "159870", "name": "化工ETF"},     # 电子化学品
     "THS881173": {"code": "159746", "name": "家电ETF"},     # 小家电
     "THS881174": {"code": "159746", "name": "家电ETF"},     # 厨卫电器
@@ -154,15 +154,15 @@ SECTOR_ETF_MAP.update({
     "THS881263": {"code": "159870", "name": "化工ETF"},     # 农化制品
     "THS881264": {"code": "159870", "name": "化工ETF"},     # 化学纤维
     "THS881267": {"code": "512400", "name": "有色金属ETF"},  # 能源金属
-    "THS881268": {"code": "159883", "name": "机械ETF"},     # 工程机械
+    "THS881268": {"code": "159886", "name": "机械ETF"},     # 工程机械
     "THS881270": {"code": "159997", "name": "电子ETF"},     # 元件
     "THS881271": {"code": "512720", "name": "计算机ETF"},   # IT服务
-    "THS881272": {"code": "512720", "name": "计算机ETF"},   # 软件开发
-    "THS881273": {"code": "512170", "name": "食品饮料ETF"}, # 白酒
+    "THS881272": {"code": "159035", "name": "软件ETF"},     # 软件开发
+    "THS881273": {"code": "512690", "name": "酒ETF"},       # 白酒
     "THS881274": {"code": "512980", "name": "传媒ETF"},     # 影视院线
     "THS881275": {"code": "512980", "name": "传媒ETF"},     # 游戏
     "THS881276": {"code": "512810", "name": "军工ETF"},     # 军工电子
-    "THS881277": {"code": "159883", "name": "机械ETF"},     # 电机
+    "THS881277": {"code": "159886", "name": "机械ETF"},     # 电机
     "THS881278": {"code": "159611", "name": "公用事业ETF"},  # 电网设备
     "THS881279": {"code": "159611", "name": "新能源ETF"},   # 光伏设备
     "THS881280": {"code": "159611", "name": "新能源ETF"},   # 风电设备
