@@ -54,6 +54,7 @@ htmlcov/
 # Temporary files
 *.tmp
 *.bak
+*.stackdump
 deployment_report.md
 
 # Claude Code
