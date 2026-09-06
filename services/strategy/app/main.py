@@ -165,23 +165,60 @@ async def collect_data():
 _trade_dates_cache = {"dates": set(), "update_time": None}
 TRADE_DATES_CACHE_TTL = 86400  # 24小时
 
-# 2026 年 A 股法定节假日（休市日）
-_HOLIDAYS_2026 = {
-    # 元旦
-    "20260101", "20260102", "20260103",
-    # 春节
-    "20260215", "20260216", "20260217", "20260218", "20260219", "20260220", "20260221",
-    # 清明节
-    "20260404", "20260405", "20260406",
-    # 劳动节
-    "20260501", "20260502", "20260503", "20260504", "20260505",
-    # 端午节
-    "20260619", "20260620", "20260621",
-    # 中秋节
-    "20260925", "20260926", "20260927",
-    # 国庆节
-    "20261001", "20261002", "20261003", "20261004", "20261005", "20261006", "20261007",
+# A 股法定节假日（休市日）——按年度维护，逐年追加即可
+_HOLIDAYS_BY_YEAR: dict[int, set[str]] = {
+    2025: {
+        # 元旦
+        "20250101",
+        # 春节
+        "20250128", "20250129", "20250130", "20250131", "20250201", "20250202", "20250203", "20250204",
+        # 清明节
+        "20250404", "20250405", "20250406",
+        # 劳动节
+        "20250501", "20250502", "20250503", "20250504", "20250505",
+        # 端午节
+        "20250531", "20250601", "20250602",
+        # 中秋+国庆
+        "20251001", "20251002", "20251003", "20251004", "20251005", "20251006", "20251007", "20251008",
+    },
+    2026: {
+        # 元旦
+        "20260101", "20260102", "20260103",
+        # 春节
+        "20260215", "20260216", "20260217", "20260218", "20260219", "20260220", "20260221",
+        # 清明节
+        "20260404", "20260405", "20260406",
+        # 劳动节
+        "20260501", "20260502", "20260503", "20260504", "20260505",
+        # 端午节
+        "20260619", "20260620", "20260621",
+        # 中秋节
+        "20260925", "20260926", "20260927",
+        # 国庆节
+        "20261001", "20261002", "20261003", "20261004", "20261005", "20261006", "20261007",
+    },
+    2027: {
+        # 元旦
+        "20270101", "20270102", "20270103",
+        # 春节（预估，以证监会公告为准）
+        "20270206", "20270207", "20270208", "20270209", "20270210", "20270211", "20270212",
+        # 清明节
+        "20270403", "20270404", "20270405",
+        # 劳动节
+        "20270501", "20270502", "20270503",
+        # 端午节
+        "20270609", "20270610", "20270611",
+        # 中秋节
+        "20270915", "20270916", "20270917",
+        # 国庆节
+        "20271001", "20271002", "20271003", "20271004", "20271005", "20271006", "20271007",
+    },
 }
+
+
+def _get_holidays_for_year(year: int) -> set[str]:
+    """获取指定年份的节假日集合，未维护的年份返回空集合"""
+    return _HOLIDAYS_BY_YEAR.get(year, set())
 
 
 def _is_trade_day(date_str: str) -> bool:
@@ -202,7 +239,7 @@ def _is_trade_day(date_str: str) -> bool:
 
     # 法定节假日不是交易日
     date_compact = d.strftime("%Y%m%d")
-    if date_compact in _HOLIDAYS_2026:
+    if date_compact in _get_holidays_for_year(d.year):
         return False
 
     return True
@@ -509,27 +546,74 @@ async def run_backtest(request: BacktestRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_capital, return_full=False, sh_index_returns=None):
+def _load_sector_history_cache(sorted_dates) -> dict:
+    """批量加载所有板块历史数据（2次InfluxDB查询），供回测因子计算复用
+
+    Returns:
+        {sector_code: [rows按date升序, 合并K线(OHLCV)与资金流/估值字段], ...}
+    """
+    sector_history_cache = {}
+    try:
+        from datetime import timedelta
+        hist_start = (datetime.strptime(sorted_dates[0], "%Y-%m-%d") - timedelta(days=60)).strftime("%Y-%m-%d")
+        hist_end = sorted_dates[-1]
+        all_kline = influx_query.query_all_sector_kline(hist_start, hist_end)
+        all_flow = influx_query.query_daily_sectors(hist_start, hist_end)
+        flow_by_sector = {}
+        for date_key, sectors in all_flow.items():
+            for s in sectors:
+                code = s.get("sector_code", "")
+                if code not in flow_by_sector:
+                    flow_by_sector[code] = []
+                flow_by_sector[code].append({"date": date_key, **s})
+        all_codes = set(list(all_kline.keys()) + list(flow_by_sector.keys()))
+        for code in all_codes:
+            kline = all_kline.get(code, [])
+            flow = flow_by_sector.get(code, [])
+            if kline:
+                flow_map = {f["date"]: f for f in flow}
+                for k in kline:
+                    f = flow_map.get(k["date"], {})
+                    k.update({k2: v2 for k2, v2 in f.items() if k2 != "date" and v2})
+                sector_history_cache[code] = kline
+            elif flow:
+                sector_history_cache[code] = flow
+        for rows in sector_history_cache.values():
+            rows.sort(key=lambda r: r.get("date", ""))
+        logger.info(f"回测预加载历史: {len(sector_history_cache)}个板块, {hist_start}~{hist_end}, 2次查询")
+    except Exception as e:
+        logger.warning(f"回测历史预加载失败: {e}")
+    return sector_history_cache
+
+
+def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_capital, return_full=False, sh_index_returns=None, history_cache=None):
     """回测核心逻辑（统一入口，消除重复代码）
 
     Args:
         sh_index_returns: 上证指数每日涨跌幅 {date_str: return_decimal}，为 None 时使用板块等权平均
+        history_cache: 预加载的板块历史缓存 {sector_code: [rows...]}（按日期升序），
+                      寻优时由外层构建一次并复用，避免每次试验重复查询InfluxDB
+
+    Returns:
+        dict: 回测结果，含 nav_curve（逐日净值）、position_changes（仓位调整明细）、daily_signals 等
     """
     if not sorted_dates or initial_capital <= 0:
         return _empty_backtest_result(strategy_type, initial_capital, return_full)
 
     capital = initial_capital
     peak_capital = capital
-    daily_nav = []  # 逐日 NAV，用于精确计算最大回撤
+    daily_nav = []  # 逐日 NAV
     position_hold_counter = 0
-    current_positions = {}
+    current_positions = {}  # {sector_code: weight}
     stop_loss_triggered = False
     stop_loss_cooldown = 0
     rebalance_cooldown = 0
+    pending_rebalance = None  # 待执行调仓：{new_positions, signals_by_code, signal_date}
     nav_curve = []
     daily_returns = []
     benchmark_returns = []
     daily_signals_out = []
+    position_changes = []  # 仓位调整明细
     total_commission = 0.0
     total_stamp_tax = 0.0
     total_slippage_cost = 0.0
@@ -538,26 +622,321 @@ def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_
     regime_history = []  # 最近市场状态 ["BULL"/"NEUTRAL"/"BEAR"]
     empty_days = 0       # 连续空仓天数
     prev_regime = "NEUTRAL"
+    # 多重止损追踪
+    trailing_peak = capital          # 移动止损用的近期高点
+    max_dd_from_initial = 0.0        # 从初始资金的最大回撤比例
+    cumulative_benchmark_return = 0.0  # 累计基准收益率（用于相对止损）
+    nav_history = []                 # 净值历史（用于均线止损）
+    reference_capital = capital      # 止损重置后的参考资金（用于相对止损，避免清仓后旧亏损拖累）
+    portfolio_snapshots = []         # 每次调仓后的持仓快照
+    day_entered = {}                 # {sector_code: date} 各板块建仓日期（用于最少持有天数）
+    take_profit_level = 0            # 当前止盈阶梯级别（0=未触发，1=已减第一级...）
+    take_profit_base_weights = {}    # {sector_code: weight} 止盈开始时的原始仓位（用于按原始比例减仓）
+
+    def _record_position_change(date, sector_code, sector_name, action, amount, cost, reason=""):
+        """记录仓位调整明细"""
+        position_changes.append({
+            "date": date,
+            "sector_code": sector_code,
+            "sector_name": sector_name,
+            "action": action,  # ADD / REDUCE / CLEAR / STOP_LOSS / EMERGENCY_EXIT / BEAR_EXIT / HOLD
+            "amount": round(amount, 2),
+            "cost": round(cost, 2),
+            "remaining_weight": round(current_positions.get(sector_code, 0), 4),
+            "remaining_amount": round(capital * current_positions.get(sector_code, 0), 2),
+            "reason": reason,
+        })
+
+    def _record_portfolio_snapshot(date, daily_data_for_date):
+        """调仓后记录持仓快照（各板块权重、金额、日涨跌、贡献）"""
+        if not current_positions:
+            return
+        sector_change_map = {s["sector_code"]: s.get("index_change_pct", 0) / 100 for s in daily_data_for_date}
+        sector_name_map = {s["sector_code"]: s.get("sector_name", "") for s in daily_data_for_date}
+        portfolio = []
+        for code, weight in current_positions.items():
+            amount = capital * weight
+            day_change = sector_change_map.get(code, 0)
+            contrib = weight * day_change
+            portfolio.append({
+                "sector_code": code,
+                "sector_name": sector_name_map.get(code, code),
+                "weight": round(weight, 4),
+                "amount": round(amount, 2),
+                "day_change_pct": round(day_change * 100, 2),
+                "contribution_pct": round(contrib * 100, 4),
+            })
+        portfolio.sort(key=lambda x: x["weight"], reverse=True)
+        _pos_total = sum(p["amount"] for p in portfolio)
+        portfolio_snapshots.append({
+            "date": date,
+            "portfolio": portfolio,
+            "cash": round(max(0.0, capital - _pos_total), 2),
+            "total_value": round(capital, 2),
+        })
+
+    def _execute_sell(sector_code, weight, action, reason="", sector_name=""):
+        """执行卖出并记录明细，返回交易成本"""
+        nonlocal capital, total_commission, total_stamp_tax, total_slippage_cost, trade_count_actual
+        sell_amount = capital * weight
+        cost_info = _calc_trade_cost(sell_amount, params.commission_rate, params.stamp_tax_rate, params.slippage_rate, is_sell=True)
+        sell_cost = cost_info["total"]
+        capital -= sell_cost
+        total_commission += cost_info["commission"]
+        total_stamp_tax += cost_info["stamp_tax"]
+        total_slippage_cost += cost_info["slippage"]
+        trade_count_actual += 1
+        current_positions.pop(sector_code, 0)
+        _record_position_change(date, sector_code, sector_name, action, sell_amount, sell_cost, reason)
+        return sell_cost
+
+    def _execute_buy(sector_code, sector_name, weight, reason=""):
+        """执行买入并记录明细，返回交易成本"""
+        nonlocal capital, total_commission, total_stamp_tax, total_slippage_cost, trade_count_actual
+        buy_amount = capital * weight
+        cost_info = _calc_trade_cost(buy_amount, params.commission_rate, params.stamp_tax_rate, params.slippage_rate, is_sell=False)
+        buy_cost = cost_info["total"]
+        capital -= buy_cost
+        total_commission += cost_info["commission"]
+        total_slippage_cost += cost_info["slippage"]
+        trade_count_actual += 1
+        current_positions[sector_code] = weight
+        _record_position_change(date, sector_code, sector_name, "ADD", buy_amount, buy_cost, reason)
+        return buy_cost
+
+    # 复用或加载板块历史数据（仅首次访问InfluxDB，寻优场景由外层传入复用）
+    if history_cache is None:
+        sector_history_cache = _load_sector_history_cache(sorted_dates)
+    else:
+        sector_history_cache = history_cache
+    # 按板块预生成升序日期列表，便于每日二分截取
+    hist_dates = {code: [r.get("date", "") for r in rows] for code, rows in sector_history_cache.items()}
+
+    # 预构建板块元信息（名称/ETF），供每日持仓明细展示（ETF为板块固定属性，取首个非空）
+    sector_meta: dict[str, dict] = {}
+    for day_sectors in daily_data.values():
+        for s in day_sectors:
+            code = s.get("sector_code")
+            if not code:
+                continue
+            m = sector_meta.get(code)
+            if m is None:
+                m = {"sector_name": s.get("sector_name", ""), "etf_code": s.get("etf_code"), "etf_name": s.get("etf_name")}
+                sector_meta[code] = m
+            elif not m.get("etf_code") and s.get("etf_code"):
+                m["etf_code"] = s.get("etf_code")
+                m["etf_name"] = s.get("etf_name")
 
     for i, date in enumerate(sorted_dates):
         sector_data = daily_data.get(date, [])
         if not sector_data:
             daily_returns.append(0.0)
             benchmark_returns.append(0.0)
+            daily_nav.append(capital)
+            benchmark_nav = initial_capital * np.prod([1 + r for r in benchmark_returns[:i + 1]]) if benchmark_returns else initial_capital
+            nav_curve.append({"date": date, "nav": round(capital, 2), "benchmark": round(float(benchmark_nav), 2), "stop_loss": False})
             continue
 
         sector_change_map = {s["sector_code"]: s.get("index_change_pct", 0) / 100 for s in sector_data}
+        sector_open_map = {s["sector_code"]: s.get("open", 0) for s in sector_data}
+        sector_close_map = {s["sector_code"]: s.get("index_close", 0) for s in sector_data}
+        open_to_close = {}  # 今日新开仓板块的日内收益率 (open→close)
+        traded_codes = set()  # 今天实际交易了的板块
 
-        # Step 1: 计算当日收益
+        # ========== T+1: 执行昨日挂起的调仓（次日开盘价成交） ==========
+        if pending_rebalance is not None:
+            pr = pending_rebalance
+            new_positions = pr["new_positions"]
+            signals_by_code = pr["signals_by_code"]
+
+            # 用开盘价估算日内收益率 (open→close)
+            open_to_close = {}
+            all_codes_in_play = set(list(current_positions.keys()) + list(new_positions.keys()))
+            for code in all_codes_in_play:
+                op = sector_open_map.get(code, 0)
+                cl = sector_close_map.get(code, 0)
+                chg = sector_change_map.get(code, 0)
+                if op > 0 and cl > 0:
+                    open_to_close[code] = (cl - op) / op
+                else:
+                    open_to_close[code] = chg
+
+            # 卖出旧持仓（按开盘价计价）
+            old_codes = set(current_positions.keys())
+            new_codes = set(new_positions.keys())
+
+            # 调仓日继续持仓检查：评分达标且当日上涨的板块不卖，吃满景气收益
+            _kept_codes = set()
+            _kept_info = {}  # {code: (score, min_keep, day_chg)}
+            for code in list(current_positions.keys()):
+                if code not in new_positions:
+                    sig = signals_by_code.get(code, {})
+                    sig_score = sig.get("score", 0)
+                    day_chg = sector_change_map.get(code, 0)
+                    min_keep = params.min_score_keep if params.min_score_keep else 2.5
+                    if sig_score >= min_keep and day_chg > 0:
+                        _kept_codes.add(code)
+                        _kept_info[code] = (sig_score, min_keep, day_chg)
+                        day_entered[code] = i
+
+            # 计算新持仓总权重，等比缩减保留仓位避免超仓
+            _scaled = False
+            if _kept_codes:
+                new_total = sum(new_positions.values())
+                kept_total = sum(current_positions[c] for c in _kept_codes)
+                max_total = params.max_position if params.max_position else 1.0
+                if new_total + kept_total > max_total:
+                    scale = (max_total - new_total) / kept_total if kept_total > 0 else 0
+                    for code in _kept_codes:
+                        current_positions[code] = round(current_positions[code] * scale, 4)
+                    _scaled = True
+
+            # 统一记录一条 HOLD 记录（缩仓或不缩仓）
+            for code in _kept_codes:
+                sig_score, min_keep, day_chg = _kept_info[code]
+                sn = signals_by_code.get(code, {}).get("sector_name", "")
+                if _scaled:
+                    w = current_positions[code]
+                    new_total = sum(new_positions.values())
+                    max_total = params.max_position if params.max_position else 1.0
+                    _record_position_change(date, code, sn, "HOLD", 0, 0,
+                                            f"继续持有(缩仓): 评分{sig_score:.2f}>=阈值{min_keep:.0f}, 权重{w:.2%}, 新仓占{new_total:.0%}, 共{max_total:.0%}")
+                else:
+                    _record_position_change(date, code, sn, "HOLD", 0, 0,
+                                            f"继续持有: 评分{sig_score:.2f}>=阈值{min_keep:.0f}, 当日涨{day_chg:.2%}")
+
+            # 清仓：旧有新无（排除继续持有的）
+            for code in old_codes - new_codes:
+                if code in _kept_codes:
+                    continue
+                weight = current_positions.get(code, 0)
+                if weight <= 0:
+                    continue
+                sn = signals_by_code.get(code, {}).get("sector_name", "")
+                sig_reason = signals_by_code.get(code, {}).get("reason", "")
+                if not sn:
+                    sector_info = next((s for s in sector_data if s.get("sector_code") == code), None)
+                    sn = sector_info.get("sector_name", "") if sector_info else ""
+                _execute_sell(code, weight, "CLEAR", f"调仓清仓 {sig_reason}" if sig_reason else f"调仓清仓(T+1 {pr['signal_date']}→{date})", sector_name=sn)
+                day_entered.pop(code, None)
+                traded_codes.add(code)
+
+            # 减仓：新旧都有，新权重 < 旧权重
+            for code in old_codes & new_codes:
+                if code in _kept_codes:
+                    continue
+                old_w = current_positions.get(code, 0)
+                new_w = new_positions.get(code, 0)
+                if old_w <= 0 or new_w <= 0:
+                    continue
+                if new_w < old_w - 0.001:
+                    reduce_ratio = (old_w - new_w) / old_w
+                    reduce_amount = capital * old_w * reduce_ratio
+                    cost_info = _calc_trade_cost(reduce_amount, params.commission_rate, params.stamp_tax_rate, params.slippage_rate, is_sell=True)
+                    sell_cost = cost_info["total"]
+                    capital -= sell_cost
+                    total_commission += cost_info["commission"]
+                    total_stamp_tax += cost_info["stamp_tax"]
+                    total_slippage_cost += cost_info["slippage"]
+                    trade_count_actual += 1
+                    current_positions[code] = new_w
+                    sn = signals_by_code.get(code, {}).get("sector_name", "")
+                    sig_reason = signals_by_code.get(code, {}).get("reason", "")
+                    _record_position_change(date, code, sn, "REDUCE", reduce_amount, sell_cost,
+                                            f"减仓 {old_w:.2%} → {new_w:.2%} {sig_reason}" if sig_reason else f"减仓 {old_w:.2%} → {new_w:.2%} (T+1)")
+                    traded_codes.add(code)
+
+            # 加仓：新旧都有，新权重 > 旧权重
+            for code in old_codes & new_codes:
+                if code in _kept_codes:
+                    continue
+                old_w = current_positions.get(code, 0)
+                new_w = new_positions.get(code, 0)
+                if old_w <= 0 or new_w <= 0:
+                    continue
+                if new_w > old_w + 0.001:
+                    add_amount = capital * (new_w - old_w)
+                    cost_info = _calc_trade_cost(add_amount, params.commission_rate, params.stamp_tax_rate, params.slippage_rate, is_sell=False)
+                    buy_cost = cost_info["total"]
+                    capital -= buy_cost
+                    total_commission += cost_info["commission"]
+                    total_slippage_cost += cost_info["slippage"]
+                    trade_count_actual += 1
+                    current_positions[code] = new_w
+                    sn = signals_by_code.get(code, {}).get("sector_name", "")
+                    sig_reason = signals_by_code.get(code, {}).get("reason", "")
+                    _record_position_change(date, code, sn, "ADD", add_amount, buy_cost,
+                                            f"加仓 {old_w:.2%} → {new_w:.2%} {sig_reason}" if sig_reason else f"加仓 {old_w:.2%} → {new_w:.2%} (T+1)")
+                    traded_codes.add(code)
+
+            # 新建仓
+            for code in new_codes - old_codes:
+                weight = new_positions[code]
+                buy_amount = capital * weight
+                cost_info = _calc_trade_cost(buy_amount, params.commission_rate, params.stamp_tax_rate, params.slippage_rate, is_sell=False)
+                buy_cost = cost_info["total"]
+                capital -= buy_cost
+                total_commission += cost_info["commission"]
+                total_slippage_cost += cost_info["slippage"]
+                trade_count_actual += 1
+                current_positions[code] = weight
+                day_entered[code] = i
+                sn = signals_by_code.get(code, {}).get("sector_name", "")
+                sig_reason = signals_by_code.get(code, {}).get("reason", "")
+                _record_position_change(date, code, sn, "ADD", buy_amount, buy_cost,
+                                        f"新建仓 权重{weight:.2%} {sig_reason}" if sig_reason else f"新建仓 权重{weight:.2%} (T+1)")
+                traded_codes.add(code)
+
+            # 清仓时重置峰值，避免新仓被旧峰值拖累
+            if not current_positions:
+                peak_capital = capital
+                trailing_peak = capital
+
+            # 记录调仓快照
+            _record_portfolio_snapshot(date, sector_data)
+
+            # 设置持仓锁定和冷却期
+            if current_positions:
+                base_hold = params.hold_days
+                total_sectors = len(sector_data)
+                up_count = sum(1 for s in sector_data if s.get("index_change_pct", 0) > 0)
+                up_ratio = up_count / max(total_sectors, 1)
+                avg_change_val = sum(s.get("index_change_pct", 0) for s in sector_data) / max(total_sectors, 1)
+                bull_thr = params.market_bull_threshold if params.market_bull_threshold is not None else 0.5
+                bear_thr = params.market_bear_threshold if params.market_bear_threshold is not None else 0.4
+                if up_ratio >= bull_thr and avg_change_val > 0:
+                    market_regime = "BULL"
+                elif up_ratio < bear_thr and avg_change_val < 0:
+                    market_regime = "BEAR"
+                else:
+                    market_regime = "NEUTRAL"
+                if market_regime == "BULL":
+                    dynamic_hold = max(base_hold - 1, 1)
+                elif market_regime == "BEAR":
+                    dynamic_hold = base_hold + 1
+                else:
+                    dynamic_hold = base_hold
+                position_hold_counter = dynamic_hold
+                stop_loss_triggered = False
+                rebalance_cooldown = params.cooldown_days if params.cooldown_days else 2
+                empty_days = 0
+
+            pending_rebalance = None
+
+        # ========== Step 1: 计算当日收益（T+1 拆分） ==========
         strategy_daily_return = 0.0
         if stop_loss_triggered:
             strategy_daily_return = 0.0
         elif current_positions:
             for sector_code, weight in current_positions.items():
-                strategy_daily_return += weight * sector_change_map.get(sector_code, 0)
+                chg = sector_change_map.get(sector_code, 0)
+                # 今天新开仓的板块：只享受日内 open→close 收益
+                if sector_code in traded_codes and sector_code in open_to_close:
+                    strategy_daily_return += weight * open_to_close[sector_code]
+                else:
+                    strategy_daily_return += weight * chg
 
         all_changes = [s.get("index_change_pct", 0) / 100 for s in sector_data]
-        # 基准：优先使用上证指数，回退到板块等权平均
         if sh_index_returns and date in sh_index_returns:
             benchmark_return = sh_index_returns[date]
         else:
@@ -571,45 +950,188 @@ def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_
         if capital > peak_capital:
             peak_capital = capital
 
-        # Step 2: 止损检查
-        if params.stop_loss and not stop_loss_triggered and peak_capital > 0 and current_positions:
+        # 更新多重止损追踪
+        if capital > trailing_peak:
+            trailing_peak = capital
+        dd_from_initial = (reference_capital - capital) / reference_capital if reference_capital > 0 else 0.0
+        if dd_from_initial > max_dd_from_initial:
+            max_dd_from_initial = dd_from_initial
+        cumulative_benchmark_return = (1 + cumulative_benchmark_return) * (1 + benchmark_return) - 1
+        nav_history.append(capital)
+        if len(nav_history) > 120:
+            nav_history = nav_history[-120:]
+
+        # ========== Step 2: 多重止损检查 ==========
+        stop_loss_reason = None
+        # 判断是否所有持仓都已持有一天以上（新建仓当天不触发止损）
+        min_hold_met = all(
+            day_entered.get(code, -999) < i
+            for code in current_positions
+        ) if current_positions else False
+
+        if current_positions and min_hold_met:
+            dd_from_peak = (peak_capital - capital) / peak_capital if peak_capital > 0 else 0
+            trailing_dd = (trailing_peak - capital) / trailing_peak if trailing_peak > 0 else 0
+            rel_under = cumulative_benchmark_return - (capital - reference_capital) / reference_capital if reference_capital > 0 else 0
+            logger.debug(f"[{date}] 止损检查: capital={capital:.0f} peak={peak_capital:.0f} trailing={trailing_peak:.0f} ref={reference_capital:.0f} dd_peak={dd_from_peak:.2%} trailing_dd={trailing_dd:.2%} rel_under={rel_under:.2%} nav_hist_len={len(nav_history)}")
+
+        # 2a: 固定回撤止损（从峰值回撤超阈值）
+        if params.stop_loss and not stop_loss_triggered and peak_capital > 0 and current_positions and min_hold_met:
             drawdown_from_peak = (peak_capital - capital) / peak_capital
             if drawdown_from_peak >= params.stop_loss:
-                sell_trade_cost = 0.0
-                for sector_code, weight in current_positions.items():
-                    sell_amount = capital * weight
-                    cost = _calc_trade_cost(sell_amount, params.commission_rate, params.stamp_tax_rate, params.slippage_rate, is_sell=True)
-                    sell_trade_cost += cost["total"]
-                    total_commission += cost["commission"]
-                    total_stamp_tax += cost["stamp_tax"]
-                    total_slippage_cost += cost["slippage"]
-                    trade_count_actual += 1
-                capital -= sell_trade_cost
-                stop_loss_triggered = True
-                # 动态冷静期：基础 2 天，后续根据市场状态调整
-                stop_loss_cooldown = max(params.cooldown_days if params.cooldown_days else 2, 2)
-                position_hold_counter = 0
-                current_positions = {}
+                stop_loss_reason = (
+                    f"固定回撤止损: 组合从峰值{peak_capital:.2f}万回落至{capital:.2f}万, "
+                    f"回撤{drawdown_from_peak:.2%} >= 阈值{params.stop_loss:.0%}"
+                )
 
-        # Step 3: 紧急退出检查（持仓中板块评分暴跌则提前退出）
+        # 2b: 移动止损 — 从近期高点回撤超阈值（更灵敏的动态止盈）
+        if not stop_loss_reason and params.trailing_stop_loss and not stop_loss_triggered and trailing_peak > 0 and current_positions and min_hold_met:
+            trailing_dd = (trailing_peak - capital) / trailing_peak
+            if trailing_dd >= params.trailing_stop_loss:
+                stop_loss_reason = (
+                    f"移动止损: 近期高点{trailing_peak:.2f}万回落至{capital:.2f}万, "
+                    f"回撤{trailing_dd:.2%} >= 阈值{params.trailing_stop_loss:.0%}"
+                )
+
+        # 2c: 最大回撤止损 — 从参考资金累计亏损超阈值
+        if not stop_loss_reason and params.max_drawdown_stop and not stop_loss_triggered and current_positions and min_hold_met:
+            if max_dd_from_initial >= params.max_drawdown_stop:
+                stop_loss_reason = (
+                    f"最大回撤止损: 从参考资金{reference_capital:.2f}万累计亏损{max_dd_from_initial:.2%} "
+                    f">= 阈值{params.max_drawdown_stop:.0%}, 当前{capital:.2f}万"
+                )
+
+        # 2d: 基准相对止损 — 落后大盘超阈值
+        if not stop_loss_reason and params.benchmark_stop_loss and not stop_loss_triggered and current_positions and min_hold_met:
+            relative_underperform = cumulative_benchmark_return - (capital - reference_capital) / reference_capital
+            if relative_underperform >= params.benchmark_stop_loss:
+                my_return = (capital - reference_capital) / reference_capital
+                stop_loss_reason = (
+                    f"基准相对止损: 策略收益{my_return:.2%}, 大盘收益{cumulative_benchmark_return:.2%}, "
+                    f"落后{relative_underperform:.2%} >= 阈值{params.benchmark_stop_loss:.0%}"
+                )
+
+        # 2e: 均线止损 — 净值跌破N日均线超阈值
+        if not stop_loss_reason and params.ma_stop_loss and params.ma_stop_days and not stop_loss_triggered and current_positions and min_hold_met:
+            window = min(len(nav_history), params.ma_stop_days)
+            if window >= 10:
+                ma_val = sum(nav_history[-window:]) / window
+                if ma_val > 0 and (ma_val - capital) / ma_val >= params.ma_stop_loss:
+                    stop_loss_reason = (
+                        f"均线止损: 当前{capital:.2f}万 < {window}日均线{ma_val:.2f}万, "
+                        f"偏离{(ma_val - capital) / ma_val:.2%} >= 阈值{params.ma_stop_loss:.0%}"
+                    )
+
+        # 执行止损（止损=清仓，优先级高于止盈）
+        if stop_loss_reason and current_positions:
+            for sector_code, weight in list(current_positions.items()):
+                sector_info = next((s for s in sector_data if s.get("sector_code") == sector_code), None)
+                sn = sector_info.get("sector_name", "") if sector_info else ""
+                _execute_sell(sector_code, weight, "STOP_LOSS", stop_loss_reason, sector_name=sn)
+            day_entered.clear()
+            take_profit_level = 0
+            take_profit_base_weights.clear()
+            _record_portfolio_snapshot(date, sector_data)
+            stop_loss_triggered = True
+            stop_loss_cooldown = max(params.cooldown_days if params.cooldown_days else 2, 2)
+            position_hold_counter = 0
+            # 重置峰值追踪，防止清仓后新仓被旧峰值拖累立即再次触发止损
+            peak_capital = capital
+            trailing_peak = capital
+            max_dd_from_initial = 0.0
+            cumulative_benchmark_return = 0.0
+            reference_capital = capital
+            nav_history.clear()
+            logger.warning(f"[{date}] *** 止损执行完成 *** reason={stop_loss_reason} reset: peak/trailing/ref={capital:.0f} cooldown={stop_loss_cooldown}")
+
+        # 2f: 阶梯式均线止盈（可选） — NAV回落至均线上方阈值内时分批减仓
+        if params.ma_take_profit_thresholds and params.ma_take_profit_ratios and not stop_loss_triggered and not stop_loss_reason and current_positions and min_hold_met:
+            tp_window = min(len(nav_history), params.ma_take_profit_days) if params.ma_take_profit_days else 0
+            if tp_window >= 10:
+                tp_ma_val = sum(nav_history[-tp_window:]) / tp_window
+                if tp_ma_val > 0 and capital > tp_ma_val:
+                    deviation = (capital - tp_ma_val) / tp_ma_val  # 正值 = NAV高于均线
+                    thresholds = params.ma_take_profit_thresholds  # 递减序列 [5%, 3%, 1%]
+                    ratios = params.ma_take_profit_ratios
+                    if take_profit_level == 0:
+                        take_profit_base_weights = {c: w for c, w in current_positions.items()}
+                    if take_profit_level < len(thresholds) and deviation <= thresholds[take_profit_level]:
+                        ratio = ratios[take_profit_level]
+                        level_label = take_profit_level + 1
+                        total_levels = len(thresholds)
+                        for sector_code in list(current_positions.keys()):
+                            base_w = take_profit_base_weights.get(sector_code, 0)
+                            cur_w = current_positions.get(sector_code, 0)
+                            if base_w <= 0 or cur_w <= 0:
+                                continue
+                            reduce_w = round(base_w * ratio, 4)
+                            reduce_w = min(reduce_w, cur_w)
+                            if reduce_w <= 0:
+                                continue
+                            sector_info = next((s for s in sector_data if s.get("sector_code") == sector_code), None)
+                            sn = sector_info.get("sector_name", "") if sector_info else ""
+                            sell_amount = capital * reduce_w
+                            cost_info = _calc_trade_cost(sell_amount, params.commission_rate, params.stamp_tax_rate, params.slippage_rate, is_sell=True)
+                            sell_cost = cost_info["total"]
+                            capital -= sell_cost
+                            total_commission += cost_info["commission"]
+                            total_stamp_tax += cost_info["stamp_tax"]
+                            total_slippage_cost += cost_info["slippage"]
+                            trade_count_actual += 1
+                            current_positions[sector_code] = round(cur_w - reduce_w, 4)
+                            _record_position_change(date, sector_code, sn, "TAKE_PROFIT", sell_amount, sell_cost,
+                                                    f"均线止盈{level_label}/{total_levels}: 偏离均线{deviation:.2%}<=阈值{thresholds[take_profit_level]:.0%}, 减仓{ratio:.0%}(基数{base_w:.2%}), 剩余{current_positions[sector_code]:.2%}")
+                        # 清理已减至零的仓位
+                        for code in [c for c, w in current_positions.items() if w <= 0]:
+                            current_positions.pop(code, None)
+                            day_entered.pop(code, None)
+                            take_profit_base_weights.pop(code, None)
+                        take_profit_level += 1
+                        # 全部清仓后重置状态，允许重新开仓
+                        if not current_positions:
+                            take_profit_level = 0
+                            take_profit_base_weights.clear()
+                            position_hold_counter = 0
+                            logger.info(f"[{date}] 止盈全部清仓完成，重置状态允许重新开仓")
+                        _record_portfolio_snapshot(date, sector_data)
+
+        # Step 3: 紧急退出检查
         if current_positions and position_hold_counter > 0:
             emergency_exit = False
-            exit_score = params.emergency_exit_score if params.emergency_exit_score is not None else 1.0
-            # 预计算板块评分（用 sector_data 中的 change 作为代理）
-            for sector_code in current_positions:
+            trigger_sector = ""
+            trigger_drop = 0.0
+            for sector_code in list(current_positions.keys()):
                 sector_info = next((s for s in sector_data if s.get("sector_code") == sector_code), None)
                 if sector_info:
-                    change = abs(sector_info.get("index_change_pct", 0))
-                    # 单日跌幅超过 5% 视为紧急退出信号
-                    if change >= 5.0 and sector_info.get("index_change_pct", 0) < -5.0:
+                    change = sector_info.get("index_change_pct", 0)
+                    if change <= -5.0:
                         emergency_exit = True
+                        trigger_sector = sector_info.get("sector_name", sector_code)
+                        trigger_drop = change
                         break
             if emergency_exit:
+                reason = f"紧急退出: {trigger_sector}单日跌幅{trigger_drop:.2f}%>5%, 全部清仓"
+                for sector_code, weight in list(current_positions.items()):
+                    sector_info = next((s for s in sector_data if s.get("sector_code") == sector_code), None)
+                    sn = sector_info.get("sector_name", "") if sector_info else ""
+                    chg = sector_info.get("index_change_pct", 0) if sector_info else 0
+                    _execute_sell(sector_code, weight, "EMERGENCY_EXIT",
+                                  f"{reason} ({sn}当日{chg:.2f}%)", sector_name=sn)
+                day_entered.clear()
+                take_profit_level = 0
+                take_profit_base_weights.clear()
+                _record_portfolio_snapshot(date, sector_data)
                 position_hold_counter = 0
+                peak_capital = capital
+                trailing_peak = capital
+                max_dd_from_initial = 0.0
+                cumulative_benchmark_return = 0.0
+                reference_capital = capital
+                nav_history.clear()
             else:
                 position_hold_counter -= 1
 
-        # Step 4: 更新止损冷静期（动态：根据市场状态调整）
+        # Step 4: 更新止损冷静期
         if stop_loss_cooldown > 0:
             stop_loss_cooldown -= 1
             if stop_loss_cooldown <= 0:
@@ -619,11 +1141,22 @@ def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_
         if rebalance_cooldown > 0:
             rebalance_cooldown -= 1
 
-        # Step 6: 计算市场状态（在信号生成之前）
+        # Step 6: 计算市场状态 + 生成信号（T+1: 记录待执行，次日开盘执行）
         day_signals = []
         market_regime = "NEUTRAL"
-        if not stop_loss_triggered and position_hold_counter <= 0 and stop_loss_cooldown <= 0 and rebalance_cooldown <= 0:
-            # 先做一次快速评分以确定市场状态
+        _can_trade = not stop_loss_triggered and (position_hold_counter <= 0 or take_profit_level > 0) and stop_loss_cooldown <= 0 and rebalance_cooldown <= 0
+        if not _can_trade and current_positions:
+            logger.debug(f"[{date}] 不满足交易条件: stop_loss_triggered={stop_loss_triggered}, sl_cooldown={stop_loss_cooldown}, rb_cooldown={rebalance_cooldown}")
+        elif not _can_trade and not current_positions:
+            logger.debug(f"[{date}] 不满足交易条件(空仓): stop_loss_triggered={stop_loss_triggered}, sl_cooldown={stop_loss_cooldown}, rb_cooldown={rebalance_cooldown}")
+        if _can_trade:
+            # 注入截至当日的板块历史（仅信号日计算因子时执行，二分截取避免逐条过滤）
+            from bisect import bisect_right
+            for s in sector_data:
+                code = s.get("sector_code")
+                hd = hist_dates.get(code)
+                if hd:
+                    s["_history"] = sector_history_cache[code][:bisect_right(hd, date)]
             quick_signals = scoring_model.calculate_daily_signals(
                 sector_data=sector_data,
                 strategy_type=strategy_type,
@@ -631,9 +1164,7 @@ def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_
                 signal_date=date,
                 current_positions=current_positions,
             )
-            # 获取评分后的板块数据（calculate_daily_signals 内部已评分）
-            # 这里需要重新获取评分结果来判断市场状态
-            # 简化方式：直接用 sector_data 的 change 统计来判断
+
             total_sectors = len(sector_data)
             up_count = sum(1 for s in sector_data if s.get("index_change_pct", 0) > 0)
             up_ratio = up_count / max(total_sectors, 1)
@@ -642,7 +1173,6 @@ def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_
             bull_thr = params.market_bull_threshold if params.market_bull_threshold is not None else 0.5
             bear_thr = params.market_bear_threshold if params.market_bear_threshold is not None else 0.4
 
-            # 简化市场状态判断（基于涨跌比和平均涨跌）
             if up_ratio >= bull_thr and avg_change > 0:
                 market_regime = "BULL"
             elif up_ratio < bear_thr and avg_change < 0:
@@ -654,43 +1184,40 @@ def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_
             if len(regime_history) > 5:
                 regime_history.pop(0)
 
-            # 空仓确认：连续 2 天 BEAR 才触发空仓
             confirm_days = params.favorable_confirm_days if params.favorable_confirm_days is not None else 2
             confirmed_bear = len(regime_history) >= confirm_days and all(
                 r == "BEAR" for r in regime_history[-confirm_days:]
             )
-            # 恢复确认：连续 N 天非 BEAR，或当前为 BULL（牛市首日即入）
             confirmed_recover = (
                 (len(regime_history) >= confirm_days and all(r != "BEAR" for r in regime_history[-confirm_days:]))
                 or market_regime == "BULL"
             )
 
-            # 空仓超时：超过 max_empty_days 且市场非 BEAR，强制试探建仓
             max_empty = params.max_empty_days if params.max_empty_days is not None else 10
             force_entry = empty_days >= max_empty and market_regime != "BEAR"
 
             if confirmed_bear and not force_entry and params.allow_empty:
-                # 确认熊市 → 空仓
                 if current_positions:
-                    # 渐进退出：清仓
-                    sell_trade_cost = 0.0
-                    for sector_code, weight in current_positions.items():
-                        sell_amount = capital * weight
-                        cost = _calc_trade_cost(sell_amount, params.commission_rate, params.stamp_tax_rate, params.slippage_rate, is_sell=True)
-                        sell_trade_cost += cost["total"]
-                        total_commission += cost["commission"]
-                        total_stamp_tax += cost["stamp_tax"]
-                        total_slippage_cost += cost["slippage"]
-                        trade_count_actual += 1
-                    capital -= sell_trade_cost
-                    current_positions = {}
+                    for sector_code, weight in list(current_positions.items()):
+                        sector_info = next((s for s in sector_data if s.get("sector_code") == sector_code), None)
+                        sn = sector_info.get("sector_name", "") if sector_info else ""
+                        _execute_sell(sector_code, weight, "BEAR_EXIT", f"市场BEAR空仓 上涨占比{up_ratio:.0%}", sector_name=sn)
+                    day_entered.clear()
+                    take_profit_level = 0
+                    take_profit_base_weights.clear()
+                    _record_portfolio_snapshot(date, sector_data)
+                    peak_capital = capital
+                    trailing_peak = capital
+                    max_dd_from_initial = 0.0
+                    cumulative_benchmark_return = 0.0
+                    reference_capital = capital
+                    nav_history.clear()
+                    position_hold_counter = 0
                     day_signals.append({"sector_code": "ALL", "sector_name": "全部", "direction": "SELL", "score": 0, "reason": f"市场BEAR空仓, 上涨占比{up_ratio:.0%}"})
                 empty_days += 1
             else:
-                # 非确认熊市 → 正常调仓或试探建仓
                 signals = quick_signals
 
-                # force_entry: 空仓超时 → 缩减仓位试探建仓
                 if force_entry and signals:
                     scaled = []
                     for sig in signals:
@@ -711,6 +1238,10 @@ def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_
                 if buy_signals:
                     new_positions = {sig.sector_code: sig.position_ratio for sig in buy_signals}
 
+                signals_by_code = {}
+                for sig in signals:
+                    signals_by_code[sig.sector_code] = {"sector_name": sig.sector_name, "score": sig.score, "reason": sig.reason}
+
                 for sig in signals:
                     day_signals.append({
                         "sector_code": sig.sector_code,
@@ -720,7 +1251,7 @@ def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_
                         "reason": sig.reason,
                     })
 
-                # 执行调仓（跳过无变化的重平衡）
+                # T+1: 记录待执行调仓，次日开盘执行
                 sell_codes = [s.sector_code for s in signals if s.direction.value == "SELL"]
                 same_codes = set(new_positions.keys()) == set(current_positions.keys()) if new_positions and current_positions else False
                 same_ratios = same_codes and all(
@@ -728,75 +1259,51 @@ def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_
                     for k in new_positions
                 ) if same_codes else False
                 if same_ratios and not sell_codes:
-                    # 新旧持仓完全一致，跳过调仓避免无意义交易成本
                     pass
                 elif new_positions or sell_codes:
-                    # 卖出旧持仓
-                    sell_trade_cost = 0.0
-                    for sector_code, weight in current_positions.items():
-                        if sector_code not in new_positions:
-                            sell_amount = capital * weight
-                            cost = _calc_trade_cost(sell_amount, params.commission_rate, params.stamp_tax_rate, params.slippage_rate, is_sell=True)
-                            sell_trade_cost += cost["total"]
-                            total_commission += cost["commission"]
-                            total_stamp_tax += cost["stamp_tax"]
-                            total_slippage_cost += cost["slippage"]
-                            trade_count_actual += 1
-
-                    # 买入新持仓
-                    buy_trade_cost = 0.0
-                    for sector_code, weight in new_positions.items():
-                        buy_amount = capital * weight
-                        cost = _calc_trade_cost(buy_amount, params.commission_rate, params.stamp_tax_rate, params.slippage_rate, is_sell=False)
-                        buy_trade_cost += cost["total"]
-                        total_commission += cost["commission"]
-                        total_slippage_cost += cost["slippage"]
-                        trade_count_actual += 1
-
-                    capital -= (sell_trade_cost + buy_trade_cost)
-                    if new_positions:
-                        current_positions = new_positions
-                        # 动态持仓天数
-                        base_hold = params.hold_days
-                        if market_regime == "BULL":
-                            dynamic_hold = max(base_hold - 1, 1)
-                        elif market_regime == "BEAR":
-                            dynamic_hold = base_hold + 1
-                        else:
-                            dynamic_hold = base_hold
-                        position_hold_counter = dynamic_hold
-                        stop_loss_triggered = False
-                        rebalance_cooldown = params.cooldown_days if params.cooldown_days else 2
-                        empty_days = 0  # 建仓成功，重置空仓计数
-                    else:
-                        current_positions = {}
-                        empty_days += 1
+                    pending_rebalance = {
+                        "new_positions": new_positions,
+                        "signals_by_code": signals_by_code,
+                        "signal_date": date,
+                    }
                 else:
-                    # 无调仓信号但有持仓 → 保持
                     if not current_positions:
                         empty_days += 1
                     else:
                         empty_days = 0
 
-        # 记录每日信号
+        # 记录每日信号（含仓位明细）
+        day_position_detail = {}
+        for code, w in current_positions.items():
+            _meta = sector_meta.get(code, {})
+            day_position_detail[code] = {
+                "weight": round(w, 4),
+                "amount": round(capital * w, 2),
+                "sector_name": _meta.get("sector_name", "") or code,
+                "etf_code": _meta.get("etf_code"),
+                "etf_name": _meta.get("etf_name"),
+            }
+        _position_value = round(sum(d["amount"] for d in day_position_detail.values()), 2)
         daily_signals_out.append({
             "date": date,
             "signals": day_signals,
             "strategy_return": round(strategy_daily_return * 100, 4),
             "benchmark_return": round(benchmark_return * 100, 4),
-            "positions": {k: round(v, 4) for k, v in current_positions.items()} if not stop_loss_triggered else {},
+            "positions": day_position_detail,
+            "total_position_value": _position_value,
+            # capital 为总资产(NAV)，自由现金 = 总资产 - 持仓市值
+            "cash": round(max(0.0, capital - _position_value), 2),
+            "total_asset": round(capital, 2),
         })
 
-        # Step 7: 记录净值曲线
-        step = max(1, len(sorted_dates) // 100)
-        if i % step == 0 or i == len(sorted_dates) - 1:
-            benchmark_nav = initial_capital * np.prod([1 + r for r in benchmark_returns[:i + 1]])
-            nav_curve.append({
-                "date": date,
-                "nav": round(capital, 2),
-                "benchmark": round(float(benchmark_nav), 2),
-                "stop_loss": stop_loss_triggered,
-            })
+        # 记录净值曲线
+        benchmark_nav = initial_capital * np.prod([1 + r for r in benchmark_returns[:i + 1]]) if benchmark_returns else initial_capital
+        nav_curve.append({
+            "date": date,
+            "nav": round(capital, 2),
+            "benchmark": round(float(benchmark_nav), 2),
+            "stop_loss": stop_loss_triggered,
+        })
 
     # 计算回测指标
     if initial_capital <= 0:
@@ -831,23 +1338,19 @@ def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_
 
     if daily_returns:
         daily_arr = np.array(daily_returns)
-        # 换手率：总交易金额 / 初始资金
         total_buy_amount = sum(
             abs(daily_arr[i]) * (daily_nav[i - 1] if i > 0 else initial_capital)
             for i in range(len(daily_arr)) if abs(daily_arr[i]) > 0.001
         )
         turnover_rate = round(total_buy_amount / max(initial_capital, 1), 2)
 
-        # 空仓天数占比
         empty_days_count = sum(1 for d in daily_signals_out if not d.get("positions"))
         empty_days_pct = round(empty_days_count / max(len(daily_signals_out), 1), 4)
 
-        # 盈亏比
         gains = float(daily_arr[daily_arr > 0].sum()) if (daily_arr > 0).any() else 0
         losses = float(abs(daily_arr[daily_arr < 0].sum())) if (daily_arr < 0).any() else 0
         profit_factor = round(gains / max(losses, 1e-10), 2)
 
-        # 最大连续盈亏天数
         cur_wins = cur_losses = 0
         for r in daily_arr:
             if r > 0:
@@ -915,6 +1418,8 @@ def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_
     if return_full:
         result["nav_curve"] = nav_curve
         result["daily_signals"] = daily_signals_out
+        result["position_changes"] = position_changes
+        result["portfolio_snapshots"] = portfolio_snapshots
 
     return result
 
@@ -946,6 +1451,7 @@ def _empty_backtest_result(strategy_type, initial_capital, return_full):
     if return_full:
         result["nav_curve"] = []
         result["daily_signals"] = []
+        result["position_changes"] = []
     return result
 
 
@@ -1090,7 +1596,11 @@ async def analyze_factors_batch(request_body: FactorBatchRequest):
             if not code:
                 continue
             try:
-                factor_results = FactorRegistry.calculate_all(sector, None, context)
+                start_date = (datetime.strptime(actual_date, "%Y-%m-%d") - timedelta(days=60)).strftime("%Y-%m-%d")
+                history_data = influx_query.query_sector_history(code, start_date, actual_date)
+                if history_data:
+                    sector["_history"] = history_data
+                factor_results = FactorRegistry.calculate_all(sector, history_data, context)
                 abs_score, _ = combiner.combine_weighted(factor_results, weights)
                 all_fr[str(code)] = factor_results
                 abs_by_code[str(code)] = abs_score
@@ -1114,14 +1624,20 @@ async def analyze_factors_batch(request_body: FactorBatchRequest):
             # 获取板块原始数据
             sector_data = next((s for s in sectors if s.get("sector_code") == code), {})
             
-            # 计算类别得分
+            # 计算类别得分（与combiner逻辑一致，按confidence加权）
             category_scores = {}
             for fr in all_fr.get(code, []):
                 cat = fr.category.value if hasattr(fr, 'category') else 'unknown'
                 if cat not in category_scores:
-                    category_scores[cat] = {"score": 0, "count": 0}
-                category_scores[cat]["score"] += fr.score * fr.weight
-                category_scores[cat]["count"] += 1
+                    category_scores[cat] = {"score": 0, "weight_sum": 0}
+                eff_w = fr.weight * max(fr.confidence, 0.0)
+                category_scores[cat]["score"] += fr.score * eff_w
+                category_scores[cat]["weight_sum"] += eff_w
+            
+            category_result = {}
+            for cat, v in category_scores.items():
+                if v["weight_sum"] > 1e-12:
+                    category_result[cat] = round(v["score"] / v["weight_sum"], 2)
             
             results.append({
                 **meta,
@@ -1131,7 +1647,7 @@ async def analyze_factors_batch(request_body: FactorBatchRequest):
                 "change_pct": round(sector_data.get("index_change_pct", 0), 2),
                 "main_inflow": round(sector_data.get("main_net_inflow", 0) / 1e8, 2),
                 "north_inflow": round(sector_data.get("north_net_inflow", 0) / 1e8, 2),
-                "category_scores": {k: round(v["score"], 2) for k, v in category_scores.items()},
+                "category_scores": category_result,
             })
 
         results.sort(key=lambda x: x["composite_score"], reverse=True)
@@ -1507,6 +2023,8 @@ _optimization_progress = {
     "best_return": 0.0,
     "best_sharpe": 0.0,
 }
+# 最近一次寻优的完整结果（完成后写入，供前端轮询拉取）
+_optimization_result: dict = None
 
 
 def _run_optimization(daily_data, sorted_dates, strategy_type, initial_capital, n_trials, sh_index_returns=None, n_jobs=1):
@@ -1526,11 +2044,14 @@ def _run_optimization(daily_data, sorted_dates, strategy_type, initial_capital, 
         "best_return": 0.0, "best_sharpe": 0.0,
     })
 
+    # 预加载板块历史一次，全部试验复用（避免每次回测重复查询InfluxDB）
+    history_cache = _load_sector_history_cache(sorted_dates)
+
     def objective(trial):
         params_dict = _suggest_params(trial, strategy_type)
         params = StrategyParams(**params_dict)
         result = _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_capital,
-                                     sh_index_returns=sh_index_returns)
+                                     sh_index_returns=sh_index_returns, history_cache=history_cache)
         risk_adj = result["total_return"] / max(result["max_drawdown"], 0.01)
 
         # 缓存回测结果到 trial user attributes，避免后续重算
@@ -1572,25 +2093,34 @@ def _run_optimization(daily_data, sorted_dates, strategy_type, initial_capital, 
 
     best_params_dict = _suggest_params(study.best_trial, strategy_type)
     best_params = StrategyParams(**best_params_dict)
-    final_result = _run_backtest_core(daily_data, sorted_dates, strategy_type, best_params, initial_capital, return_full=True, sh_index_returns=sh_index_returns)
+    final_result = _run_backtest_core(daily_data, sorted_dates, strategy_type, best_params, initial_capital, return_full=True, sh_index_returns=sh_index_returns, history_cache=history_cache)
 
     logger.info(f"自动寻优完成: {len(all_results)} 次有效试验({n_jobs}线程并行), 最优收益={final_result['total_return']*100:.2f}%, 回撤={final_result['max_drawdown']*100:.2f}%")
     _optimization_progress["active"] = False
 
-    return {
-        "code": 200,
-        "data": {
-            "best_params": best_params_dict,
-            "best_result": final_result,
-            "all_results": all_results,
-        },
+    result_payload = {
+        "best_params": best_params_dict,
+        "best_result": final_result,
+        "all_results": all_results,
     }
+    global _optimization_result
+    _optimization_result = result_payload
+    return {"code": 200, "data": result_payload}
 
 
 @app.get("/data/replay/optimize-progress")
 async def get_optimize_progress():
     """获取当前寻优进度"""
     return {"code": 200, "data": dict(_optimization_progress)}
+
+
+@app.get("/data/replay/strategy-optimize/result")
+async def get_optimize_result():
+    """获取最近一次完成的寻优结果"""
+    global _optimization_result
+    if _optimization_progress["active"]:
+        return {"code": 200, "data": {"status": "running", "result": None}}
+    return {"code": 200, "data": {"status": "done", "result": _optimization_result}}
 
 
 @app.post("/data/replay/strategy-optimize")
@@ -1619,10 +2149,13 @@ async def optimize_strategy_params(request_body: dict):
         if not daily_data:
             raise HTTPException(status_code=404, detail="该时间范围内无历史数据")
 
+        # 已有寻优任务进行中则拒绝重复启动
+        if _optimization_progress["active"]:
+            raise HTTPException(status_code=409, detail="已有寻优任务运行中，请稍候")
+
         sorted_dates = sorted(daily_data.keys())
         logger.info(f"自动寻优: {len(sorted_dates)} 个交易日, 最多 {n_trials} 次试验")
 
-        # 放到线程池执行，避免阻塞事件循环
         loop = asyncio.get_event_loop()
 
         # 获取上证指数数据作为基准
@@ -1631,11 +2164,14 @@ async def optimize_strategy_params(request_body: dict):
             lambda: influx_query.query_sh_index_returns(sorted_dates[0], sorted_dates[-1]),
         )
 
-        result = await loop.run_in_executor(
+        # 后台线程执行寻优（可能远超HTTP超时），请求立即返回，前端轮询进度后拉取结果
+        global _optimization_result
+        _optimization_result = None
+        loop.run_in_executor(
             None,
             lambda: _run_optimization(daily_data, sorted_dates, strategy_type, initial_capital, n_trials, sh_index_returns=sh_returns, n_jobs=n_jobs),
         )
-        return result
+        return {"code": 200, "data": {"accepted": True, "message": "寻优已启动，请通过进度接口查询"}}
     except HTTPException:
         raise
     except Exception as e:
@@ -1744,10 +2280,14 @@ async def replay_strategy_overlay(request_body: dict):
         # 转换为前端期望的嵌套格式
         nav_curve = result_data.pop("nav_curve", [])
         daily_signals = result_data.pop("daily_signals", [])
+        position_changes = result_data.pop("position_changes", [])
+        portfolio_snapshots = result_data.pop("portfolio_snapshots", [])
         response_data = {
             "summary": result_data,
             "nav_curve": nav_curve,
             "daily_signals": daily_signals,
+            "position_changes": position_changes,
+            "portfolio_snapshots": portfolio_snapshots,
         }
 
         return {"code": 200, "data": response_data}
