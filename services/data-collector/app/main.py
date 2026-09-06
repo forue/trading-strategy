@@ -97,8 +97,11 @@ async def collect_history(days: int = 30, date: str = None):
         results = data_collector.collect_sector_history(days, trade_date=date)
         # 再用K线数据填充历史
         kline_results = data_collector.collect_sector_history_via_kline(days)
-        total = len(results) + len(kline_results)
-        return success_response(data={"count": total}, message="采集历史数据完成")
+        market = data_collector.collect_market_index_kline(start_date=(
+            (datetime.now() - __import__("datetime").timedelta(days=days + 30)).strftime("%Y%m%d")
+        ))
+        total = len(results) + len(kline_results) + len(market)
+        return success_response(data={"count": total, "market_kline": len(market)}, message="采集历史数据完成")
     except Exception as e:
         logger.error(f"历史数据采集失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))

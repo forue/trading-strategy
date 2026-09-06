@@ -463,6 +463,94 @@ class DataCollector:
             logger.info(f"所有板块K线数据采集完成: {len(all_data)} 条")
         return all_data
 
+    def collect_market_index_kline(
+        self,
+        index_code: str = "sh000001",
+        start_date: str = None,
+        end_date: str = None,
+    ) -> list[dict]:
+        """采集大盘指数日K（默认上证指数），写入 InfluxDB market_kline
+
+        Args:
+            index_code: AkShare 指数代码，如 sh000001 / sz399300
+            start_date: YYYYMMDD 或 YYYY-MM-DD
+            end_date: YYYYMMDD 或 YYYY-MM-DD
+        """
+        if start_date is None:
+            start_date = (datetime.now() - timedelta(days=400)).strftime("%Y%m%d")
+        if end_date is None:
+            end_date = datetime.now().strftime("%Y%m%d")
+        start_norm = start_date.replace("-", "")[:8]
+        end_norm = end_date.replace("-", "")[:8]
+        name_map = {
+            "sh000001": "上证指数",
+            "sz399001": "深证成指",
+            "sz399300": "沪深300",
+            "sh000300": "沪深300",
+        }
+        index_name = name_map.get(index_code, index_code)
+        results = []
+        df = None
+        # 优先东方财富，失败回退新浪
+        for func_name in ["stock_zh_index_daily_em", "stock_zh_index_daily"]:
+            try:
+                func = getattr(ak, func_name)
+                df = func(symbol=index_code)
+                if df is not None and not df.empty:
+                    logger.info(f"大盘指数 {index_code} 使用 {func_name} 获取成功")
+                    break
+            except Exception as e:
+                logger.debug(f"大盘指数 {func_name} 失败: {e}")
+                df = None
+        if df is None or df.empty:
+            logger.warning(f"大盘指数 {index_code} 所有数据源均失败")
+            return []
+
+        try:
+            # 东方财富日线常见列为 date / open / close / high / low / volume
+            date_col = "date" if "date" in df.columns else ("日期" if "日期" in df.columns else None)
+            close_col = "close" if "close" in df.columns else ("收盘" if "收盘" in df.columns else None)
+            if not date_col or not close_col:
+                logger.warning(f"大盘指数列名无法识别: {list(df.columns)}")
+                return []
+            df = df.copy()
+            df["_date"] = df[date_col].astype(str).str[:10].str.replace("-", "")
+            df = df[(df["_date"] >= start_norm) & (df["_date"] <= end_norm)]
+            df = df.sort_values("_date")
+            prev_close = None
+            for _, row in df.iterrows():
+                close = self._safe_float(row.get(close_col, 0))
+                open_ = self._safe_float(row.get("open", row.get("开盘", close)))
+                high = self._safe_float(row.get("high", row.get("最高", close)))
+                low = self._safe_float(row.get("low", row.get("最低", close)))
+                volume = self._safe_float(row.get("volume", row.get("成交量", 0)))
+                change_pct = None
+                if "涨跌幅" in df.columns:
+                    change_pct = self._safe_float(row.get("涨跌幅"))
+                if change_pct is None and prev_close and prev_close > 0:
+                    change_pct = (close - prev_close) / prev_close * 100
+                d8 = str(row["_date"])
+                d_iso = f"{d8[:4]}-{d8[4:6]}-{d8[6:8]}" if len(d8) == 8 else str(row[date_col])[:10]
+                results.append({
+                    "index_code": index_code,
+                    "index_name": index_name,
+                    "date": d_iso,
+                    "open": open_,
+                    "close": close,
+                    "high": high,
+                    "low": low,
+                    "volume": volume,
+                    "change_pct": round(change_pct, 4) if change_pct is not None else 0.0,
+                })
+                if close:
+                    prev_close = close
+            if results:
+                influx_manager.write_market_kline(results)
+                logger.info(f"采集大盘K线 {index_name}: {len(results)} 条")
+        except Exception as e:
+            logger.warning(f"采集大盘K线失败 {index_code}: {e}")
+        return results
+
     def collect_north_bound_flow(self, trade_date: str = None) -> list[dict]:
         """采集北向资金数据
 

@@ -131,6 +131,42 @@ class InfluxDBManager:
             self.write_api.write(bucket=self.bucket, org=self.org, record=points)
             logger.info(f"写入板块K线数据 {len(points)} 条")
 
+    def write_market_kline(self, data: list[dict]):
+        """写入大盘指数K线（measurement: market_kline）
+
+        Args:
+            data: [{index_code, index_name, date, open, close, high, low,
+                    volume, change_pct}, ...]
+        """
+        points = []
+        for item in data:
+            date_str = item.get("date", "")
+            try:
+                if len(date_str) == 8:
+                    dt = datetime.strptime(date_str, "%Y%m%d")
+                else:
+                    dt = datetime.strptime(date_str, "%Y-%m-%d")
+            except (ValueError, TypeError):
+                dt = datetime.now()
+
+            close = item.get("close")
+            if close is None:
+                continue
+            point = (
+                Point("market_kline")
+                .tag("index_code", str(item.get("index_code", "sh000001")))
+                .tag("index_name", str(item.get("index_name", "上证指数")))
+            )
+            for k in ("open", "close", "high", "low", "volume", "change_pct"):
+                if item.get(k) is not None:
+                    point = point.field(k, float(item[k]))
+            point = point.time(dt, WritePrecision.MS)
+            points.append(point)
+
+        if points:
+            self.write_api.write(bucket=self.bucket, org=self.org, record=points)
+            logger.info(f"写入大盘K线数据 {len(points)} 条")
+
     def write_north_bound_flow(self, data: list[dict]):
         """写入北向资金数据
 
