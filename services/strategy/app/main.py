@@ -632,6 +632,7 @@ def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_
     day_entered = {}                 # {sector_code: date} 各板块建仓日期（用于最少持有天数）
     take_profit_level = 0            # 当前止盈阶梯级别（0=未触发，1=已减第一级...）
     take_profit_base_weights = {}    # {sector_code: weight} 止盈开始时的原始仓位（用于按原始比例减仓）
+    cash_ledger = initial_capital     # 显式现金账本：仅在买卖/费用发生时变动，无调仓日保持不变
 
     def _record_position_change(date, sector_code, sector_name, action, amount, cost, reason=""):
         """记录仓位调整明细"""
@@ -653,9 +654,12 @@ def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_
             return
         sector_change_map = {s["sector_code"]: s.get("index_change_pct", 0) / 100 for s in daily_data_for_date}
         sector_name_map = {s["sector_code"]: s.get("sector_name", "") for s in daily_data_for_date}
+        # 持仓市值 = 总资产 - 现金（残差），按权重分摊展示
+        _free_cash = max(0.0, capital - cash_ledger)
+        _tw = sum(current_positions.values())
         portfolio = []
         for code, weight in current_positions.items():
-            amount = capital * weight
+            amount = (_free_cash * weight / _tw) if _tw > 0 else 0.0
             day_change = sector_change_map.get(code, 0)
             contrib = weight * day_change
             portfolio.append({
@@ -671,17 +675,18 @@ def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_
         portfolio_snapshots.append({
             "date": date,
             "portfolio": portfolio,
-            "cash": round(max(0.0, capital - _pos_total), 2),
+            "cash": round(cash_ledger, 2),
             "total_value": round(capital, 2),
         })
 
     def _execute_sell(sector_code, weight, action, reason="", sector_name=""):
         """执行卖出并记录明细，返回交易成本"""
-        nonlocal capital, total_commission, total_stamp_tax, total_slippage_cost, trade_count_actual
+        nonlocal capital, cash_ledger, total_commission, total_stamp_tax, total_slippage_cost, trade_count_actual
         sell_amount = capital * weight
         cost_info = _calc_trade_cost(sell_amount, params.commission_rate, params.stamp_tax_rate, params.slippage_rate, is_sell=True)
         sell_cost = cost_info["total"]
         capital -= sell_cost
+        cash_ledger += sell_amount - sell_cost
         total_commission += cost_info["commission"]
         total_stamp_tax += cost_info["stamp_tax"]
         total_slippage_cost += cost_info["slippage"]
@@ -692,11 +697,12 @@ def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_
 
     def _execute_buy(sector_code, sector_name, weight, reason=""):
         """执行买入并记录明细，返回交易成本"""
-        nonlocal capital, total_commission, total_stamp_tax, total_slippage_cost, trade_count_actual
+        nonlocal capital, cash_ledger, total_commission, total_stamp_tax, total_slippage_cost, trade_count_actual
         buy_amount = capital * weight
         cost_info = _calc_trade_cost(buy_amount, params.commission_rate, params.stamp_tax_rate, params.slippage_rate, is_sell=False)
         buy_cost = cost_info["total"]
         capital -= buy_cost
+        cash_ledger -= buy_amount + buy_cost
         total_commission += cost_info["commission"]
         total_slippage_cost += cost_info["slippage"]
         trade_count_actual += 1
@@ -788,7 +794,9 @@ def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_
                 if new_total + kept_total > max_total:
                     scale = (max_total - new_total) / kept_total if kept_total > 0 else 0
                     for code in _kept_codes:
-                        current_positions[code] = round(current_positions[code] * scale, 4)
+                        old_kw = current_positions[code]
+                        current_positions[code] = round(old_kw * scale, 4)
+                        cash_ledger += capital * old_kw * (1 - scale)  # 缩仓释放的资金回到现金
                     _scaled = True
 
             # 统一记录一条 HOLD 记录（缩仓或不缩仓）
@@ -835,6 +843,7 @@ def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_
                     cost_info = _calc_trade_cost(reduce_amount, params.commission_rate, params.stamp_tax_rate, params.slippage_rate, is_sell=True)
                     sell_cost = cost_info["total"]
                     capital -= sell_cost
+                    cash_ledger += reduce_amount - sell_cost
                     total_commission += cost_info["commission"]
                     total_stamp_tax += cost_info["stamp_tax"]
                     total_slippage_cost += cost_info["slippage"]
@@ -859,6 +868,7 @@ def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_
                     cost_info = _calc_trade_cost(add_amount, params.commission_rate, params.stamp_tax_rate, params.slippage_rate, is_sell=False)
                     buy_cost = cost_info["total"]
                     capital -= buy_cost
+                    cash_ledger -= add_amount + buy_cost
                     total_commission += cost_info["commission"]
                     total_slippage_cost += cost_info["slippage"]
                     trade_count_actual += 1
@@ -876,6 +886,7 @@ def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_
                 cost_info = _calc_trade_cost(buy_amount, params.commission_rate, params.stamp_tax_rate, params.slippage_rate, is_sell=False)
                 buy_cost = cost_info["total"]
                 capital -= buy_cost
+                cash_ledger -= buy_amount + buy_cost
                 total_commission += cost_info["commission"]
                 total_slippage_cost += cost_info["slippage"]
                 trade_count_actual += 1
@@ -1074,6 +1085,7 @@ def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_
                             cost_info = _calc_trade_cost(sell_amount, params.commission_rate, params.stamp_tax_rate, params.slippage_rate, is_sell=True)
                             sell_cost = cost_info["total"]
                             capital -= sell_cost
+                            cash_ledger += sell_amount - sell_cost
                             total_commission += cost_info["commission"]
                             total_stamp_tax += cost_info["stamp_tax"]
                             total_slippage_cost += cost_info["slippage"]
@@ -1273,12 +1285,16 @@ def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_
                         empty_days = 0
 
         # 记录每日信号（含仓位明细）
+        # 持仓市值 = 总资产(capital) - 现金账本(cash_ledger)，按权重分摊；无调仓日现金不变
+        _residual = max(0.0, capital - cash_ledger)
+        _tw = sum(current_positions.values())
         day_position_detail = {}
         for code, w in current_positions.items():
             _meta = sector_meta.get(code, {})
+            _amt = (_residual * w / _tw) if _tw > 0 else 0.0
             day_position_detail[code] = {
                 "weight": round(w, 4),
-                "amount": round(capital * w, 2),
+                "amount": round(_amt, 2),
                 "sector_name": _meta.get("sector_name", "") or code,
                 "etf_code": _meta.get("etf_code"),
                 "etf_name": _meta.get("etf_name"),
@@ -1291,8 +1307,7 @@ def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_
             "benchmark_return": round(benchmark_return * 100, 4),
             "positions": day_position_detail,
             "total_position_value": _position_value,
-            # capital 为总资产(NAV)，自由现金 = 总资产 - 持仓市值
-            "cash": round(max(0.0, capital - _position_value), 2),
+            "cash": round(cash_ledger, 2),
             "total_asset": round(capital, 2),
         })
 
