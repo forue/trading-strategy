@@ -1,4 +1,5 @@
 """策略引擎服务 - InfluxDB历史数据查询"""
+import threading
 import warnings
 from datetime import datetime, timedelta
 from influxdb_client import InfluxDBClient
@@ -34,6 +35,25 @@ class InfluxDBQuery:
             return default
 
     @staticmethod
+    def _safe_float_or_none(val) -> float | None:
+        """安全转换，NaN/Infinity/None/0 一律返回 None（区分“缺数据”与真实0值）
+
+        估值分位字段缺失时必须返回 None 而非 0.0，
+        否则估值因子会把“无数据”误算成满分(10.0)。
+        """
+        try:
+            if val is None:
+                return None
+            if isinstance(val, float) and (val != val or val == float('inf') or val == float('-inf')):
+                return None
+            result = float(val)
+            if result != result or result == float('inf') or result == float('-inf') or result == 0:
+                return None
+            return result
+        except (ValueError, TypeError, ArithmeticError):
+            return None
+
+    @staticmethod
     def _to_records(tables) -> list[dict]:
         """将 query_data_frame 返回的结果统一转换为 records 列表
 
@@ -58,6 +78,7 @@ class InfluxDBQuery:
         return []
 
     def __init__(self):
+        self._lock = threading.Lock()
         self._connect()
 
     def _connect(self):
@@ -72,19 +93,26 @@ class InfluxDBQuery:
         self.org = settings.influxdb_org
 
     def _ensure_connected(self):
-        """检查连接，断开则自动重连"""
-        try:
-            health = self.client.health()
-            if health.status != "pass":
-                logger.warning("InfluxDB 连接异常，尝试重连")
-                self._connect()
-        except Exception:
-            logger.warning("InfluxDB 连接检测失败，尝试重连")
+        """检查连接，断开则自动重连（线程安全）"""
+        with self._lock:
             try:
-                self.client.close()
+                health = self.client.health()
+                if health.status != "pass":
+                    logger.warning("InfluxDB 连接异常，尝试重连")
+                    old_client = self.client
+                    self._connect()
+                    try:
+                        old_client.close()
+                    except Exception:
+                        pass
             except Exception:
-                pass
-            self._connect()
+                logger.warning("InfluxDB 连接检测失败，尝试重连")
+                old_client = self.client
+                self._connect()
+                try:
+                    old_client.close()
+                except Exception:
+                    pass
 
     def health_check(self) -> dict:
         """返回 InfluxDB 连接状态"""
@@ -209,8 +237,8 @@ class InfluxDBQuery:
                 "low": self._safe_float(row.get("low", 0)),
                 "pe_ttm": self._safe_float(row.get("pe_ttm", 0)),
                 "pb": self._safe_float(row.get("pb", 0)),
-                "pe_percentile": self._safe_float(row.get("pe_percentile", 0)),
-                "pb_percentile": self._safe_float(row.get("pb_percentile", 0)),
+                "pe_percentile": self._safe_float_or_none(row.get("pe_percentile")),
+                "pb_percentile": self._safe_float_or_none(row.get("pb_percentile")),
                 "etf_code": str(row.get("etf_code", "")) or None,
                 "etf_name": str(row.get("etf_name", "")) or None,
             })
@@ -430,6 +458,56 @@ class InfluxDBQuery:
 
         return result
 
+    def query_all_sector_kline(self, start_date: str, end_date: str) -> dict[str, list[dict]]:
+        """批量查询所有板块K线数据（用于回测预加载，单次查询）"""
+        self._ensure_connected()
+        flux_start, flux_stop = self._date_to_flux_range(start_date, end_date)
+
+        query = f'''
+        from(bucket: "{self.bucket}")
+          |> range(start: {flux_start}, stop: {flux_stop})
+          |> filter(fn: (r) => r._measurement == "sector_kline")
+          |> pivot(rowKey: ["_time", "sector_code"], columnKey: ["_field"], valueColumn: "_value")
+          |> keep(columns: ["_time", "sector_code", "sector_name",
+                            "open", "close", "high", "low",
+                            "volume", "amount", "change_pct"])
+        '''
+        try:
+            tables = self.query_api.query_data_frame(query)
+        except Exception as e:
+            logger.debug(f"批量K线查询失败: {e}")
+            return {}
+
+        if isinstance(tables, list) and len(tables) == 0:
+            return {}
+        if hasattr(tables, "empty") and tables.empty:
+            return {}
+
+        result: dict[str, list[dict]] = {}
+        for row in self._to_records(tables):
+            time_str = str(row.get("_time", ""))
+            try:
+                dt = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
+                date_key = dt.strftime("%Y-%m-%d")
+            except (ValueError, TypeError):
+                continue
+            code = str(row.get("sector_code", ""))
+            if code not in result:
+                result[code] = []
+            result[code].append({
+                "date": date_key,
+                "sector_code": code,
+                "sector_name": str(row.get("sector_name", "")),
+                "open": self._safe_float(row.get("open", 0)),
+                "close": self._safe_float(row.get("close", 0)),
+                "high": self._safe_float(row.get("high", 0)),
+                "low": self._safe_float(row.get("low", 0)),
+                "volume": self._safe_float(row.get("volume", 0)),
+                "amount": self._safe_float(row.get("amount", 0)),
+                "change_pct": self._safe_float(row.get("change_pct", 0)),
+            })
+        return result
+
     def close(self):
         self.client.close()
 
@@ -530,12 +608,92 @@ class InfluxDBQuery:
         logger.info(f"估值分位更新完成: {updated_count} 条")
         return daily_data
 
+    def query_market_kline_returns(self, start_date: str, end_date: str, index_code: str = "sh000001") -> dict[str, float]:
+        """从 InfluxDB market_kline 测量获取大盘指数每日涨跌幅
+
+        优先使用 InfluxDB 已采集的大盘K线数据，比 AkShare 实时查询更可靠。
+        返回格式: {"2026-01-20": 0.005, "2026-01-21": -0.003, ...}
+        """
+        self._ensure_connected()
+        flux_start, flux_stop = self._date_to_flux_range(start_date, end_date)
+
+        query = f'''
+        from(bucket: "{self.bucket}")
+          |> range(start: {flux_start}, stop: {flux_stop})
+          |> filter(fn: (r) => r._measurement == "market_kline")
+          |> filter(fn: (r) => r.index_code == "{index_code}")
+          |> pivot(rowKey: ["_time", "index_code"], columnKey: ["_field"], valueColumn: "_value")
+          |> keep(columns: ["_time", "close", "change_pct"])
+          |> sort(columns: ["_time"])
+        '''
+        try:
+            tables = self.query_api.query_data_frame(query)
+        except Exception as e:
+            logger.debug(f"InfluxDB market_kline 查询失败: {e}")
+            return {}
+
+        records = self._to_records(tables)
+        if not records:
+            return {}
+
+        returns: dict[str, float] = {}
+        for row in records:
+            time_str = str(row.get("_time", ""))
+            try:
+                dt = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
+                date_key = dt.strftime("%Y-%m-%d")
+            except (ValueError, TypeError):
+                continue
+
+            # 优先使用 change_pct 字段（已计算好的涨跌幅百分比）
+            change_pct = row.get("change_pct")
+            if change_pct is not None:
+                val = self._safe_float(change_pct, None)
+                if val is not None:
+                    returns[date_key] = val / 100.0  # 转换为小数
+                    continue
+
+            # 回退：用 close 计算日收益率
+            close = self._safe_float(row.get("close", 0))
+            if close > 0 and date_key in returns:
+                # 需要前一天的 close 来计算，这里用 change_pct 的方式更准确
+                pass
+
+        # 如果 change_pct 不可用，用 close 序列计算日收益率
+        if not returns:
+            closes: list[tuple[str, float]] = []
+            for row in records:
+                time_str = str(row.get("_time", ""))
+                try:
+                    dt = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
+                    date_key = dt.strftime("%Y-%m-%d")
+                except (ValueError, TypeError):
+                    continue
+                close = self._safe_float(row.get("close", 0))
+                if close > 0:
+                    closes.append((date_key, close))
+            closes.sort(key=lambda x: x[0])
+            for i in range(1, len(closes)):
+                prev_date, prev_close = closes[i - 1]
+                cur_date, cur_close = closes[i]
+                if prev_close > 0:
+                    returns[cur_date] = (cur_close - prev_close) / prev_close
+
+        logger.info(f"InfluxDB 大盘K线 ({index_code}): {len(returns)} 天 ({start_date} ~ {end_date})")
+        return returns
+
     def query_sh_index_returns(self, start_date: str, end_date: str) -> dict[str, float]:
         """获取上证指数每日涨跌幅 {date_str: return_decimal}
 
-        使用 AkShare 查询上证指数 (sh000001) 历史日线数据。
+        优先从 InfluxDB market_kline 查询，失败时回退到 AkShare。
         返回格式: {"2026-01-20": 0.005, "2026-01-21": -0.003, ...}
         """
+        # 优先使用 InfluxDB 已采集的大盘K线数据
+        result = self.query_market_kline_returns(start_date, end_date, index_code="sh000001")
+        if result:
+            return result
+
+        # 回退到 AkShare 实时查询
         try:
             import akshare as ak
             df = ak.stock_zh_index_daily_em(symbol="sh000001")
@@ -551,7 +709,7 @@ class InfluxDBQuery:
                 pre_close = float(row.get("pre_close", close))
                 if pre_close > 0:
                     returns[date_str] = (close - pre_close) / pre_close
-            logger.info(f"上证指数数据: {len(returns)} 天 ({start_date} ~ {end_date})")
+            logger.info(f"AkShare 上证指数数据: {len(returns)} 天 ({start_date} ~ {end_date})")
             return returns
         except Exception as e:
             logger.warning(f"获取上证指数失败，回退到板块等权平均: {e}")
