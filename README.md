@@ -437,12 +437,19 @@ GET  /api/strategy/configs                                - 获取策略配置
 PUT  /api/strategy/configs/{id}                           - 更新策略配置
 GET  /api/strategy/signals/today?strategy_type=MODERATE   - 获取今日信号
 GET  /api/strategy/signals/calendar?strategy_type=MODERATE&month=2026-05 - 信号日历
-POST /api/strategy/backtest                               - 运行回测
+POST /api/strategy/backtest                               - 运行回测（返回 nav_curve 逐日净值 + position_changes 仓位调整明细）
 GET  /api/strategy/backtest/history                       - 回测历史
 GET  /api/strategy/backtest/{id}                          - 回测详情
 GET  /api/strategy/trade-day/check?date=2026-05-01        - 检查交易日
 GET  /api/strategy/data/availability                      - 数据可用范围
 ```
+
+回测 `POST /backtest` 响应新增字段:
+- `nav_curve[].date/nav/benchmark/stop_loss` — 逐日净值曲线（每交易日一条，不再采样）
+- `daily_signals[].positions{sector_code: {weight, amount}}` — 每日仓位明细（权重+金额）
+- `daily_signals[].cash` / `total_position_value` — 每日现金与总仓位价值
+- `position_changes[]` — 仓位调整明细（action: ADD/REDUCE/CLEAR/STOP_LOSS/EMERGENCY_EXIT/BEAR_EXIT）
+- 基准数据优先使用 InfluxDB `market_kline` 大盘K线，回退 AkShare 上证指数
 
 ### 因子分析
 

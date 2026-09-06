@@ -1,6 +1,6 @@
 # 策略引擎服务设计文档
 
-> 版本: v1.5 | 更新日期: 2026-05-28 | 更新: 动态市场状态、空仓管理、动态仓位/持仓/调仓
+> 版本: v2.0 | 更新日期: 2026-09-06 | 更新: T+1回测、19因子体系、动态权重
 
 ---
 
@@ -19,13 +19,14 @@
 
 ### 架构说明
 
-核心逻辑集中在 `scoring.py`（策略引擎核心），包含评分计算、信号生成、回测引擎。`factors/` 目录实现 15 个量化因子，`combiner/` 实现因子合成引擎。
+核心逻辑集中在 `scoring.py`（策略引擎核心），包含评分计算、信号生成、回测引擎。`factors/` 目录实现 19 个量化因子，`combiner/` 实现因子合成引擎。
 
 ```
 services/strategy/app/
 ├── main.py          # API 端点
 ├── scoring.py       # 策略引擎核心（评分、信号、回测）
-├── factors/         # 因子引擎（15个因子）
+├── factors/         # 因子引擎（19个因子）
+│   ├── trend.py         # 趋势因子（MA均线/板块离散度）
 ├── combiner/        # 因子合成引擎
 ├── models.py        # 数据模型
 ├── influx_query.py  # InfluxDB 查询
@@ -62,6 +63,15 @@ services/strategy/app/
 | `max_empty_days` | 最大空仓天数，超时强制试探建仓（默认 10） |
 | `capital_pct_bull_boost` | 牛市加仓比例（默认 0.3） |
 | `emergency_exit_score` | 持仓板块评分低于此值触发紧急退出（默认 1.0） |
+| `trailing_stop_loss` | 移动止损：从近期高点回撤超此比例触发（默认 8%） |
+| `max_drawdown_stop` | 最大回撤止损：从初始资金累计亏损超此比例清仓（默认 15%） |
+| `benchmark_stop_loss` | 基准相对止损：累计落后大盘超此比例触发（默认 10%） |
+| `ma_stop_days` | 均线止损窗口天数（默认 20） |
+| `ma_stop_loss` | 均线止损阈值：跌破N日均线超此比例触发（默认 5%） |
+| `ma_take_profit_days` | 均线止盈窗口天数（默认 20） |
+| `ma_take_profit_thresholds` | 各级止盈触发阈值列表（递减），NAV高于均线X%时减仓（默认 [5%, 3%, 1%]） |
+| `ma_take_profit_ratios` | 各级减仓比例列表（按原始仓位计算），每次卖出原始仓位的X%（默认 [30%, 40%, 30%]） |
+| `drawdown_ma_window` | 回撤控制用的均线窗口（默认 20） |
 
 默认配置见源码；与旧「四维手写权重」文档不一致时以代码为准。
 
@@ -82,7 +92,9 @@ services/strategy/app/
   top_n = 2              # 仅取前2名（牛市自动+1）
   max_position = 100%     # 满仓
   hold_days = 2           # 持有1-2日（动态调整）
-  stop_loss = 12%         # 止损12%
+  stop_loss = 12%         # 固定回撤止损12%
+  trailing_stop_loss = 8%  # 移动止损8%（从近期高点）
+  max_drawdown_stop = 15%  # 最大回撤止损15%（从初始资金）
   capital_pct = 70%      # 基础资金使用比例（牛市可达100%）
   min_score_threshold = 1.5   # 最小评分阈值
   score_gap_threshold = 1.0   # 与相对缺口取较大（牛市×0.7，熊市×1.5）
@@ -118,7 +130,9 @@ services/strategy/app/
   top_n = 3              # 取前3名
   max_position = 50%     # 半仓
   hold_days = 5           # 持有5日
-  stop_loss = 10%        # 止损10%
+  stop_loss = 10%        # 固定回撤止损10%
+  trailing_stop_loss = 6%  # 移动止损6%
+  benchmark_stop_loss = 8% # 基准相对止损8%（落后大盘）
   capital_pct = 30%      # 资金使用比例
   min_score_threshold = 2.0   # 最小评分阈值
   score_gap_threshold = 1.0   # 与相对缺口取较大，见 StrategyParams
@@ -153,7 +167,9 @@ services/strategy/app/
   top_n = 5                # 取满足条件的前5名
   max_position = 30%       # 仓位上限30%
   hold_days = 10           # 持有10日
-  stop_loss = 8%           # 止损8%
+  stop_loss = 8%           # 固定回撤止损8%
+  trailing_stop_loss = 5%  # 移动止损5%
+  ma_stop_loss = 3%        # 均线止损3%（跌破20日均线）
   capital_pct = 20%        # 资金使用比例
   valuation_pct_max = 50   # 估值分位≤50%
   min_score_threshold = 2.0   # 最小评分阈值
@@ -366,13 +382,72 @@ Content-Type: application/json
     "total_trade_cost": 2521.00,
     "trade_count_actual": 52,
     "params": { "top_n": 3, ... },
+    // 逐日净值曲线（每个交易日一条记录，不再采样）
     "nav_curve": [
       { "date": "2025-04-18", "nav": 1000000, "benchmark": 1000000, "stop_loss": false },
       ...
     ],
-    "daily_signals": [ ... ]
+    // 每日信号 + 仓位明细
+    "daily_signals": [
+      {
+        "date": "2025-04-18",
+        "signals": [...],
+        "strategy_return": 0.5,
+        "benchmark_return": 0.3,
+        "positions": {
+          "THS801010": { "weight": 0.33, "amount": 330000 },
+          "THS801020": { "weight": 0.33, "amount": 330000 }
+        },
+        "total_position_value": 660000,
+        "cash": 340000
+      }
+    ],
+    // 仓位调整明细（加仓/减仓/清仓/止损/紧急退出/熊市空仓）
+    "position_changes": [
+      {
+        "date": "2025-04-18",
+        "sector_code": "THS801010",
+        "sector_name": "有色金属",
+        "action": "ADD",
+        "amount": 330000,
+        "cost": 297.0,
+        "remaining_weight": 0.33,
+        "remaining_amount": 330000,
+        "reason": "新建仓 权重33.00%"
+      },
+      {
+        "date": "2025-04-25",
+        "sector_code": "THS801010",
+        "sector_name": "有色金属",
+        "action": "REDUCE",
+        "amount": 50000,
+        "cost": 45.0,
+        "remaining_weight": 0.25,
+        "remaining_amount": 250000,
+        "reason": "减仓 33.00% → 25.00%"
+      },
+      {
+        "date": "2025-05-02",
+        "sector_code": "THS801010",
+        "sector_name": "有色金属",
+        "action": "STOP_LOSS",
+        "amount": 250000,
+        "cost": 225.0,
+        "remaining_weight": 0.0,
+        "remaining_amount": 0,
+        "reason": "止损 回撤8.50%"
+      }
+    ]
   }
 }
+
+position_changes.action 类型说明:
+  - ADD:            加仓或新建仓
+  - REDUCE:         减仓（权重降低）
+  - CLEAR:          清仓（调仓卖出，非止损）
+  - STOP_LOSS:      止损清仓（回撤超阈值）
+  - EMERGENCY_EXIT: 紧急退出（单日跌幅>5%）
+  - BEAR_EXIT:      熊市空仓（连续BEAR确认）
 ```
 
 ### 5.7 回测历史
@@ -450,33 +525,49 @@ POST /data/replay/strategy-overlay  - 策略叠加回放
 ### 6.1 回测算法流程
 
 ```
-回测流程（基于真实历史数据逐日回放）:
-  1. 从InfluxDB查询指定日期范围的板块历史数据
-  2. 按日期排序，逐日执行策略逻辑
-  3. 每日执行步骤:
-     a. 计算当日收益（基于昨日持仓，用今日涨跌幅）
-     b. 更新资本（加上当日收益）
-     c. 更新历史最高净值
-     d. 止损检查（回撤超线 → 卖出所有持仓 + 计算交易成本）
-     e. 紧急退出检查（持仓板块单日跌幅>5% → 立即允许调仓）
-     f. 持仓天数递减（有持仓且计数器>0时才递减）
-     g. 更新冷静期（止损冷静期递减，动态根据市场状态调整）
-     h. 市场状态评估（上涨占比 → BULL/NEUTRAL/BEAR）
-     i. 检查调仓（冷静期结束且持仓天数≤0）:
-        - 连续2天BEAR确认 → 空仓（清仓）
-        - 空仓超10天 + NEUTRAL → 50%仓位试探建仓
-        - BULL → capital_pct + 0.3（上限100%），top_n + 1，hold_days - 1
-        - 动态 score_gap（牛市×0.7，熊市×1.5）
-        - 计算交易成本并扣除
-     j. 记录净值曲线（逐日记录，用于精确最大回撤）
-  4. 计算绩效指标:
+回测流程（T+1 盘后信号次日开盘价执行）:
+
+     i. 检查待执行调仓（pending_rebalance）:
+        - 若有 → 次日开盘价执行卖出/买入
+        - 新仓首日收益 = open→close 日内收益（非全天）
+        - 旧仓收益 = 全天收益
+        - 记录 position_changes（日期=成交日，非信号日）
+        - 设置持仓锁定和冷却期
+
+     ii. 计算当日持仓收益（T+1 拆分）:
+        - 已有持仓: weight × 当日涨跌幅
+        - 今日新开仓: weight × (close - open) / open
+
+     iii. 止损/紧急退出检查
+
+     iv. 更新冷却期计数器
+
+     v. 生成信号（记录待执行，不立即调仓）:
+        - 信号日 = D，记录 pending_rebalance
+        - 成交日 = D+1，实际执行
+
+  5. 计算绩效指标:
      - 总收益率 = 最终资本 / 初始资本 - 1
      - 年化收益率 = (1 + 总收益率)^(252/交易日数) - 1
-     - 最大回撤 = 基于逐日NAV计算（非采样点）
+     - 最大回撤 = 基于逐日NAV计算
      - 夏普比率 = (日均收益 × 252) / (日收益标准差 × √252)
      - 胜率 = 正收益天数占比
-     - 新增: 换手率、空仓天数占比、盈亏比、最大连续盈/亏天数
+     - 换手率、空仓天数占比、盈亏比、最大连续盈/亏天数
 ```
+
+#### 基准数据来源
+
+回测基准（大盘K线）按以下优先级获取:
+1. **InfluxDB `market_kline`** — data-collector 采集并写入的大盘指数日K线（推荐）
+2. **AkShare `stock_zh_index_daily_em`** — 实时查询上证指数 sh000001（回退）
+3. **板块等权平均** — 所有板块当日涨跌幅的算术平均（最终回退）
+
+#### 节假日管理
+
+交易日判断基于可扩展的年度节假日字典 `_HOLIDAYS_BY_YEAR`:
+- 包含 2025/2026/2027 年A股法定节假日
+- 新增年份只需在字典中追加对应的日期集合
+- 周末（周六、周日）自动识别为非交易日
 
 ### 6.1.1 动态市场状态
 
@@ -524,13 +615,40 @@ POST /data/replay/strategy-overlay  - 策略叠加回放
 1. **常规调仓**:
    - 卖出旧持仓：佣金 + 印花税 + 滑点
    - 买入新持仓：佣金 + 滑点
-2. **止损触发**:
-   - 卖出所有持仓：佣金 + 印花税 + 滑点
-   - 没有买入成本
+   - 细分: 清仓(CLEAR)、减仓(REDUCE)、加仓(ADD)、新建仓(ADD)
+2. **止损触发**（多重止损机制，任一触发即清仓）:
+   - 固定回撤止损 (`stop_loss`): 从最高点回撤超过阈值
+   - 移动止损 (`trailing_stop_loss`): 从近期高点回撤超阈值（更灵敏的动态止盈）
+   - 最大回撤止损 (`max_drawdown_stop`): 从初始资金累计亏损超阈值
+   - 基准相对止损 (`benchmark_stop_loss`): 累计落后大盘超阈值
+   - 均线止损 (`ma_stop_loss`): 净值跌破N日均线超阈值
+   - 逐板块卖出所有持仓，记录 STOP_LOSS 明细
+3. **均线止盈**（可选，`ma_take_profit_thresholds` 非空时启用）:
+   - 仅在盈利时触发（NAV > N日均线），按递减阈值阶梯式减仓
+   - 首次触发时记录原始仓位，后续各级按原始仓位比例计算减仓量
+   - 例：原始仓位33%，阈值[5%,3%,1%]，比例[30%,40%,30%]
+     → 高于均线5%减30%(9.9%) → 高于3%减40%(13.2%) → 高于1%减30%(9.9%) → 清仓
+   - 止盈级别在止损/紧急退出/熊市清仓时重置
+4. **紧急退出**:
+   - 逐板块卖出所有持仓：佣金 + 印花税 + 滑点
+   - 记录每笔 EMERGENCY_EXIT 明细
+5. **熊市空仓**:
+   - 逐板块卖出所有持仓：佣金 + 印花税 + 滑点
+   - 记录每笔 BEAR_EXIT 明细
 
 ### 6.3 回测结果统计
 
 回测结果包含以下字段:
+
+基础指标:
+- `total_return`: 总收益率
+- `annual_return`: 年化收益率
+- `max_drawdown`: 最大回撤
+- `sharpe_ratio`: 夏普比率
+- `win_rate`: 胜率
+- `trading_days`: 交易日数
+- `trade_count`: 估算交易笔数
+- `buy_count` / `sell_count`: 买入/卖出信号数
 
 交易成本统计:
 - `total_commission`: 累计佣金
@@ -545,6 +663,11 @@ POST /data/replay/strategy-overlay  - 策略叠加回放
 - `profit_factor`: 盈亏比（盈利总额 / 亏损总额）
 - `max_consecutive_wins`: 最大连续盈利天数
 - `max_consecutive_losses`: 最大连续亏损天数
+
+仓位跟踪（return_full=True 时返回）:
+- `nav_curve`: 逐日净值曲线（每个交易日一条，含 nav、benchmark、stop_loss）
+- `daily_signals`: 每日信号列表，每条含 positions（每板块 weight+amount）、cash、total_position_value
+- `position_changes`: 仓位调整明细列表（ADD/REDUCE/CLEAR/STOP_LOSS/EMERGENCY_EXIT/BEAR_EXIT），每条含原因（触发指标）。T+1 模式下 date 为实际成交日（信号日+1）
 
 ---
 

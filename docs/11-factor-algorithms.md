@@ -1,6 +1,6 @@
 # 量化因子算法参考文档
 
-> 版本: v1.2 | 更新日期: 2026-05-12 | 更新: FlowAccelerationFactor、相对强弱截面模式
+> 版本: v2.0 | 更新日期: 2026-09-06 | 更新: FlowAccelerationFactor、相对强弱截面模式、新增MA均线趋势、MFI、板块离散度
 
 ---
 
@@ -127,7 +127,60 @@ K > 80 且 D > 80     → 超买 → 得分 0-2
 
 ---
 
-### 1.5 ATR (Average True Range) 平均真实波幅
+### 1.5 MA 均线趋势因子 (MA Trend Factor)
+
+**原理**: 通过多周期均线交叉判断趋势方向和强度，比单一动量指标更稳定。
+
+**公式**:
+```
+MA5  = SMA(close, 5)
+MA10 = SMA(close, 10)
+MA20 = SMA(close, 20)
+MA60 = SMA(close, 60)     # 不足60日时使用MA20
+
+短期趋势信号 = MA5 > MA20 ? 多头 : 空头
+中期趋势信号 = MA10 > MA60 ? 多头 : 空头
+
+金叉检测: prev_MA5 <= prev_MA20 且 MA5 > MA20
+死叉检测: prev_MA5 >= prev_MA20 且 MA5 < MA20
+
+均线斜率 = (MA20_today - MA20_5daysago) / MA20_5daysago
+```
+
+**评分逻辑**:
+```
+基础分 = 5.0
+
+MA5/MA20 贡献 (60%):
+  MA5 > MA20  → +1.5 (短期趋势向上)
+  MA5 < MA20  → -1.5 (短期趋势向下)
+
+MA10/MA60 贡献 (40%):
+  MA10 > MA60  → +1.0 (中期趋势向上)
+  MA10 < MA60  → -1.0 (中期趋势向下)
+
+金叉 → +1.0
+死叉 → -1.0
+
+价格 > MA20 → +0.5
+价格 < MA20 → -0.5
+
+均线斜率贡献: clip(斜率 × 5, -1, +1)
+```
+
+**信号分类**:
+```
+MA5>MA20 且 MA10>MA60  → strong_uptrend (强上升趋势)
+MA5>MA20 且 MA10<MA60  → weak_uptrend (弱上升趋势)
+MA5<MA20 且 MA10>MA60  → weak_downtrend (弱下降趋势)
+MA5<MA20 且 MA10<MA60  → strong_downtrend (强下降趋势)
+```
+
+**参考**: Murphy, J. (1999) Technical Analysis of the Financial Markets.
+
+---
+
+### 1.6 ATR (Average True Range) 平均真实波幅
 
 **原理**: 衡量市场波动率，用于止损和仓位管理。
 
@@ -247,6 +300,40 @@ HV > 40%  → 极高波动 → 风险很高 → 得分 0-2
 
 ---
 
+### 2.5 MFI (Money Flow Index) 资金流量指标
+
+**原理**: 结合价格和成交量的动量指标，类似 RSI 但加入了成交量权重，能检测量价背离。
+
+**公式**:
+```
+典型价格 TP = (high + low + close) / 3
+
+正资金流: TP_t > TP_{t-1} 时, positive_MF += TP_t × turnover_t
+负资金流: TP_t < TP_{t-1} 时, negative_MF += TP_t × turnover_t
+
+MFI = 100 - 100 / (1 + positive_MF / negative_MF)
+period = 14 (默认)
+```
+
+**评分逻辑**:
+```
+MFI < 20   → 超卖 → 得分 8-10 (买入机会)
+MFI 20-40  → 偏弱 → 得分 6-8
+MFI 40-60  → 中性 → 得分 4-6
+MFI 60-80  → 偏强 → 得分 2-4
+MFI > 80   → 超买 → 得分 0-2 (卖出信号)
+```
+
+**背离检测**:
+```
+价格新高 + MFI走低 → 顶背离 → 看跌 → -1.0 分
+价格新低 + MFI走高 → 底背离 → 看涨 → +1.0 分
+```
+
+**参考**: Quong, T. (1989) The New Technical Trader.
+
+---
+
 ## 三、轮动特征因子
 
 ### 3.1 板块持续性 (Persistence，`factors/rotation.py`)
@@ -319,6 +406,34 @@ Jaccard距离 = 1 - |A ∩ B| / |A ∪ B|
 平均相关性 0.3-0.6 → 中等联动 → 得分 4-7
 平均相关性 > 0.6 → 高度联动 → 齐涨齐跌 → 得分 0-4
 ```
+
+---
+
+### 3.4 板块离散度 (Sector Dispersion Factor)
+
+**原理**: 衡量全市场板块涨跌幅的分散程度。高离散度时板块分化明显，轮动策略有效；低离散度时板块同涨同跌，轮动效果差。
+
+**公式**:
+```
+对近5个交易日，每日计算截面标准差:
+  dispersion_t = std(all_sector_changes_on_day_t)
+
+平均离散度 = mean(dispersion_t for t in recent_5_days)
+离散度趋势 = dispersion_latest - dispersion_oldest
+```
+
+**评分逻辑**:
+```
+离散度 > 2.5%  → 板块高度分化 → 轮动机会多 → 得分 8-10
+离散度 1.5-2.5% → 中等分化 → 得分 6-8
+离散度 0.8-1.5% → 低分化 → 得分 4-6
+离散度 < 0.8%   → 板块同涨同跌 → 轮动无效 → 得分 0-4
+
+离散度扩大趋势 → +0.5 分 (轮动机会在增加)
+离散度收窄趋势 → -0.5 分 (轮动机会在减少)
+```
+
+**数据依赖**: 需要 context["changes_by_date"] 截面数据，非单板块历史。
 
 ---
 

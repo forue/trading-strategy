@@ -1,6 +1,6 @@
 # 因子引擎架构设计文档
 
-> 版本: v1.2 | 更新日期: 2026-05-12 | 更新: Z-Score截面归一化、FlowAccelerationFactor
+> 版本: v2.0 | 更新日期: 2026-09-06 | 更新: 新增趋势因子、MFI、板块离散度、动态权重
 
 ---
 
@@ -72,12 +72,13 @@ services/strategy/app/
 ├── factors/             # 因子计算引擎
 │   ├── __init__.py      # 导出所有因子
 │   ├── base.py          # 因子基类 + 注册中心
-│   ├── capital_flow.py  # 资金流因子 (现有逻辑重构)
-│   ├── momentum.py      # 动量因子 (现有逻辑重构)
+│   ├── capital_flow.py  # 资金流因子 (主力净流入/北向资金/资金加速度)
+│   ├── momentum.py      # 动量因子 (价格动量/相对强弱)
 │   ├── technical.py     # 技术指标因子 (RSI/MACD/布林带/KDJ)
-│   ├── sentiment.py     # 市场情绪因子 (涨跌比/量比/波动率)
+│   ├── sentiment.py     # 市场情绪因子 (量比/波动率/市场宽度/MFI)
 │   ├── valuation.py     # 估值因子 (PE/PB分位)
-│   └── rotation.py      # 轮动特征因子 (相关性/持续性/速度)
+│   ├── rotation.py      # 轮动特征因子 (持续性/趋势一致性)
+│   └── trend.py         # 趋势因子 (MA均线趋势/板块离散度)
 │
 ├── combiner/            # 因子合成引擎
 │   ├── __init__.py
@@ -214,7 +215,16 @@ class FactorCombiner:
 
 ### 3.1 因子分类与策略类别权重
 
-因子按 `FactorCategory` 分为：资金流、动量、技术指标、情绪、估值、轮动。每个因子另有类内 `default_weight`。
+因子按 `FactorCategory` 分为：资金流、动量、技术指标、情绪、估值、轮动。当前共 19 个因子：
+
+| 类别 | 因子数 | 因子列表 |
+|------|--------|---------|
+| 资金流 | 3 | main_flow, north_flow, flow_acceleration |
+| 动量 | 2 | price_momentum, relative_strength |
+| 技术 | 5 | rsi_14, macd, bollinger, kdj, **ma_trend** |
+| 情绪 | 4 | volume_ratio, volatility, market_breadth, **mfi** |
+| 估值 | 2 | pe_percentile, pb_percentile |
+| 轮动 | 3 | persistence, trend_consistency, **sector_dispersion** |
 
 **策略档位（AGGRESSIVE / MODERATE / CONSERVATIVE）的类别间权重**由 `StrategyWeights` 定义，源码为 `combiner/weighted.py` 中的 `DEFAULT_WEIGHTS`。当前实现要点：
 
@@ -310,6 +320,8 @@ Response `data` 主要字段：
 | InfluxDB 板块日线 | `main_net_inflow` | 资金流因子 | 5日 |
 | InfluxDB 板块日线 | `north_net_inflow` | 北向资金因子 | 5日 |
 | InfluxDB 板块日线 | `index_change_pct` | 动量因子 | 20日 |
+| InfluxDB 板块日线 | `high` | KDJ/MA趋势 | 60日 |
+| InfluxDB 板块日线 | `low` | KDJ/MA趋势 | 60日 |
 
 ### 5.2 数据完整性校验
 
@@ -346,3 +358,18 @@ Response `data` 主要字段：
 5. 至少 3 个有效值才进行归一化
 
 归一化后，因子评分反映的是板块间相对排名而非绝对阈值，减少市场整体涨跌对评分的系统性偏移。`detail` 中会附加 `zscore`、`cross_mean`、`cross_std` 字段。
+
+### 6.3 动态因子权重 (`get_dynamic_weights`)
+
+根据市场环境（滚动5日市场宽度判断）动态调整类别间权重：
+
+| 市场状态 | 动量变化 | 技术变化 | 估值变化 | 逻辑 |
+|---------|---------|---------|---------|------|
+| BULL | +10% | +5% | -10% | 牛市追涨有效，动量和技术更重要 |
+| BEAR | -10% | 不变 | +10% | 熊市均值回归有效，估值更重要 |
+| NEUTRAL | 不变 | 不变 | 不变 | 保持默认权重 |
+
+市场状态由近5个交易日的滚动市场宽度（上涨板块占比）判断：
+- 平均宽度 ≥ 55% → BULL
+- 平均宽度 ≤ 40% → BEAR
+- 其他 → NEUTRAL

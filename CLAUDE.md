@@ -226,6 +226,8 @@ Multi-factor scoring pipeline: factor engines (`factors/`) → weighted combinat
 
 Key params: `score_gap_epsilon` (keep-overlap threshold), `use_inverse_vol_weights` (position sizing), `use_zscore_normalization` (cross-section Z-score normalization of factor scores).
 
+**Backtest engine** (`_run_backtest_core`): Daily replay with full position tracking. Returns `position_changes` (ADD/REDUCE/CLEAR/STOP_LOSS/EMERGENCY_EXIT/BEAR_EXIT), `nav_curve` (daily, no sampling), `daily_signals` (with per-sector weight+amount+cash). Benchmark from InfluxDB `market_kline` (priority) → AkShare sh000001 → sector equal-weight average. Holidays managed via `_HOLIDAYS_BY_YEAR` dict (2025-2027, extensible).
+
 Detailed algorithm docs: `docs/05-strategy-engine.md`, `docs/10-factor-engine.md`, `docs/11-factor-algorithms.md`.
 
 ### AI decision service (`services/ai-decision/app/`)
