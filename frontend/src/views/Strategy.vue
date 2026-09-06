@@ -104,6 +104,59 @@
           <el-col :xs="12" :sm="6"><div class="result-item"><span>成本/总收益比</span><strong>{{ backtestResult.totalReturn > 0 ? (backtestResult.totalTradeCost / (backtestResult.totalReturn * backtestForm.initialCapital * 10000) * 100).toFixed(2) : '0.00' }}%</strong></div></el-col>
         </el-row>
         <v-chart :option="backtestChartOption" class="backtest-chart" autoresize />
+
+        <!-- 调仓明细 -->
+        <div v-if="rebalanceGroups.length" style="margin-top: 16px">
+          <div class="card-header" style="margin-bottom: 8px">
+            <span style="font-weight: 600">调仓明细</span>
+            <el-tag size="small">{{ rebalanceGroups.length }} 个调仓日</el-tag>
+          </div>
+          <div v-for="group in rebalanceGroups" :key="group.date" class="rebalance-group">
+            <div class="rebalance-date-header">
+              <span class="rebalance-date">{{ group.date }}</span>
+              <el-tag size="small">{{ group.trades.length }} 笔调仓</el-tag>
+            </div>
+            <!-- 持仓快照 -->
+            <div v-if="group.snapshot?.portfolio?.length" class="responsive-table" style="margin: 8px 0">
+              <el-table :data="group.snapshot.portfolio" stripe size="small" max-height="200">
+                <el-table-column prop="sector_name" label="板块" width="120" />
+                <el-table-column prop="weight" label="仓位" width="80">
+                  <template #default="{ row }">{{ (row.weight * 100).toFixed(1) }}%</template>
+                </el-table-column>
+                <el-table-column prop="amount" label="金额" width="100">
+                  <template #default="{ row }">{{ formatMoney(row.amount) }}</template>
+                </el-table-column>
+                <el-table-column prop="day_change_pct" label="当日涨跌" width="90">
+                  <template #default="{ row }">
+                    <span :style="{ color: row.day_change_pct >= 0 ? '#f56c6c' : '#67c23a' }">
+                      {{ row.day_change_pct >= 0 ? '+' : '' }}{{ row.day_change_pct.toFixed(2) }}%
+                    </span>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="contribution_pct" label="贡献" width="80">
+                  <template #default="{ row }">
+                    <span :style="{ color: row.contribution_pct >= 0 ? '#f56c6c' : '#67c23a' }">
+                      {{ row.contribution_pct >= 0 ? '+' : '' }}{{ row.contribution_pct.toFixed(2) }}%
+                    </span>
+                  </template>
+                </el-table-column>
+              </el-table>
+            </div>
+            <div v-else-if="group.snapshot && !group.snapshot.portfolio?.length" style="color:#909399;font-size:12px;margin:4px 0">空仓</div>
+            <!-- 交易记录 -->
+            <div class="rebalance-trades">
+              <el-tag v-for="(t, idx) in group.trades" :key="idx" size="small"
+                :type="tradeTagType(t.action)" style="margin: 2px">
+                {{ t.sector_name || t.sector_code }} {{ actionLabel(t.action) }}
+                <span v-if="t.amount > 0">{{ formatMoney(t.amount) }}</span>
+                <span v-if="t.cost > 0" style="opacity:0.7"> (费{{ t.cost.toFixed(1) }})</span>
+              </el-tag>
+            </div>
+            <div v-if="group.trades.length && group.trades[0].reason" class="rebalance-reason" style="color: #909399; font-size: 12px; margin-top: 4px">
+              {{ group.trades[0].reason }}
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -382,6 +435,8 @@ async function runBacktest() {
       totalTradeCost: res.total_trade_cost ?? 0,
       tradeCountActual: res.trade_count_actual ?? 0,
       navCurve: res.nav_curve ?? [],
+      positionChanges: res.position_changes ?? [],
+      portfolioSnapshots: res.portfolio_snapshots ?? [],
     }
     // 刷新回测历史
     loadBacktestHistory()
@@ -420,6 +475,8 @@ async function viewBacktestDetail(btId: string) {
       totalTradeCost: res.total_trade_cost ?? 0,
       tradeCountActual: res.trade_count_actual ?? 0,
       navCurve: res.nav_curve ?? [],
+      positionChanges: res.position_changes ?? [],
+      portfolioSnapshots: res.portfolio_snapshots ?? [],
     }
     // 滚动到回测结果区域
     const resultEl = document.querySelector('.backtest-result')
@@ -436,6 +493,50 @@ function formatTime(isoStr: string) {
   if (!isoStr) return ''
   return isoStr.replace('T', ' ').substring(0, 19)
 }
+
+function actionLabel(action: string): string {
+  const map: Record<string, string> = {
+    ADD: '加仓', REDUCE: '减仓', CLEAR: '清仓',
+    STOP_LOSS: '止损', TAKE_PROFIT: '止盈', EMERGENCY_EXIT: '紧急清仓', BEAR_EXIT: '熊市清仓',
+  }
+  return map[action] || action
+}
+
+function tradeTagType(action: string): string {
+  const map: Record<string, string> = {
+    ADD: 'danger', REDUCE: 'warning', CLEAR: 'success',
+    STOP_LOSS: 'danger', TAKE_PROFIT: 'warning', EMERGENCY_EXIT: 'danger', BEAR_EXIT: 'danger',
+  }
+  return map[action] || 'info'
+}
+
+function triggerLabel(trigger: string): string {
+  const map: Record<string, string> = {
+    rebalance: '调仓', stop_loss: '止损', emergency_exit: '紧急退出', bear_exit: '熊市清仓',
+  }
+  return map[trigger] || trigger
+}
+
+function formatMoney(val: number): string {
+  if (val == null) return '-'
+  return (val / 10000).toFixed(2) + '万'
+}
+
+const rebalanceGroups = computed(() => {
+  const changes = backtestResult.value?.positionChanges
+  const snapshots = backtestResult.value?.portfolioSnapshots || []
+  if (!changes?.length) return []
+  const groupMap: Record<string, { date: string; trades: any[]; snapshot: any }> = {}
+  for (const item of changes) {
+    const d = item.date
+    if (!groupMap[d]) {
+      const snap = snapshots.find((s: any) => s.date === d)
+      groupMap[d] = { date: d, trades: [], snapshot: snap || null }
+    }
+    groupMap[d].trades.push(item)
+  }
+  return Object.values(groupMap)
+})
 
 // 页面加载时获取回测历史
 loadBacktestHistory()
@@ -484,6 +585,17 @@ const backtestChartOption = computed(() => {
 }
 .params-cell { display: flex; flex-wrap: wrap; gap: 4px; }
 .backtest-chart { height: 350px; margin-top: 16px; }
+.rebalance-group {
+  margin-bottom: 16px; padding: 12px; background: var(--bg-tertiary); border-radius: var(--radius-sm);
+  border-left: 3px solid var(--accent-primary);
+}
+.rebalance-date-header {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
+  .rebalance-date { font-weight: 600; font-size: 14px; color: var(--text-primary); }
+  .rebalance-cash { font-size: 12px; color: var(--text-tertiary); margin-left: auto; }
+}
+.rebalance-trades { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 4px; }
+.empty-portfolio { color: var(--text-tertiary); font-size: 13px; padding: 8px 0; }
 
 @media (max-width: 768px) {
   .strategy-card { padding: 16px; }

@@ -142,6 +142,7 @@ runStrategyOverlay(data: {
     daily_signals: any[]
     nav_curve: any[]
     summary: any
+    position_changes: any[]
   }> {
     return request.post('/strategy/data/replay/strategy-overlay', data)
   },
@@ -161,5 +162,8 @@ runStrategyOverlay(data: {
   },
   getOptimizeProgress(): Promise<{ active: boolean; completed: number; total: number; best_return: number; best_sharpe: number }> {
     return request.get('/strategy/data/replay/optimize-progress')
+  },
+  getOptimizeResult(): Promise<{ status: string; result: { best_params: any; best_result: any; all_results: any[] } | null }> {
+    return request.get('/strategy/data/replay/strategy-optimize/result')
   },
 }

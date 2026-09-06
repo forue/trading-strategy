@@ -284,40 +284,113 @@
       <!-- 每日信号明细 -->
       <div style="margin-top: 16px">
         <div class="card-header" style="margin-bottom: 8px">
-          <span style="font-weight: 600">调仓日信号明细</span>
-          <el-tag size="small">{{ overlaySignalDays.length }} 个调仓日</el-tag>
+          <span style="font-weight: 600">每日持仓明细</span>
+          <el-tag size="small">{{ overlaySignalDays.length }} 个交易日</el-tag>
         </div>
-        <div class="responsive-table"><el-table :data="overlaySignalDays" stripe size="small" max-height="400">
-          <el-table-column prop="date" label="日期" width="120" />
-          <el-table-column label="买入" min-width="200">
+        <div class="responsive-table"><el-table :data="overlaySignalDays" stripe size="small" max-height="500">
+          <el-table-column prop="date" label="日期" width="110" sortable fixed />
+          <el-table-column label="持仓" min-width="260">
             <template #default="{ row }">
-              <el-tag v-for="sig in row.buySignals" :key="sig.sector_code" size="small" type="danger" style="margin: 2px">
-                {{ sig.sector_name }}
-              </el-tag>
-              <span v-if="!row.buySignals.length" style="color: var(--text-tertiary)">无</span>
+              <template v-if="row.positions.length">
+                <div v-for="p in row.positions" :key="p.sector_code" class="holding-item">
+                  <span class="holding-etf">{{ p.etf_code || p.sector_code }} {{ p.etf_name || p.sector_name }}</span>
+                  <span class="holding-meta">{{ (p.weight * 100).toFixed(1) }}% {{ formatOverlayMoney(p.amount) }}</span>
+                </div>
+              </template>
+              <span v-else style="color: var(--text-tertiary)">空仓</span>
             </template>
           </el-table-column>
-          <el-table-column label="卖出" min-width="200">
+          <el-table-column label="买入" min-width="150">
             <template #default="{ row }">
-              <el-tag v-for="sig in row.sellSignals" :key="sig.sector_code" size="small" type="success" style="margin: 2px">
+              <el-tag v-for="sig in row.buySignals" :key="sig.sector_code" size="small" type="danger" style="margin: 1px">
                 {{ sig.sector_name }}
               </el-tag>
-              <span v-if="!row.sellSignals.length" style="color: var(--text-tertiary)">无</span>
+              <span v-if="!row.buySignals.length" style="color: var(--text-tertiary)">-</span>
             </template>
           </el-table-column>
-          <el-table-column prop="strategy_return" label="策略日收益" width="120" sortable>
+          <el-table-column label="卖出" min-width="150">
+            <template #default="{ row }">
+              <el-tag v-for="sig in row.sellSignals" :key="sig.sector_code" size="small" type="success" style="margin: 1px">
+                {{ sig.sector_name }}
+              </el-tag>
+              <span v-if="!row.sellSignals.length" style="color: var(--text-tertiary)">-</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="strategy_return" label="策略日收益" width="100" sortable>
             <template #default="{ row }">
               <span :style="{ color: row.strategy_return >= 0 ? '#f56c6c' : '#67c23a' }">
-                {{ row.strategy_return >= 0 ? '+' : '' }}{{ row.strategy_return.toFixed(4) }}%
+                {{ row.strategy_return >= 0 ? '+' : '' }}{{ row.strategy_return.toFixed(2) }}%
               </span>
             </template>
           </el-table-column>
-          <el-table-column prop="benchmark_return" label="基准日收益" width="120">
+          <el-table-column prop="benchmark_return" label="基准日收益" width="100">
             <template #default="{ row }">
-              <span style="color: var(--text-tertiary)">{{ row.benchmark_return >= 0 ? '+' : '' }}{{ row.benchmark_return.toFixed(4) }}%</span>
+              <span style="color: var(--text-tertiary)">{{ row.benchmark_return >= 0 ? '+' : '' }}{{ row.benchmark_return.toFixed(2) }}%</span>
             </template>
           </el-table-column>
+          <el-table-column prop="total_position_value" label="持仓市值" width="105">
+            <template #default="{ row }">{{ formatOverlayMoney(row.total_position_value) }}</template>
+          </el-table-column>
+          <el-table-column prop="cash" label="现金" width="105">
+            <template #default="{ row }">{{ formatOverlayMoney(row.cash) }}</template>
+          </el-table-column>
+          <el-table-column prop="total_asset" label="总资产" width="105" sortable>
+            <template #default="{ row }">{{ formatOverlayMoney(row.total_asset) }}</template>
+          </el-table-column>
         </el-table></div>
+      </div>
+
+      <!-- 调仓明细 -->
+      <div v-if="overlayRebalanceGroups.length" style="margin-top: 16px">
+        <div class="card-header" style="margin-bottom: 8px">
+          <span style="font-weight: 600">调仓明细</span>
+          <el-tag size="small">{{ overlayRebalanceGroups.length }} 个调仓日</el-tag>
+        </div>
+        <div v-for="group in overlayRebalanceGroups" :key="group.date" class="rebalance-group">
+          <div class="rebalance-date-header">
+            <span class="rebalance-date">{{ group.date }}</span>
+            <el-tag size="small">{{ group.trades.length }} 笔调仓</el-tag>
+          </div>
+          <!-- 持仓快照 -->
+          <div v-if="group.snapshot?.portfolio?.length" class="responsive-table" style="margin: 8px 0">
+            <el-table :data="group.snapshot.portfolio" stripe size="small" max-height="200">
+              <el-table-column prop="sector_name" label="板块" width="120" />
+              <el-table-column prop="weight" label="仓位" width="80">
+                <template #default="{ row }">{{ (row.weight * 100).toFixed(1) }}%</template>
+              </el-table-column>
+              <el-table-column prop="amount" label="金额" width="100">
+                <template #default="{ row }">{{ formatOverlayMoney(row.amount) }}</template>
+              </el-table-column>
+              <el-table-column prop="day_change_pct" label="当日涨跌" width="90">
+                <template #default="{ row }">
+                  <span :style="{ color: row.day_change_pct >= 0 ? '#f56c6c' : '#67c23a' }">
+                    {{ row.day_change_pct >= 0 ? '+' : '' }}{{ row.day_change_pct.toFixed(2) }}%
+                  </span>
+                </template>
+              </el-table-column>
+              <el-table-column prop="contribution_pct" label="贡献" width="80">
+                <template #default="{ row }">
+                  <span :style="{ color: row.contribution_pct >= 0 ? '#f56c6c' : '#67c23a' }">
+                    {{ row.contribution_pct >= 0 ? '+' : '' }}{{ row.contribution_pct.toFixed(2) }}%
+                  </span>
+                </template>
+              </el-table-column>
+            </el-table>
+          </div>
+          <div v-else-if="group.snapshot && !group.snapshot.portfolio?.length" style="color:#909399;font-size:12px;margin:4px 0">空仓</div>
+          <!-- 交易记录 -->
+          <div class="rebalance-trades">
+            <el-tag v-for="(t, idx) in group.trades" :key="idx" size="small"
+              :type="overlayTradeTagType(t.action)" style="margin: 2px">
+              {{ t.sector_name || t.sector_code }} {{ overlayActionLabel(t.action) }}
+              <span v-if="t.amount > 0">{{ formatOverlayMoney(t.amount) }}</span>
+              <span v-if="t.cost > 0" style="opacity:0.7"> (费{{ t.cost.toFixed(1) }})</span>
+            </el-tag>
+          </div>
+          <div v-if="group.trades.length && group.trades[0].reason" style="color: #909399; font-size: 12px; margin-top: 4px">
+            {{ group.trades[0].reason }}
+          </div>
+        </div>
       </div>
     </div>
 
@@ -380,10 +453,13 @@ const autoOptimize = ref(false)
 const optimizationProgress = ref(0)
 const totalCombinations = ref(0)
 const bestParams = ref<any>(null)
+const abortOptimize = ref(false)
 const overlayData = ref<{
   daily_signals: any[]
   nav_curve: any[]
   summary: any
+  position_changes: any[]
+  portfolio_snapshots?: any[]
 } | null>(null)
 
 // ============ 计算属性 ============
@@ -424,20 +500,80 @@ const overlayStrategyLabel = computed(() => {
 // 策略叠加 - 有信号的调仓日
 const overlaySignalDays = computed(() => {
   if (!overlayData.value?.daily_signals) return []
-  return overlayData.value.daily_signals
-    .filter(d => d.signals && d.signals.length > 0)
-    .map(d => ({
+  return overlayData.value.daily_signals.map(d => {
+    const positions = d.positions ? Object.entries(d.positions).map(([code, info]: [string, any]) => ({
+      sector_code: code,
+      sector_name: info.sector_name || code,
+      etf_code: info.etf_code,
+      etf_name: info.etf_name,
+      weight: info.weight,
+      amount: info.amount,
+    })) : []
+    const positionValue = d.total_position_value || positions.reduce((sum: number, p: any) => sum + (p.amount || 0), 0)
+    const cash = d.cash || 0
+    return {
       date: d.date,
-      buySignals: d.signals.filter((s: any) => s.direction === 'BUY'),
-      sellSignals: d.signals.filter((s: any) => s.direction === 'SELL'),
+      buySignals: (d.signals || []).filter((s: any) => s.direction === 'BUY'),
+      sellSignals: (d.signals || []).filter((s: any) => s.direction === 'SELL'),
       strategy_return: d.strategy_return,
       benchmark_return: d.benchmark_return,
-    }))
+      positions,
+      total_position_value: positionValue,
+      cash,
+      total_asset: d.total_asset != null ? d.total_asset : positionValue + cash,
+    }
+  })
 })
 
 function formatMoney(val: number): string {
   return (val / 10000).toFixed(1)
 }
+
+function overlayActionLabel(action: string): string {
+  const map: Record<string, string> = {
+    ADD: '加仓', REDUCE: '减仓', CLEAR: '清仓',
+    STOP_LOSS: '止损', TAKE_PROFIT: '止盈', EMERGENCY_EXIT: '紧急清仓', BEAR_EXIT: '熊市清仓',
+    HOLD: '继续持有',
+  }
+  return map[action] || action
+}
+
+function overlayTradeTagType(action: string): string {
+  const map: Record<string, string> = {
+    ADD: 'danger', REDUCE: 'warning', CLEAR: 'success',
+    STOP_LOSS: 'danger', TAKE_PROFIT: 'warning', EMERGENCY_EXIT: 'danger', BEAR_EXIT: 'danger',
+    HOLD: 'info',
+  }
+  return map[action] || 'info'
+}
+
+function overlayTriggerLabel(trigger: string): string {
+  const map: Record<string, string> = {
+    rebalance: '调仓', stop_loss: '止损', emergency_exit: '紧急退出', bear_exit: '熊市清仓',
+  }
+  return map[trigger] || trigger
+}
+
+function formatOverlayMoney(val: number): string {
+  if (val == null) return '-'
+  return (val / 10000).toFixed(2) + '万'
+}
+
+const overlayRebalanceGroups = computed(() => {
+  const changes = overlayData.value?.position_changes
+  const snapshots = overlayData.value?.portfolio_snapshots || []
+  if (!changes?.length) return []
+  const groupMap: Record<string, { date: string; trades: any[]; snapshot: any }> = {}
+  for (const item of changes) {
+    const d = item.date
+    if (!groupMap[d]) {
+      const snap = snapshots.find((s: any) => s.date === d)
+      groupMap[d] = { date: d, trades: [], snapshot: snap || null }
+    }
+    groupMap[d].trades.push(item)
+  }
+  return Object.values(groupMap)
+})
 
 // ============ 日期禁用 ============
 function disableDate(date: Date): boolean {
@@ -551,20 +687,13 @@ async function runAutoOptimization() {
   totalCombinations.value = nTrials.value
   optimizationProgress.value = 0
   overlayLoading.value = true
-
-  // 启动进度轮询（每 2 秒）
-  const progressTimer = setInterval(async () => {
-    try {
-      const p = await settingsApi.getOptimizeProgress()
-      if (p.active) {
-        optimizationProgress.value = p.completed
-        totalCombinations.value = p.total
-      }
-    } catch { /* ignore poll errors */ }
-  }, 2000)
+  abortOptimize.value = false
+  bestParams.value = null
+  overlayData.value = null
 
   try {
-    const result = await settingsApi.runStrategyOptimize({
+    // 触发后台寻优（立即返回），随后轮询进度直至完成
+    await settingsApi.runStrategyOptimize({
       start_date: overlayDateRange.value[0],
       end_date: overlayDateRange.value[1],
       strategy_type: overlayStrategyType.value,
@@ -572,17 +701,34 @@ async function runAutoOptimization() {
       n_trials: nTrials.value,
     })
 
+    // 轮询等待寻优完成（后台运行可能远超HTTP超时，因此不走长连接）
+    while (!abortOptimize.value) {
+      await new Promise(resolve => setTimeout(resolve, 2000))
+      let p: any
+      try {
+        p = await settingsApi.getOptimizeProgress()
+      } catch { continue }
+      if (p.total) totalCombinations.value = p.total
+      optimizationProgress.value = p.completed
+      if (!p.active) break
+    }
+    if (abortOptimize.value) return
+
     // 确保进度显示为 100%
     optimizationProgress.value = totalCombinations.value
-    
-    if (result.best_params && result.best_result) {
+
+    const res: any = await settingsApi.getOptimizeResult()
+    const result = res?.result
+    if (result && result.best_params && result.best_result) {
       overlayData.value = {
         daily_signals: result.best_result.daily_signals || [],
         nav_curve: result.best_result.nav_curve || [],
         summary: result.best_result,
+        position_changes: result.best_result.position_changes || [],
+        portfolio_snapshots: result.best_result.portfolio_snapshots || [],
       }
       bestParams.value = result.best_params
-      
+
       const totalReturn = (result.best_result.total_return * 100).toFixed(2)
       const maxDrawdown = (result.best_result.max_drawdown * 100).toFixed(2)
       const combos = result.all_results?.length || 0
@@ -594,14 +740,13 @@ async function runAutoOptimization() {
       ElMessage.error('寻优失败: 无有效结果')
     }
   } catch (e: any) {
-    ElMessage.error('策略寻优失败: ' + (e?.message || '未知错误'))
+    if (!abortOptimize.value) ElMessage.error('策略寻优失败: ' + (e?.message || '未知错误'))
   } finally {
-    clearInterval(progressTimer)
     overlayLoading.value = false
   }
 }
 
-function onModeChange() { stopAutoPlay() }
+function onModeChange() { abortOptimize.value = true; stopAutoPlay() }
 
 // ============ 资金流向柱状图（按日期）- 双面板布局 ============
 const flowChartOption = computed(() => {
@@ -870,7 +1015,7 @@ async function init() {
   await loadAvailableDates()
 }
 
-onUnmounted(() => { stopAutoPlay() })
+onUnmounted(() => { abortOptimize.value = true; stopAutoPlay() })
 init()
 </script>
 
@@ -900,6 +1045,24 @@ init()
 .params-display {
   margin-bottom: 12px; padding: 8px;
   background: var(--bg-tertiary); border-radius: var(--radius-sm);
+}
+.rebalance-group {
+  margin-bottom: 16px; padding: 12px; background: var(--bg-tertiary); border-radius: var(--radius-sm);
+  border-left: 3px solid var(--accent-primary);
+}
+.rebalance-date-header {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
+  .rebalance-date { font-weight: 600; font-size: 14px; color: var(--text-primary); }
+  .rebalance-cash { font-size: 12px; color: var(--text-tertiary); margin-left: auto; }
+}
+.rebalance-trades { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 4px; }
+.empty-portfolio { color: var(--text-tertiary); font-size: 13px; padding: 8px 0; }
+.holding-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 2px 8px; margin: 2px 0; border-radius: 4px; font-size: 12px;
+  background: var(--bg-secondary, #f5f6f8);
+  .holding-etf { font-weight: 600; color: var(--text-primary); white-space: nowrap; }
+  .holding-meta { color: var(--text-secondary); white-space: nowrap; }
 }
 :deep(.el-tabs__nav-wrap::after) { display: none; }
 
