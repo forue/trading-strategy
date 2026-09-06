@@ -173,7 +173,132 @@ class MarketBreadthFactor(BaseFactor):
         return True
 
 
+class MFIFactor(BaseFactor):
+    """资金流量指标 (Money Flow Index)
+
+    结合价格和成交量的动量指标，类似 RSI 但加入了成交量权重。
+    - MFI > 80: 超买（量价齐升后可能回调）
+    - MFI < 20: 超卖（量价齐跌后可能反弹）
+    - 价格新高但 MFI 走低 = 顶背离（看跌）
+    - 价格新低但 MFI 走高 = 底背离（看涨）
+
+    公式: MFI = 100 - 100 / (1 + positive_MF / negative_MF)
+    参考: Quong, T. (1989) The New Technical Trader
+    """
+
+    name = "mfi"
+    category = FactorCategory.SENTIMENT
+    default_weight = 0.06
+    min_history_days = 15
+
+    def __init__(self, period: int = 14):
+        self.period = period
+
+    def calculate(self, sector_data: dict, history: list = None, context: dict = None) -> FactorResult:
+        if not history or len(history) < self.period + 1:
+            return FactorResult(
+                name=self.name, category=self.category, raw_value=50.0,
+                score=5.0, weight=self.default_weight, confidence=0.0,
+                detail={"error": "历史数据不足"},
+            )
+
+        # 典型价格 = (high + low + close) / 3
+        typical_prices = []
+        turnovers = []
+        for h in history[-(self.period + 1):]:
+            high = h.get("high") or h.get("index_high", 0)
+            low = h.get("low") or h.get("index_low", 0)
+            close = h.get("index_close", 0)
+            tp = (high + low + close) / 3 if (high + low + close) > 0 else close
+            typical_prices.append(tp)
+            turnovers.append(h.get("turnover", 0))
+
+        # 计算正/负资金流
+        positive_mf = 0.0
+        negative_mf = 0.0
+        for i in range(1, len(typical_prices)):
+            if typical_prices[i] > typical_prices[i - 1]:
+                positive_mf += typical_prices[i] * turnovers[i]
+            elif typical_prices[i] < typical_prices[i - 1]:
+                negative_mf += typical_prices[i] * turnovers[i]
+
+        # MFI
+        if negative_mf == 0:
+            mfi = 100.0
+        elif positive_mf == 0:
+            mfi = 0.0
+        else:
+            money_ratio = positive_mf / negative_mf
+            mfi = 100.0 - 100.0 / (1.0 + money_ratio)
+
+        # 评分: MFI < 20 超卖(高分), MFI > 80 超买(低分)
+        if mfi < 20:
+            score = 8.0 + (20 - mfi) / 20 * 2.0
+        elif mfi < 40:
+            score = 6.0 + (40 - mfi) / 20 * 2.0
+        elif mfi < 60:
+            score = 4.0 + (60 - mfi) / 20 * 2.0
+        elif mfi < 80:
+            score = 2.0 + (80 - mfi) / 20 * 2.0
+        else:
+            score = max(0, 2.0 - (mfi - 80) / 20 * 2.0)
+
+        # 背离检测
+        divergence = "none"
+        if len(typical_prices) >= 10:
+            recent_tp = typical_prices[-self.period:]
+            recent_mfi_vals = []
+            # 重算近10日MFI序列检测背离
+            for lookback in range(min(10, self.period), 1, -1):
+                sub_tps = typical_prices[-lookback - 1:]
+                sub_tos = turnovers[-lookback - 1:]
+                pos_mf = 0.0
+                neg_mf = 0.0
+                for j in range(1, len(sub_tps)):
+                    if sub_tps[j] > sub_tps[j - 1]:
+                        pos_mf += sub_tps[j] * sub_tos[j]
+                    elif sub_tps[j] < sub_tps[j - 1]:
+                        neg_mf += sub_tps[j] * sub_tos[j]
+                if neg_mf == 0:
+                    recent_mfi_vals.append(100.0)
+                elif pos_mf == 0:
+                    recent_mfi_vals.append(0.0)
+                else:
+                    recent_mfi_vals.append(100.0 - 100.0 / (1.0 + pos_mf / neg_mf))
+
+            if len(recent_mfi_vals) >= 3:
+                # 价格趋势 vs MFI趋势
+                price_up = recent_tp[-1] > recent_tp[0]
+                mfi_up = recent_mfi_vals[0] < recent_mfi_vals[-1]  # MFI上升
+
+                if price_up and not mfi_up:
+                    divergence = "bearish"  # 顶背离
+                    score -= 1.0
+                elif not price_up and mfi_up:
+                    divergence = "bullish"  # 底背离
+                    score += 1.0
+
+        return FactorResult(
+            name=self.name,
+            category=self.category,
+            raw_value=round(mfi, 2),
+            score=round(self.clamp(score), 2),
+            weight=self.default_weight,
+            confidence=0.7,
+            detail={
+                "mfi": round(mfi, 2),
+                "positive_mf": round(positive_mf, 2),
+                "negative_mf": round(negative_mf, 2),
+                "divergence": divergence,
+            },
+        )
+
+    def validate_data(self, sector_data: dict, history: list = None) -> bool:
+        return "index_close" in sector_data
+
+
 # 注册因子
 FactorRegistry.register(VolumeRatioFactor())
 FactorRegistry.register(VolatilityFactor())
 FactorRegistry.register(MarketBreadthFactor())
+FactorRegistry.register(MFIFactor())

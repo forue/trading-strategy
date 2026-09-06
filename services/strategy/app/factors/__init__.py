@@ -8,6 +8,7 @@ from . import technical
 from . import sentiment
 from . import valuation
 from . import rotation
+from . import trend
 
 __all__ = [
     "BaseFactor",

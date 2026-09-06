@@ -286,8 +286,11 @@ class KDJFactor(BaseFactor):
     def validate_data(self, sector_data: dict, history: list = None) -> bool:
         if not history or len(history) < self.min_history_days:
             return False
-        required = ["index_close", "index_high", "index_low"]
-        return all(all(k in h for k in required) for h in history[-self.min_history_days:])
+        # 兼容两种字段命名: index_high/index_low (旧) 和 high/low (新数据源)
+        sample = history[-1]
+        has_high = "index_high" in sample or "high" in sample
+        has_low = "index_low" in sample or "low" in sample
+        return "index_close" in sample and has_high and has_low
 
     @staticmethod
     def _calc_kdj(history: list, period: int = 9) -> tuple:
@@ -296,8 +299,9 @@ class KDJFactor(BaseFactor):
             return 50.0, 50.0, 50.0
 
         recent = history[-period:]
-        highest = max(h.get("index_high", 0) for h in recent)
-        lowest = min(h.get("index_low", 0) for h in recent)
+        # 兼容 index_high/high, index_low/low 两种字段
+        highest = max(h.get("index_high") or h.get("high", 0) for h in recent)
+        lowest = min(h.get("index_low") or h.get("low", 9e18) for h in recent)
         close = recent[-1].get("index_close", 0)
 
         if highest == lowest:
