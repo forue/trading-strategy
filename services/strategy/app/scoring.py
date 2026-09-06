@@ -1,6 +1,7 @@
 """策略引擎服务 - 板块轮动评分模型核心算法"""
 from collections import defaultdict
 import json
+import math
 import time
 import numpy as np
 from datetime import datetime
@@ -565,9 +566,17 @@ def _score_etf(code: str) -> float:
         liq_score = max(0, min(10, 3 + (avg_vol / 1e8) * 2))
 
         total = ret_score * 0.3 + dd_score * 0.3 + liq_score * 0.4
+
+        # NaN/Infinity 防护
+        if math.isnan(total) or math.isinf(total):
+            logger.warning(f"ETF {code} 评分产生异常值: {total}, ret={ret}, max_dd={max_dd}, avg_vol={avg_vol}, 回退到默认值5.0")
+            _etf_score_cache[code] = (5.0, now)
+            return 5.0
+
         _etf_score_cache[code] = (round(total, 2), now)
         return round(total, 2)
-    except Exception:
+    except Exception as e:
+        logger.warning(f"ETF {code} 评分异常: {e}")
         _etf_score_cache[code] = (5.0, now)
         return 5.0
 
@@ -788,7 +797,28 @@ class RotationScoringModel:
             if d and d in market_avg_by_date:
                 item["market_avg_change"] = market_avg_by_date[d]
 
-        weights = DEFAULT_WEIGHTS.get(strategy_type.value, DEFAULT_WEIGHTS["MODERATE"])
+        # 基于近期市场宽度判断 regime，动态调整因子权重
+        changes_by_date = context.get("changes_by_date", {})
+        recent_dates = sorted(changes_by_date.keys())[-5:]
+        if len(recent_dates) >= 3:
+            recent_breadth = []
+            for d in recent_dates:
+                changes = changes_by_date[d]
+                if changes:
+                    up = sum(1 for v in changes.values() if v > 0)
+                    recent_breadth.append(up / len(changes))
+            avg_breadth = sum(recent_breadth) / len(recent_breadth) if recent_breadth else 0.5
+            if avg_breadth >= 0.55:
+                preliminary_regime = "BULL"
+            elif avg_breadth <= 0.40:
+                preliminary_regime = "BEAR"
+            else:
+                preliminary_regime = "NEUTRAL"
+        else:
+            preliminary_regime = "NEUTRAL"
+
+        from .combiner import get_dynamic_weights
+        weights = get_dynamic_weights(strategy_type.value, preliminary_regime)
         combiner = FactorCombiner()
 
         # 第一阶段：计算所有板块的因子原始结果
@@ -796,7 +826,7 @@ class RotationScoringModel:
         for item in sector_data:
             history = item.get("_history", None)
             abs_score, val_score, cat_detail, engine_fb, factor_results = self._calculate_composite_score(
-                item, strategy_type, params, history, context
+                item, strategy_type, params, history, context, weights=weights
             )
             raw_rows.append({
                 "item": item,
@@ -903,6 +933,7 @@ class RotationScoringModel:
         params: StrategyParams,
         history: list = None,
         context: Optional[dict[str, Any]] = None,
+        weights=None,
     ) -> tuple[float, float, dict, bool, Optional[list[FactorResult]]]:
         """计算综合评分。返回 (绝对综合分, 估值得分, 分类明细, 是否回退, 因子列表)。"""
         try:
@@ -912,7 +943,8 @@ class RotationScoringModel:
                 c, v = self._calculate_composite_score_fallback(item, strategy_type, params)
                 return c, v, {}, True, None
 
-            weights = DEFAULT_WEIGHTS.get(strategy_type.value, DEFAULT_WEIGHTS["MODERATE"])
+            if weights is None:
+                weights = DEFAULT_WEIGHTS.get(strategy_type.value, DEFAULT_WEIGHTS["MODERATE"])
             combiner = FactorCombiner()
             composite_score, detail = combiner.combine_weighted(factor_results, weights)
 
@@ -992,11 +1024,12 @@ class RotationScoringModel:
                 "etf_name": sector_data.get("etf_name", ""),
             }
 
-        # 优先从候选列表中选最优
+        # 候选ETF列表：取静态首个（避免回测/信号路径实时请求akshare，
+        # 实时行情评分既慢又会在历史回测中引入未来函数）
         if sector_name:
-            ranked = _rank_etf_candidates(sector_name)
-            if ranked:
-                best = ranked[0]
+            cands = SECTOR_ETF_CANDIDATES.get(sector_name, [])
+            if cands:
+                best = cands[0]
                 return {"etf_code": best["code"], "etf_name": best["name"]}
 
         etf = SECTOR_ETF_MAP.get(sector_code)
