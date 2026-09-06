@@ -15,18 +15,55 @@ class StrategyWeights(BaseModel):
     rotation: float = 0.0
 
 
-# 三档策略默认权重（rotation 全档参与，避免轮动类因子仅保守档生效）
+# 三档策略默认权重（含新增 ma_trend/mfi/sector_dispersion）
 DEFAULT_WEIGHTS = {
     "AGGRESSIVE": StrategyWeights(
-        capital_flow=0.48, momentum=0.33, technical=0.10, sentiment=0.05, valuation=0.0, rotation=0.04,
+        capital_flow=0.42, momentum=0.28, technical=0.15, sentiment=0.08, valuation=0.0, rotation=0.07,
     ),
     "MODERATE": StrategyWeights(
-        capital_flow=0.33, momentum=0.23, technical=0.24, sentiment=0.10, valuation=0.05, rotation=0.05,
+        capital_flow=0.30, momentum=0.20, technical=0.27, sentiment=0.13, valuation=0.05, rotation=0.05,
     ),
     "CONSERVATIVE": StrategyWeights(
-        capital_flow=0.29, momentum=0.14, technical=0.24, sentiment=0.14, valuation=0.14, rotation=0.05,
+        capital_flow=0.23, momentum=0.10, technical=0.23, sentiment=0.19, valuation=0.14, rotation=0.11,
     ),
 }
+
+
+def get_dynamic_weights(strategy_type: str, market_regime: str = "NEUTRAL") -> StrategyWeights:
+    """根据市场环境动态调整因子权重
+
+    - 牛市: 加大动量+技术权重，降低估值权重（追涨有效）
+    - 熊市: 加大估值+情绪权重，降低动量权重（均值回归有效）
+    - 震荡: 保持默认
+
+    Args:
+        strategy_type: AGGRESSIVE / MODERATE / CONSERVATIVE
+        market_regime: BULL / NEUTRAL / BEAR
+    """
+    base = DEFAULT_WEIGHTS.get(strategy_type, DEFAULT_WEIGHTS["MODERATE"])
+
+    if market_regime == "BULL":
+        # 牛市: 动量+10%, 技术+5%, 估值-10%, 资金流-5%
+        return StrategyWeights(
+            capital_flow=max(0, base.capital_flow - 0.05),
+            momentum=min(1.0, base.momentum + 0.10),
+            technical=min(1.0, base.technical + 0.05),
+            sentiment=base.sentiment,
+            valuation=max(0, base.valuation - 0.10),
+            rotation=base.rotation,
+        )
+    elif market_regime == "BEAR":
+        # 熊市: 估值+10%, 情绪+5%, 动量-10%, 资金流-5%
+        return StrategyWeights(
+            capital_flow=max(0, base.capital_flow - 0.05),
+            momentum=max(0, base.momentum - 0.10),
+            technical=base.technical,
+            sentiment=min(1.0, base.sentiment + 0.05),
+            valuation=min(1.0, base.valuation + 0.10),
+            rotation=min(1.0, base.rotation + 0.05),
+        )
+    else:
+        return base
 
 
 class FactorCombiner:
