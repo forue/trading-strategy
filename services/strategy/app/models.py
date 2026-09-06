@@ -21,6 +21,17 @@ class StrategyParams(BaseModel):
     hold_days: int = 5
     capital_pct: float = 0.3
     stop_loss: float = 0.03
+    # 回撤控制 - 多重止损
+    trailing_stop_loss: float = 0.08       # 移动止损：从最高点回撤超过此比例触发
+    max_drawdown_stop: float = 0.15        # 最大回撤止损：累计回撤超过此比例清仓
+    benchmark_stop_loss: float = 0.10      # 基准相对止损：落后大盘超过此比例触发
+    ma_stop_days: int = 20                 # 均线止损：跌破N日均线超过阈值触发
+    ma_stop_loss: float = 0.05             # 均线止损阈值
+    # 阶梯式均线止盈（可选，设为空列表不启用）
+    ma_take_profit_days: int = 20          # 均线止盈窗口天数
+    ma_take_profit_thresholds: list = [0.05, 0.03, 0.01]  # 各级触发阈值：NAV回落至均线上方X%以内时减仓（递减序列）
+    ma_take_profit_ratios: list = [0.3, 0.4, 0.3]         # 各级减仓比例（按原始仓位计算）
+    drawdown_ma_window: int = 20           # 回撤控制用的均线窗口
     valuation_pct_max: Optional[float] = None
     # 交易成本参数
     commission_rate: float = 0.0003    # 佣金费率，默认万三
@@ -105,6 +116,7 @@ class BacktestResult(BaseModel):
     total_trade_cost: float = 0.0
     trade_count_actual: int = 0
     nav_curve: list = []
+    position_changes: list = []  # 仓位调整明细：加仓/减仓/清仓
     created_at: Optional[str] = None
 
 
