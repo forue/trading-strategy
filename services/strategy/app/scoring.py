@@ -744,22 +744,35 @@ class RotationScoringModel:
     def _allocate_buy_position_ratios(
         self, buy_targets: list[dict], params: StrategyParams, total_weight: float
     ) -> dict[str, float]:
+        """在入选标的中分配目标仓位
+
+        total_weight 为组合总仓位上限（capital_pct），max_position 为单一板块上限。
+        分配后总权重不超过 total_weight，且任一标的不超过 max_position。
+        """
         rows = [(s.get("sector_code"), s) for s in buy_targets if s.get("sector_code")]
         if not rows:
             return {}
         codes = [c for c, _ in rows]
         if not params.use_inverse_vol_weights:
-            eq = total_weight / len(codes)
-            return {c: eq for c in codes}
-        invw = []
-        for code, s in rows:
-            v = self._infer_volatility(s)
-            invw.append((code, 1.0 / v if v and v > 0 else 1.0))
-        ssum = sum(w for _, w in invw)
-        if ssum <= 0:
-            eq = total_weight / len(invw)
-            return {c: eq for c, _ in invw}
-        return {c: total_weight * (w / ssum) for c, w in invw}
+            raw = {c: 1.0 / len(codes) for c in codes}
+        else:
+            invw = []
+            for code, s in rows:
+                v = self._infer_volatility(s)
+                invw.append((code, 1.0 / v if v and v > 0 else 1.0))
+            ssum = sum(w for _, w in invw)
+            raw = ({c: w / ssum for c, w in invw} if ssum > 0
+                   else {c: 1.0 / len(invw) for c, _ in invw})
+
+        weights = {c: total_weight * p for c, p in raw.items()}
+        # 单一板块上限：等比例压缩，保证 max(weights) <= max_position
+        cap = params.max_position if params.max_position and params.max_position > 0 else 1.0
+        if weights:
+            peak = max(weights.values())
+            if peak > cap:
+                scale = cap / peak
+                weights = {c: w * scale for c, w in weights.items()}
+        return weights
 
     def calculate_daily_signals(
         self,
@@ -1147,8 +1160,11 @@ class RotationScoringModel:
             logger.info(f"{label}: 市场不景气，进入空仓模式")
             return signals
 
-        # 保守策略特有的估值预筛
-        all_candidates = scored_sectors  # 非保守策略直接使用全量排名
+        # 保守策略特有的估值预筛（仅当当日确实存在估值分位数据时启用）
+        # 注意：若整日无任何估值数据（如数据源未覆盖的历史回测区间），
+        # 保守策略须退化为纯评分选股，否则将长期空仓跑输大盘。
+        valuation_active = False
+        keep_search_pool = scored_sectors
         if profile["use_valuation_filter"]:
             filtered = []
             has_data = False
@@ -1164,13 +1180,19 @@ class RotationScoringModel:
                 vpct = (10 - vs) / 10 * 100
                 if vpct <= valuation_max:
                     filtered.append(s)
-            if not has_data:
+            valuation_active = has_data
+
+        if valuation_active:
+            # 有估值数据：仅买入低估值且评分达标标的
+            if not filtered:
+                logger.info(f"{label}: 无满足低估值条件的板块，暂不买入")
                 return signals
             top_n = min(params.top_n, len(filtered))
             buy_targets = filtered[:top_n]
             # 后续 keep 查找使用 filtered 列表
             keep_search_pool = filtered
         else:
+            # 无估值数据（或非保守策略）：按综合评分动态选股
             # 动态 top_n：牛市多选 1 个
             total = len(scored_sectors)
             up_count = sum(1 for s in scored_sectors if s.get("index_change_pct", 0) > 0)
@@ -1205,8 +1227,8 @@ class RotationScoringModel:
             up_ratio = up_count / max(total, 1)
             avg_change = sum(s.get("index_change_pct", 0) for s in scored_sectors) / max(total, 1)
             dynamic_gap_floor = gap_floor
-            if up_ratio >= 0.5 and avg_change > 0:
-                dynamic_gap_floor = gap_floor * 0.7  # 牛市降低换仓门槛
+            if up_ratio >= 0.5 and avg_change > 0 and not params.trend_confirm:
+                dynamic_gap_floor = gap_floor * 0.7  # 牛市降低换仓门槛（趋势确认模式不降低，减少无效调仓）
             elif up_ratio < 0.4 and avg_change < 0:
                 dynamic_gap_floor = gap_floor * 1.5  # 熊市提高门槛
             gap_thr = self._effective_score_gap_threshold(max_new, max_cur, params, dynamic_gap_floor)
@@ -1220,19 +1242,20 @@ class RotationScoringModel:
 
         # 生成买入信号
         if buy_targets:
-            total_weight = min(params.max_position * params.capital_pct, 1.0)
+            # capital_pct = 组合总仓位上限；max_position = 单一板块上限（在分配时约束）
+            total_weight = min(params.capital_pct, 1.0)
             pos_map = self._allocate_buy_position_ratios(buy_targets, params, total_weight)
             replace_all = current_codes and new_codes and len(new_codes - current_codes) == len(new_codes)
             for s in buy_targets:
-                # 保守策略买入时跳过无估值数据的标的
-                if profile["use_valuation_filter"]:
+                # 估值预筛仅当当日存在估值数据时启用；数据缺失时按评分选股不跳过
+                if valuation_active:
                     if s.get("pe_percentile") is None and s.get("pb_percentile") is None:
                         continue
                 rank = next((i+1 for i, x in enumerate(scored_sectors) if x.get("sector_code") == s.get("sector_code")), 0)
                 prefix = reason_full if replace_all else "部分调仓"
                 pr = pos_map.get(s.get("sector_code"), total_weight / max(len(buy_targets), 1))
                 reason = f"{label}: {prefix}, 评分{s['composite_score']:.2f}"
-                if profile["use_valuation_filter"]:
+                if valuation_active:
                     vs = s.get("valuation_score", 5.0)
                     vpct = (10 - vs) / 10 * 100
                     reason += f", 估值分位{vpct:.1f}%<={valuation_max}%"

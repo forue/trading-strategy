@@ -18,7 +18,7 @@ class StrategyWeights(BaseModel):
 # 三档策略默认权重（含新增 ma_trend/mfi/sector_dispersion）
 DEFAULT_WEIGHTS = {
     "AGGRESSIVE": StrategyWeights(
-        capital_flow=0.42, momentum=0.28, technical=0.15, sentiment=0.08, valuation=0.0, rotation=0.07,
+        capital_flow=0.28, momentum=0.18, technical=0.17, sentiment=0.07, valuation=0.25, rotation=0.05,
     ),
     "MODERATE": StrategyWeights(
         capital_flow=0.30, momentum=0.20, technical=0.27, sentiment=0.13, valuation=0.05, rotation=0.05,

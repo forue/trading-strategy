@@ -20,25 +20,28 @@ class PriceMomentumFactor(BaseFactor):
         # 当日涨跌幅
         change_pct = sector_data.get("index_change_pct", 0)
 
-        # 计算历史动量 (如果有多日数据)
+        # 5日/10日真实收盘价动量（history 为板块历史K线，兼容 close/index_close 字段名）
+        # 历史不足或收盘价缺失时退化为当日涨跌幅
+        def _close_of(h):
+            return h.get("index_close") or h.get("close", 0)
         momentum_5d = change_pct
         momentum_10d = change_pct
         if history and len(history) >= 5:
-            closes = [h.get("index_close", 0) for h in history[-5:]]
+            closes = [_close_of(h) for h in history[-5:]]
             if closes[0] > 0:
                 momentum_5d = (closes[-1] / closes[0] - 1) * 100
         if history and len(history) >= 10:
-            closes = [h.get("index_close", 0) for h in history[-10:]]
+            closes = [_close_of(h) for h in history[-10:]]
             if closes[0] > 0:
                 momentum_10d = (closes[-1] / closes[0] - 1) * 100
-
-        # 综合动量: 5日权重60%, 10日权重40%
+        # 综合动量: 5日权重60% + 10日权重40%
+        # （已验证：5~20d 窗口动量高度相关、对权重稳健；60d 长期追高转负，故不纳入）
         combined_momentum = momentum_5d * 0.6 + momentum_10d * 0.4
 
         # 评分: 涨跌幅1% = 2分, 基准5分
         score = self.clamp(5.0 + combined_momentum * 2.0)
 
-        # 置信度: 有多日历史数据时更可靠
+        # 置信度: 有足够历史数据时更可靠
         confidence = 0.8 if history and len(history) >= 10 else 0.5
 
         return FactorResult(
