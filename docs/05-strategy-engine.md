@@ -61,6 +61,9 @@ services/strategy/app/
 | `market_bear_threshold` | 上涨板块占比低于此值判定为熊市（默认 0.4） |
 | `favorable_confirm_days` | 连续 N 天同向状态才确认（默认 2，防摇摆） |
 | `max_empty_days` | 最大空仓天数，超时强制试探建仓（默认 10） |
+| `bear_reentry_days` | BEAR 空仓回补门控天数（默认 0 = 关闭，出厂当日不再确认 BEAR 即回补）。设置 2~3：BEAR 清仓后须连续 N 日非 BEAR（当日 BULL 也不放行）才允许重新建仓，把弱反弹/下跌中继的首日追高延后以压回撤，代价是牺牲 BEAR 后快速回补的反弹收益 |
+| `risk_free_rate` | 无风险利率（年化，默认 2%）：夏普基准 + 空仓资金日计息 |
+| `capital_pct` | 组合总仓位上限（单板块上限另见 `max_position`） |
 | `capital_pct_bull_boost` | 牛市加仓比例（默认 0.3） |
 | `emergency_exit_score` | 持仓板块评分低于此值触发紧急退出（默认 1.0） |
 | `trailing_stop_loss` | 移动止损：从近期高点回撤超此比例触发（默认 8%） |
@@ -72,6 +75,9 @@ services/strategy/app/
 | `ma_take_profit_thresholds` | 各级止盈触发阈值列表（递减），NAV高于均线X%时减仓（默认 [5%, 3%, 1%]） |
 | `ma_take_profit_ratios` | 各级减仓比例列表（按原始仓位计算），每次卖出原始仓位的X%（默认 [30%, 40%, 30%]） |
 | `drawdown_ma_window` | 回撤控制用的均线窗口（默认 20） |
+| `stop_loss_mode` | 止损模式：`fixed`=沿用多重固定止损（固定/移动/最大回撤/基准相对/均线）；`trend_break`=仅在组合净值有效跌破长周期均线（趋势破位）时清仓，跳过其余固定止损与紧急退出（避免牛市低点踏空） |
+| `trend_confirm` | 趋势确认：开启后强趋势中跳过阶梯均线止盈（让利润奔跑），且牛市不再降低换仓门槛以减少无效调仓 |
+| `trend_ma_days` | 趋势破位判定的长均线窗口天数（仅 `stop_loss_mode="trend_break"` 生效，默认 60） |
 
 默认配置见源码；与旧「四维手写权重」文档不一致时以代码为准。
 
@@ -91,17 +97,25 @@ services/strategy/app/
 参数:
   top_n = 2              # 仅取前2名（牛市自动+1）
   max_position = 100%     # 满仓
-  hold_days = 2           # 持有1-2日（动态调整）
+  hold_days = 10          # 持有10日（提高调仓缺口阈值后低频换手，让利润奔跑）
   stop_loss = 12%         # 固定回撤止损12%
   trailing_stop_loss = 8%  # 移动止损8%（从近期高点）
   max_drawdown_stop = 15%  # 最大回撤止损15%（从初始资金）
   capital_pct = 70%      # 基础资金使用比例（牛市可达100%）
   min_score_threshold = 1.5   # 最小评分阈值
-  score_gap_threshold = 1.0   # 与相对缺口取较大（牛市×0.7，熊市×1.5）
-  cooldown_days = 1       # 调仓冷却期
+  score_gap_threshold = 2.0   # 与相对缺口取较大（牛市×0.7，熊市×1.5）
+  relative_score_gap_ratio = 0.12  # 相对评分缺口 = (最高候选分 - 持仓最高分) / 最高候选分，与绝对阈值取 max
+  cooldown_days = 6       # 调仓冷却期（止损后冷却更久，避免崩盘中追高二次挨打）
+  stop_loss_mode = "trend_break"  # 仅趋势破位止损（避免牛市低点踏空）
+  trend_confirm = True            # 强趋势跳过止盈、减少调仓，让利润奔跑
+  trend_ma_days = 60              # 趋势破位判定窗口
+  ma_stop_loss = 8%               # 趋势破位阈值（跌破60日均线8%）
   keep_overlap = true     # 保持重叠持仓
-  allow_empty = true     # 允许空仓（连续2天BEAR确认）
+  allow_empty = true     # 允许空仓（单日弱广度确认，见 6.1.1）
   min_score_keep = 2.5   # 保持持仓的最小评分
+  # 市场状态防御（回测验证：2日连续确认几乎不触发，致6/7月崩盘单月跑输大盘10pp+）
+  market_bear_threshold = 0.40    # 上涨板块占比 < 40% 且均涨为负判定为 BEAR
+  favorable_confirm_days = 1      # 单日 BEAR 即确认离场（次日开盘执行）
   commission_rate = 0.3‰ # 佣金费率（万三）
   stamp_tax_rate = 1.0‰  # 印花税率（千一，仅卖出）
   slippage_rate = 1.0‰   # 滑点费率（千一）
@@ -109,7 +123,7 @@ services/strategy/app/
 买入逻辑:
   1. 按综合评分排序所有板块
   2. 选取评分最高的前2名（需满足min_score_threshold）
-  3. 在 `max_position × capital_pct` 目标下，按 `use_inverse_vol_weights` 在入选标的中分配仓位（否则等权）
+  3. 在 `capital_pct`（组合总仓位）目标下分配，单板块不超过 `max_position`，按 `use_inverse_vol_weights` 分配（否则等权）
   4. 生成BUY信号（每条含 `position_ratio`）
 
 卖出逻辑:
@@ -133,10 +147,14 @@ services/strategy/app/
   stop_loss = 10%        # 固定回撤止损10%
   trailing_stop_loss = 6%  # 移动止损6%
   benchmark_stop_loss = 8% # 基准相对止损8%（落后大盘）
-  capital_pct = 30%      # 资金使用比例
+  capital_pct = 60%      # 资金使用比例（2026-09调参：原30%暴露不足导致跑输大盘）
   min_score_threshold = 2.0   # 最小评分阈值
   score_gap_threshold = 1.0   # 与相对缺口取较大，见 StrategyParams
   cooldown_days = 2       # 调仓冷却期
+  stop_loss_mode = "trend_break"  # 仅趋势破位止损（避免牛市低点踏空）
+  trend_confirm = True            # 强趋势跳过止盈、减少调仓，让利润奔跑
+  trend_ma_days = 60              # 趋势破位判定窗口
+  ma_stop_loss = 8%               # 趋势破位阈值（跌破60日均线8%）
   keep_overlap = true     # 保持重叠持仓
   allow_empty = true     # 允许空仓
   min_score_keep = 3.0   # 保持持仓的最小评分
@@ -161,20 +179,23 @@ services/strategy/app/
 ### 3.3 保守轮动策略
 
 ```
-目标: 注重安全边际，低仓位配置
+目标: 注重安全边际，收益稳健、回撤可控
 
 参数:
-  top_n = 5                # 取满足条件的前5名
-  max_position = 30%       # 仓位上限30%
+  top_n = 3                # 取评分前3名（与稳健策略同量级，分散度适中）
+  max_position = 30%       # 单板块仓位上限30%
   hold_days = 10           # 持有10日
   stop_loss = 8%           # 固定回撤止损8%
   trailing_stop_loss = 5%  # 移动止损5%
-  ma_stop_loss = 3%        # 均线止损3%（跌破20日均线）
-  capital_pct = 20%        # 资金使用比例
-  valuation_pct_max = 50   # 估值分位≤50%
+  ma_stop_loss = 5%        # 均线止损5%（跌破均线）
+  capital_pct = 60%        # 资金使用比例（2026-09调参：原20%暴露不足、几乎长期空仓）
+  valuation_pct_max = 50   # 估值分位≤50%（仅当存在估值分位数据时启用）
   min_score_threshold = 2.0   # 最小评分阈值
   score_gap_threshold = 1.0   # 与相对缺口取较大，见 StrategyParams
   cooldown_days = 3       # 调仓冷却期
+  stop_loss_mode = "trend_break"  # 趋势破位止损（避免固定止损在正常波动中被反复打损）
+  trend_confirm = True            # 趋势确认后减少止损触发
+  trend_ma_days = 60              # 趋势破位判定窗口
   keep_overlap = true     # 保持重叠持仓
   allow_empty = true     # 允许空仓
   min_score_keep = 3.0   # 保持持仓的最小评分
@@ -185,16 +206,18 @@ services/strategy/app/
 买入逻辑:
   1. 按综合评分排序
   2. 筛选评分 ≥ min_score_threshold 的板块
-  3. 选取前5名
+  3. 选取前3名
   4. 单板块仓位上限30%，总仓位不超过100%
+  5. 当回测/历史区间缺少估值分位数据（pe/pb_percentile 均缺失）时，
+     自动退化为纯评分选股，避免"空有低估值预筛却无数据可用"导致长期空仓
 
 卖出逻辑:
   1. 综合评分 < min_score_keep 的板块
-  2. 不满足安全边际
+  2. 趋势破位止损（组合净值有效跌破 trend_ma_days 均线超阈值）
 
 信号示例:
   { direction: "BUY", sector: "银行", score: 6.12, position: 0.2,
-    reason: "保守轮动: 综合评分6.12, 估值分位≤50%, 仓位上限30%" }
+    reason: "保守轮动: 综合评分6.12, 评分排名前3, 仓位上限30%" }
 ```
 
 ---
@@ -226,7 +249,7 @@ services/strategy/app/
       - 市场过滤: `_market_is_favorable`（激进与稳健/保守规则不同，见源码）
       - 买入: 前 N 名且过 `min_score_threshold`；调仓需超过有效评分缺口（绝对 + 相对）
       - 卖出: 调出不在新组合中的标的（配合 keep_overlap 等）
-      - 仓位: `max_position × capital_pct` 内波动倒数或等权
+      - 仓位: 总仓位 `capital_pct`（单板块上限 `max_position`），波动倒数或等权分配
       - 冷却期: 止损后 cooldown_days 内不建仓
 
   7. 信号处理:
@@ -331,6 +354,16 @@ Content-Type: application/json
   "is_active": true
 }
 ```
+
+> 注意：`params` 支持部分字段提交，后端仅合并已提交字段（`exclude_unset`），未提交字段保留原值，避免前端部分提交将调仓阈值/止损模式/仓位比例等关键参数意外重置为默认值。
+
+### 5.3.1 恢复默认配置
+
+```
+POST /configs/{config_id}/reset
+```
+
+将指定策略的 `name` / `is_active` / `params` 一键恢复为代码内置出厂默认值（模块启动时的 `DEFAULT_CONFIG_TEMPLATES` 快照），并同步写入 Redis 持久化。前端策略卡片提供"恢复默认"按钮调用此接口。
 
 ### 5.4 获取今日信号
 
@@ -450,6 +483,8 @@ position_changes.action 类型说明:
   - BEAR_EXIT:      熊市空仓（连续BEAR确认）
 ```
 
+> 注意：`params` 为可选字段级覆盖，语义同 5.3「部分字段提交」。未提交字段会保留该策略当前配置值（merge），不会回落为模型默认值——例如仅提交 `top_n`/`hold_days`/`stop_loss` 等表单可见字段时，`stop_loss_mode`、`min_score_threshold`、`cooldown_days` 等仍取策略配置值，确保回测结果与配置页保存的配置一致。
+
 ### 5.7 回测历史
 
 ```
@@ -525,35 +560,45 @@ POST /data/replay/strategy-overlay  - 策略叠加回放
 ### 6.1 回测算法流程
 
 ```
-回测流程（T+1 盘后信号次日开盘价执行）:
+成交模型（全部交易统一为 T 日收盘决策 → T+1 开盘按开盘价成交）:
 
-     i. 检查待执行调仓（pending_rebalance）:
-        - 若有 → 次日开盘价执行卖出/买入
-        - 新仓首日收益 = open→close 日内收益（非全天）
-        - 旧仓收益 = 全天收益
-        - 记录 position_changes（日期=成交日，非信号日）
-        - 设置持仓锁定和冷却期
+     i. 开盘执行昨日挂起的订单:
+        - 风险单优先（STOP_LOSS / EMERGENCY_EXIT / BEAR_EXIT / TAKE_PROFIT），其次调仓单
+        - 卖出：按 T+1 开盘价成交
+        - 买入：金额 = 目标市值 - 当前市值，受可用现金约束（不允许透支）
+        - 继续持有判断只使用信号日(T日)已公开的评分与涨跌，杜绝未来函数
 
-     ii. 计算当日持仓收益（T+1 拆分）:
-        - 已有持仓: weight × 当日涨跌幅
-        - 今日新开仓: weight × (close - open) / open
+     ii. 收盘按份额逐仓重估（市值记账，权重随价格自然漂移）:
+        - 组合权益 = 现金 + Σ 份额 × 收盘价
+        - 已卖出份额当日只贡献 prev_close→open 的隔夜跳空
+        - 未交易持仓贡献 prev_close→close 的全天涨跌
+        - 新建仓份额贡献 open→close 的日内收益
+        - 现金按日无风险利率计息（空仓日收益 = 无风险利率日收益）
 
-     iii. 止损/紧急退出检查
+     iii. 风险检查（触发后挂单，次日开盘执行，不在触发日收盘价成交）:
+        - 多重止损 / 紧急退出 / 熊市清仓 / 阶梯均线止盈
 
      iv. 更新冷却期计数器
 
-     v. 生成信号（记录待执行，不立即调仓）:
-        - 信号日 = D，记录 pending_rebalance
-        - 成交日 = D+1，实际执行
+     v. 收盘后生成信号（记录待执行，不立即成交）:
+        - 信号日 = D，记录 pending_rebalance（含信号日各板块涨跌）
+        - 成交日 = D+1 开盘，实际执行
 
   5. 计算绩效指标:
-     - 总收益率 = 最终资本 / 初始资本 - 1
+     - 总收益率 = 最终权益 / 初始资金 - 1
      - 年化收益率 = (1 + 总收益率)^(252/交易日数) - 1
      - 最大回撤 = 基于逐日NAV计算
-     - 夏普比率 = (日均收益 × 252) / (日收益标准差 × √252)
-     - 胜率 = 正收益天数占比
-     - 换手率、空仓天数占比、盈亏比、最大连续盈/亏天数
+     - 夏普比率 = (日均超额收益 × 252) / (超额收益标准差 × √252)，超额收益 = 日收益 - 无风险日利率
+     - 胜率 = 盈利平仓笔数 / 平仓笔数（交易级）；日胜率另见 daily_win_rate
+     - 年化双边换手率、空仓天数占比、盈亏比、最大连续盈/亏天数
 ```
+
+#### 记账与价格口径
+
+- 采用份额记账：`positions = {板块: {shares, avg_cost}}`，目标仓位由信号给出的权重换算为金额后再折算为份额。
+- 价格序列优先取数据源的 `index_close` / `open`；缺失时用最近收盘价与 `index_change_pct` 合成，保证只有涨跌幅的数据源也能得到自洽价格。
+- 缺少 `open` 时按 `prev_close` 处理（隔夜跳空为 0）。
+- 因子历史预加载回溯 400 自然日（约 270 个交易日），覆盖最长因子窗口（trend 60日均线、technical 35日）。
 
 #### 基准数据来源
 
@@ -577,13 +622,23 @@ POST /data/replay/strategy-overlay  - 策略叠加回放
 |------|----------------|---------|
 | BULL | 上涨占比 ≥ 50% 且 avg > 0 | capital_pct + 30%，top_n + 1，hold_days - 1，score_gap × 0.7 |
 | NEUTRAL | 不满足 BULL/BEAR | 标准参数 |
-| BEAR | 上涨占比 < 40% 且 avg < 0 | 空仓（连续2天确认），score_gap × 1.5 |
+| BEAR | 上涨占比 < 40% 且 avg < 0 | 空仓（单日触发确认），score_gap × 1.5 |
 
 空仓管理:
-- 确认: 连续 `favorable_confirm_days`（默认2）天 BEAR 才触发空仓
-- 恢复: 连续2天非 BEAR 才恢复建仓
-- 超时: 空仓超过 `max_empty_days`（默认10）天且市场为 NEUTRAL → 强制50%仓位建仓
-- 紧急退出: 持仓板块单日跌幅 > 5% → 立即允许调仓（跳过 hold_days）
+- 确认: AGGRESSIVE 连续1天 BEAR 即触发空仓（`favorable_confirm_days=1`）；其余策略默认连续2天
+- 恢复: 当日市场不再确认 BEAR（非连续 `favorable_confirm_days` 天 BEAR）即恢复回补
+- 回补门控(可选): 若需压制"弱反弹首日追高、下跌中继二次套牢"型回撤，可开启 `bear_reentry_days`（见 2.3），
+  BEAR 清仓后须连续 N 日非 BEAR（当日 BULL 也不放行）才允许重新建仓。
+  双窗口回测: `bear_reentry_days=3` 将 2026-07 月收益从 -19.5% 修复为 -2.7%、近一年 max_drawdown 从 23.1% 压至 15.0%，
+  但近两年总收益从 +52.0% 降至 +7.3%（两年 21 次 BEAR 空仓中 14 次为假信号、快速回补贡献主要收益），故默认保持 0。
+  开启示例（`PUT /configs/{id}`，body 需含必填字段，params 为合并式更新、其余参数保留）:
+  ```json
+  {"strategy_type": "AGGRESSIVE", "name": "激进策略", "is_active": true,
+   "params": {"bear_reentry_days": 3}}
+  ```
+  回测验证用 `POST /backtest` 的 `params` 覆盖同名字段即可（无需改动配置）
+- 超时: 空仓超过 `max_empty_days`（默认10）天且市场为 NEUTRAL → 强制50%仓位建仓（回补门控开启时超时试探仍会放行）
+- 紧急退出: 持仓板块单日跌幅 > 5% → 次日开盘清仓（跳过 hold_days，成交日承担触发日全天跌幅）
 
 动态参数计算:
 - `dynamic_capital_pct`: BULL = min(base + 0.3, 1.0)，NEUTRAL = base，BEAR = 0
@@ -622,18 +677,19 @@ POST /data/replay/strategy-overlay  - 策略叠加回放
    - 最大回撤止损 (`max_drawdown_stop`): 从初始资金累计亏损超阈值
    - 基准相对止损 (`benchmark_stop_loss`): 累计落后大盘超阈值
    - 均线止损 (`ma_stop_loss`): 净值跌破N日均线超阈值
-   - 逐板块卖出所有持仓，记录 STOP_LOSS 明细
+   - 触发后挂单，**次日开盘**逐板块卖出所有持仓，记录 STOP_LOSS 明细（成交日为触发日+1）
+  - 趋势破位止损（`stop_loss_mode="trend_break"`）: 仅在组合净值有效跌破 `trend_ma_days` 日均线超 `ma_stop_loss` 阈值时清仓，其余固定止损（固定/移动/最大回撤/基准相对/均线）与紧急退出均跳过。用于减少牛市中因短期回调过早离场导致的踏空；大级别熊市仍由 `_market_is_favorable` 空仓保护
 3. **均线止盈**（可选，`ma_take_profit_thresholds` 非空时启用）:
    - 仅在盈利时触发（NAV > N日均线），按递减阈值阶梯式减仓
-   - 首次触发时记录原始仓位，后续各级按原始仓位比例计算减仓量
-   - 例：原始仓位33%，阈值[5%,3%,1%]，比例[30%,40%,30%]
-     → 高于均线5%减30%(9.9%) → 高于3%减40%(13.2%) → 高于1%减30%(9.9%) → 清仓
+   - 首次触发时记录原始份额，后续各级按原始份额比例计算减仓量，次日开盘执行
+   - 例：原始份额100份，阈值[5%,3%,1%]，比例[30%,40%,30%]
+     → 高于均线5%减30份 → 高于3%减40份 → 高于1%减30份 → 清仓
    - 止盈级别在止损/紧急退出/熊市清仓时重置
 4. **紧急退出**:
-   - 逐板块卖出所有持仓：佣金 + 印花税 + 滑点
-   - 记录每笔 EMERGENCY_EXIT 明细
+   - 持仓板块单日跌幅 > 5% 触发，次日开盘逐板块卖出所有持仓：佣金 + 印花税 + 滑点
+   - 触发当日仍承担该板块全天跌幅，记录每笔 EMERGENCY_EXIT 明细
 5. **熊市空仓**:
-   - 逐板块卖出所有持仓：佣金 + 印花税 + 滑点
+   - 连续确认 BEAR 后挂单，次日开盘逐板块卖出所有持仓：佣金 + 印花税 + 滑点
    - 记录每笔 BEAR_EXIT 明细
 
 ### 6.3 回测结果统计
@@ -644,11 +700,14 @@ POST /data/replay/strategy-overlay  - 策略叠加回放
 - `total_return`: 总收益率
 - `annual_return`: 年化收益率
 - `max_drawdown`: 最大回撤
-- `sharpe_ratio`: 夏普比率
-- `win_rate`: 胜率
+- `sharpe_ratio`: 夏普比率（以 `risk_free_rate` 为无风险利率，空仓期按无风险利率计息；波动趋零时置 0）
+- `win_rate`: 胜率（交易级：盈利平仓笔数 / 平仓笔数）
+- `daily_win_rate`: 日胜率（正收益交易日占比）
 - `trading_days`: 交易日数
 - `trade_count`: 估算交易笔数
 - `buy_count` / `sell_count`: 买入/卖出信号数
+- `closed_trades`: 平仓笔数（用于胜率分母）
+- `risk_free_rate`: 本次回测使用的无风险利率
 
 交易成本统计:
 - `total_commission`: 累计佣金
@@ -656,18 +715,20 @@ POST /data/replay/strategy-overlay  - 策略叠加回放
 - `total_slippage_cost`: 累计滑点成本
 - `total_trade_cost`: 累计总交易成本
 - `trade_count_actual`: 实际交易笔数
+- `total_traded_amount`: 累计成交额（买卖双边）
 
 新增统计指标:
-- `turnover_rate`: 换手率（总交易金额 / 初始资金）
+- `turnover_rate`: 年化双边换手率 = 累计成交额 / 平均资产规模 / 年数
 - `empty_days_pct`: 空仓天数占比
-- `profit_factor`: 盈亏比（盈利总额 / 亏损总额）
+- `profit_factor`: 盈亏比（平仓已实现盈利总额 / 亏损总额，含交易成本）
 - `max_consecutive_wins`: 最大连续盈利天数
 - `max_consecutive_losses`: 最大连续亏损天数
 
 仓位跟踪（return_full=True 时返回）:
 - `nav_curve`: 逐日净值曲线（每个交易日一条，含 nav、benchmark、stop_loss）
-- `daily_signals`: 每日信号列表，每条含 positions（每板块 weight+amount）、cash、total_position_value
-- `position_changes`: 仓位调整明细列表（ADD/REDUCE/CLEAR/STOP_LOSS/EMERGENCY_EXIT/BEAR_EXIT），每条含原因（触发指标）。T+1 模式下 date 为实际成交日（信号日+1）
+- `daily_signals`: 每日信号列表，每条含 positions（每板块 weight+amount，按收盘市值计算）、cash、total_position_value
+- `position_changes`: 仓位调整明细列表（ADD/REDUCE/CLEAR/HOLD/STOP_LOSS/EMERGENCY_EXIT/BEAR_EXIT/TAKE_PROFIT），每条含原因（触发指标）。T+1 模式下 date 为实际成交日（信号日+1）
+- `portfolio_snapshots`: 有成交日的收盘持仓快照（各板块权重、市值、当日涨跌与贡献）
 
 ---
 
@@ -684,3 +745,21 @@ POST /data/replay/strategy-overlay  - 策略叠加回放
 - **信号过滤**: 加入成交量确认、趋势线突破验证
 - **仓位优化**: Kelly公式动态仓位
 - **风险控制**: 行业相关性约束，避免集中度风险
+
+---
+
+## 八、单日信号与调参记录（2026-09）
+
+### 8.1 算法修复
+
+1. **趋势止损模式持仓锁定不再冻结**：原实现中 `stop_loss_mode="trend_break"` 时持仓锁定期倒计时被跳过，持仓被永久锁定（`position_hold_counter` 恒为初始值），导致调仓逻辑几乎失效。已修复为：趋势止损模式下锁定期每日照常倒计时，固定止损模式单独保留"单日跌幅>5% 紧急退出"。
+2. **保守策略估值预筛无数据时不空仓**：当 pe/pb 估值分位数据整日缺失时，保守策略此前直接返回空信号（无持仓可用），表现为长期空仓。现改为当日无估值数据时自动退化为综合评分选股，不长期空仓跑输大盘。
+3. **单日快照补充板块历史序列**：实时 `/calculate` 输入为 Redis 当日快照（无 `_history`），走势/技术类因子（ma_trend / mfi / vol_ratio 等）在因子引擎中因数据缺失被剔除。现改为在评分前按信号日期从板块历史 K 线（含资金流字段）补齐 `_history`，使单日信号同样结合走势与技术指标给出。
+
+### 8.2 策略默认参数调整（全窗口基准：上证指数 +17.25%，2025-01-02 ~ 2026-09-04）
+
+| 策略 | 主要参数调整 | 策略收益 | 基准收益 | 最大回撤 | 夏普 | 说明 |
+|---|---|---|---|---|---|---|
+| 激进 | `hold_days` 5→10；`score_gap_threshold` 1.0→2.0；`relative_score_gap_ratio` 0.06→0.12 | +68.8% | +17.25% | -23.1% | 1.25 | 拉长持有期 + 提高调仓缺口，减少高频换手 |
+| 稳健 | `capital_pct` 0.3→0.6 | +33.7% | +17.25% | -19.7% | 0.83 | 提高资金使用率，解决暴露不足 |
+| 保守 | `top_n` 5→3；`capital_pct` 0.2→0.6；`stop_loss_mode` "fixed"→"trend_break"；`trend_confirm=True` | +30.7% | +17.25% | -15.9% | 0.96 | 修正固定止损高频打损 + 空仓问题 |
