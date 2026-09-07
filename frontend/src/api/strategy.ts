@@ -165,4 +165,8 @@ export const strategyApi = {
   updateConfig(configId: number, config: Partial<StrategyConfig>): Promise<any> {
     return request.put(`/strategy/configs/${configId}`, config)
   },
+
+  resetConfig(configId: number): Promise<StrategyConfig> {
+    return request.post(`/strategy/configs/${configId}/reset`)
+  },
 }

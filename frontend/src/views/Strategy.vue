@@ -42,7 +42,10 @@
             </el-form-item>
           </el-form>
 
-          <el-button type="primary" @click="saveStrategy(strategy)" style="width: 100%">保存配置</el-button>
+          <div class="strategy-actions">
+            <el-button type="primary" @click="saveStrategy(strategy)">保存配置</el-button>
+            <el-button type="warning" plain @click="resetStrategy(strategy)">恢复默认</el-button>
+          </div>
         </div>
       </el-col>
     </el-row>
@@ -232,7 +235,7 @@ import { use } from 'echarts/core'
 import { LineChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent, LegendComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { strategyApi } from '@/api/strategy'
 import dayjs from 'dayjs'
 
@@ -325,36 +328,43 @@ async function collectHistoryData() {
 // 页面加载时检查数据
 checkDataAvailability()
 
+// 将后端策略配置应用到前端表单（仅覆盖后端返回的字段，缺失字段保留当前值）
+function applyBackendParams(strategy: StrategyState, cfg: any) {
+  const p = cfg.params
+  if (!p) return
+  strategy.params.top_n = p.top_n ?? strategy.params.top_n
+  strategy.params.max_position_pct = p.max_position != null
+    ? Math.round(p.max_position * 100) : strategy.params.max_position_pct
+  strategy.params.hold_days = p.hold_days ?? strategy.params.hold_days
+  strategy.params.stop_loss_pct = p.stop_loss != null
+    ? p.stop_loss * 100 : strategy.params.stop_loss_pct
+  // capital_pct 后端小数转百分比
+  if (p.capital_pct != null) {
+    strategy.params.capital_pct = p.capital_pct * 100
+  }
+  if (p.valuation_pct_max != null) {
+    strategy.params.valuation_pct_max = p.valuation_pct_max
+  }
+  // 交易成本参数：后端小数转千分比
+  if (p.commission_rate != null) {
+    strategy.params.commission_rate_pct = p.commission_rate * 1000
+  }
+  if (p.stamp_tax_rate != null) {
+    strategy.params.stamp_tax_rate_pct = p.stamp_tax_rate * 1000
+  }
+  if (p.slippage_rate != null) {
+    strategy.params.slippage_rate_pct = p.slippage_rate * 1000
+  }
+}
+
 // 从后端加载已保存的策略配置
 async function loadStrategyConfigs() {
   try {
     const configs = await strategyApi.getConfigs()
     for (const cfg of configs) {
       const strategy = strategies.find(s => s.type === cfg.strategy_type)
-      if (strategy && cfg.params) {
-        strategy.params.top_n = cfg.params.top_n ?? strategy.params.top_n
-        strategy.params.max_position_pct = cfg.params.max_position != null
-          ? Math.round(cfg.params.max_position * 100) : strategy.params.max_position_pct
-        strategy.params.hold_days = cfg.params.hold_days ?? strategy.params.hold_days
-        strategy.params.stop_loss_pct = cfg.params.stop_loss != null
-          ? cfg.params.stop_loss * 100 : strategy.params.stop_loss_pct
-        // 加载 capital_pct 参数
-        if (cfg.params.capital_pct != null) {
-          strategy.params.capital_pct = cfg.params.capital_pct * 100  // 转换为百分比
-        }
-        if (cfg.params.valuation_pct_max != null) {
-          strategy.params.valuation_pct_max = cfg.params.valuation_pct_max
-        }
-        // 加载交易成本参数
-        if (cfg.params.commission_rate != null) {
-          strategy.params.commission_rate_pct = cfg.params.commission_rate * 1000  // 转换为千分比
-        }
-        if (cfg.params.stamp_tax_rate != null) {
-          strategy.params.stamp_tax_rate_pct = cfg.params.stamp_tax_rate * 1000  // 转换为千分比
-        }
-        if (cfg.params.slippage_rate != null) {
-          strategy.params.slippage_rate_pct = cfg.params.slippage_rate * 1000  // 转换为千分比
-        }
+      if (strategy) {
+        applyBackendParams(strategy, cfg)
       }
     }
   } catch {
@@ -362,6 +372,27 @@ async function loadStrategyConfigs() {
   }
 }
 loadStrategyConfigs()
+
+// 恢复策略配置为出厂默认值（权威来源：后端代码内置模板）
+async function resetStrategy(strategy: StrategyState) {
+  try {
+    await ElMessageBox.confirm(`确定将「${strategy.name}」参数恢复为默认值吗？`, '恢复默认', {
+      type: 'warning',
+      confirmButtonText: '恢复默认',
+      cancelButtonText: '取消',
+    })
+  } catch {
+    return  // 用户取消
+  }
+  try {
+    const configId = STRATEGY_ID_MAP[strategy.type]
+    const cfg = await strategyApi.resetConfig(configId)
+    applyBackendParams(strategy, cfg)
+    ElMessage.success(`${strategy.name}已恢复默认参数`)
+  } catch {
+    ElMessage.error('恢复默认失败')
+  }
+}
 
 // 策略类型到后端配置id的映射
 const STRATEGY_ID_MAP: Record<string, number> = {
@@ -569,6 +600,7 @@ const backtestChartOption = computed(() => {
   &:hover { box-shadow: var(--shadow-card); }
   .strategy-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; h3 { margin: 0; font-size: 17px; color: var(--text-primary); } }
   .strategy-desc { color: var(--text-tertiary); font-size: 13px; margin-bottom: 16px; line-height: 1.6; }
+  .strategy-actions { display: flex; gap: 8px; margin-top: 16px; .el-button { flex: 1; } }
 }
 .backtest-header-right {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
