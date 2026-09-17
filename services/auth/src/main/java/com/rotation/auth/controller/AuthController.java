@@ -65,7 +65,9 @@ public class AuthController {
 
     private void triggerSignalCalculationIfNeeded() {
         String today = LocalDate.now().toString();
-        String flagKey = "signal:calculated:" + today;
+        // 仅用于抑制"登录触发的重复采集/计算"，不能写 signal:calculated:{date}——
+        // 那是调度中心标记"当日任务已完成"的键，登录时预置会让定时任务误判为已计算而跳过
+        String flagKey = "signal:login_trigger:" + today;
 
         if (Boolean.TRUE.equals(redisTemplate.hasKey(flagKey))) {
             return;
@@ -82,7 +84,9 @@ public class AuthController {
             try {
                 String[] strategies = {"AGGRESSIVE", "MODERATE", "CONSERVATIVE"};
                 for (String st : strategies) {
-                    restTemplate.postForObject("http://backend-strategy:8002/calculate?strategy_type=" + st, null, String.class);
+                    // 登录时间不确定（可能盘后/周末），允许回退到最近有数据的交易日；
+                    // 回退时策略引擎会以该交易日作为信号日期，不会用旧数据冒充当日信号
+                    restTemplate.postForObject("http://backend-strategy:8002/calculate?strategy_type=" + st + "&allow_stale=true", null, String.class);
                 }
             } catch (Exception ignored) {
             }
