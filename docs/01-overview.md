@@ -191,8 +191,11 @@ minute_capital_flow  - 分钟级资金流
 
 ```
 token:blacklist:{token}          - Token黑名单 (TTL: 24h)
-signals:{strategy_type}:{date}   - 当日信号缓存 (TTL: 24h)
-sector_capital_flow:latest       - 最新板块数据 (TTL: 1h)
+signals:{strategy_type}:{date}   - 当日信号缓存 (TTL: 7天)
+signals:{strategy_type}:{date}:status - 持仓状态/空仓原因 (TTL: 7天)
+market_regime:{strategy}:{date}  - 当日市场状态 BULL/NEUTRAL/BEAR (TTL: 30天)
+sector_capital_flow:{date}       - 板块日快照缓存 (TTL: 1h，按数据日期分键)
+collecting:{date}                - 当日采集进行中标记 (TTL: 900s，调度防并发)
 strategy:config:{type}           - 策略配置缓存 (TTL: 1h)
 fund:summary:{user_id}           - 账户概览缓存 (TTL: 5min)
 ```
@@ -242,6 +245,13 @@ Nginx作为唯一对外入口(:80)
 服务间通过Docker内网DNS通信（如 backend-strategy:8002）
 数据卷持久化: pg_data, redis_data, influxdb_data, rabbitmq_data
 ```
+
+> **Nginx 上游解析**：`nginx/default.conf` 使用 `resolver 127.0.0.11 valid=10s ipv6=off;`
+> 配合变量式 `proxy_pass`（`set $xxx_upstream http://backend-xxx:PORT; proxy_pass $xxx_upstream;`）。
+> 静态主机名形式的 `proxy_pass` 只在 nginx 启动时解析一次并缓存 IP，后端容器重建后 IP 变化
+> 会导致连接被拒（502，前端表现为"网络错误"），必须重启 nginx 才能恢复；变量式写法会按 `valid`
+> 周期重新解析，后端重建后无需重启 nginx。注意：使用变量后 proxy_pass 不再自动替换 location
+> 前缀，需前缀映射的 location 必须显式 `rewrite`（如 `/api/strategy/` → `/`）。
 
 ### 6.2 生产环境（Kubernetes）
 
