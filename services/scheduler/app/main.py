@@ -2,12 +2,13 @@
 import asyncio
 import httpx
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.jobstores.redis import RedisJobStore
 from apscheduler.triggers.cron import CronTrigger
-from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED
+from apscheduler.triggers.interval import IntervalTrigger
+from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED, EVENT_JOB_MISSED
 from loguru import logger
 
 from .config import settings
@@ -53,6 +54,69 @@ async def _check_and_mark_executed(key: str, ttl: int = 86400) -> bool:
     return False
 
 
+async def _is_executed(key: str) -> bool:
+    """仅查询去重标记是否存在，不做占位写入。
+
+    与 _check_and_mark_executed 的区别：查询类判断（"今日是否已完成"）必须用本方法，
+    否则未真正完成时会被提前预置成"已完成"，导致后续定时/手动触发被误判跳过。
+    """
+    r = await _get_redis_dedup()
+    if r is None:
+        return False
+    try:
+        return bool(await r.exists(key))
+    except Exception as e:
+        logger.warning(f"读取去重标记失败 {key}: {e}")
+        return False
+
+
+async def _clear_executed(key: str) -> None:
+    """撤销去重标记：用于任务未真正完成（如数据未就绪）时释放占位"""
+    r = await _get_redis_dedup()
+    if r is None:
+        return
+    try:
+        await r.delete(key)
+        logger.info(f"Redis 去重标记已撤销: {key}")
+    except Exception as e:
+        logger.warning(f"撤销去重标记失败 {key}: {e}")
+
+
+async def _mark_collecting(date_str: str, ttl: int = 900) -> bool:
+    """标记"当日采集进行中"，返回 True 表示本次成功占位"""
+    r = await _get_redis_dedup()
+    if r is None:
+        return True
+    try:
+        return bool(await r.set(f"collecting:{date_str}", "1", nx=True, ex=ttl))
+    except Exception as e:
+        logger.warning(f"设置采集中标记失败: {e}")
+        return True
+
+
+async def _is_collecting(date_str: str) -> bool:
+    """判断当日是否有采集任务正在进行"""
+    r = await _get_redis_dedup()
+    if r is None:
+        return False
+    try:
+        return bool(await r.exists(f"collecting:{date_str}"))
+    except Exception as e:
+        logger.warning(f"读取采集中标记失败: {e}")
+        return False
+
+
+async def _clear_collecting(date_str: str) -> None:
+    """清除"当日采集进行中"标记"""
+    r = await _get_redis_dedup()
+    if r is None:
+        return
+    try:
+        await r.delete(f"collecting:{date_str}")
+    except Exception as e:
+        logger.warning(f"清除采集中标记失败: {e}")
+
+
 def _is_weekend() -> bool:
     """简单判断今天是否为周末（精确的节假日判断由下游服务负责）"""
     return datetime.now().weekday() >= 5
@@ -93,47 +157,73 @@ async def _is_non_trade_day() -> bool:
 
 
 async def job_collect_data():
-    """定时任务：数据采集（每个交易日15:00执行），采集成功后立即触发策略计算，失败最多重试3次"""
+    """定时任务：数据采集（每个交易日15:00执行），采集成功后立即触发策略计算，失败最多重试3次
+
+    采集期间会打上"采集中"标记：备用触发任务据此让行，避免两者并发导致策略
+    在入库完成前读到 T-1 数据。
+    """
     if await _is_non_trade_day():
         logger.info(">>> 今日非交易日，跳过数据采集")
         return
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    if not await _mark_collecting(today):
+        logger.info(">>> 已有采集任务进行中，跳过本次采集")
+        return
+
     logger.info(">>> 定时任务触发: 数据采集")
+    try:
+        for attempt in range(3):
+            try:
+                async with httpx.AsyncClient(timeout=60) as client:
+                    resp = await client.post(f"{settings.data_collector_url}/collect/sector-flow")
+                    result = resp.json()
+                    logger.info(f"数据采集结果: {result}")
+                    if result.get("code") == 200:
+                        logger.info(">>> 数据采集完成，立即触发策略计算")
+                        calculated = await _trigger_strategy_calculation(client)
+                        if calculated:
+                            await _check_and_mark_executed(f"signal:calculated:{today}")
+                        else:
+                            # 数据虽已采集但策略侧判定未就绪：不标记完成，保留重试机会
+                            logger.error(">>> 策略计算因数据未就绪未完成，不标记今日已计算")
+                        return
+                    else:
+                        logger.warning(f"数据采集返回非200(尝试{attempt+1}/3): {result}")
+            except Exception as e:
+                logger.warning(f"数据采集任务失败(尝试{attempt+1}/3): {e}")
 
-    for attempt in range(3):
-        try:
-            async with httpx.AsyncClient(timeout=60) as client:
-                resp = await client.post(f"{settings.data_collector_url}/collect/sector-flow")
-                result = resp.json()
-                logger.info(f"数据采集结果: {result}")
-                if result.get("code") == 200:
-                    logger.info(">>> 数据采集完成，立即触发策略计算")
-                    await _trigger_strategy_calculation(client)
-                    today = datetime.now().strftime("%Y-%m-%d")
-                    await _check_and_mark_executed(f"signal:calculated:{today}")
-                    return
-                else:
-                    logger.warning(f"数据采集返回非200(尝试{attempt+1}/3): {result}")
-        except Exception as e:
-            logger.warning(f"数据采集任务失败(尝试{attempt+1}/3): {e}")
+            if attempt < 2:
+                wait = 60 * (attempt + 1)  # 60s, 120s
+                logger.info(f"等待{wait}秒后重试数据采集")
+                await asyncio.sleep(wait)
 
-        if attempt < 2:
-            wait = 60 * (attempt + 1)  # 60s, 120s
-            logger.info(f"等待{wait}秒后重试数据采集")
-            await asyncio.sleep(wait)
-
-    logger.error("数据采集任务最终失败(已重试3次)")
+        logger.error("数据采集任务最终失败(已重试3次)")
+    finally:
+        await _clear_collecting(today)
 
 
-async def _trigger_strategy_calculation(client: httpx.AsyncClient):
-    """触发三种策略的轮动信号计算"""
+async def _trigger_strategy_calculation(client: httpx.AsyncClient, allow_stale: bool = False) -> bool:
+    """触发三种策略的轮动信号计算
+
+    Returns:
+        True 表示至少一个策略在"当日数据就绪"的前提下完成计算；
+        全部因数据未就绪而跳过时返回 False，调用方不应标记为已执行。
+    """
+    calculated = False
     for strategy in ["AGGRESSIVE", "MODERATE", "CONSERVATIVE"]:
         try:
             resp = await client.post(
                 f"{settings.strategy_url}/calculate?strategy_type={strategy}"
+                f"&allow_stale={'true' if allow_stale else 'false'}"
             )
-            logger.info(f"策略计算结果 [{strategy}]: {resp.json()}")
+            payload = resp.json()
+            logger.info(f"策略计算结果 [{strategy}]: {payload.get('message')}")
+            if payload.get("data_ready"):
+                calculated = True
         except Exception as e:
             logger.error(f"策略计算失败 [{strategy}]: {e}")
+    return calculated
 
 
 async def job_calculate_strategy():
@@ -142,13 +232,22 @@ async def job_calculate_strategy():
         logger.info(">>> 今日非交易日，跳过策略计算")
         return
     today = datetime.now().strftime("%Y-%m-%d")
+    # 采集进行中时一律让行：采集完成后会链式触发计算，
+    # 此处并发执行会让策略读到入库前的旧数据
+    if await _is_collecting(today):
+        logger.info(">>> 数据采集进行中，跳过备用触发")
+        return
     if not await _check_and_mark_executed(f"signal:calculated:{today}"):
         logger.info(">>> 今日策略已计算，跳过备用触发")
         return
     logger.info(">>> 定时任务触发: 策略计算")
     try:
         async with httpx.AsyncClient(timeout=120) as client:
-            await _trigger_strategy_calculation(client)
+            calculated = await _trigger_strategy_calculation(client)
+            if not calculated:
+                # 数据尚未入库：撤销占位，交由后续采集链路重新触发
+                await _clear_executed(f"signal:calculated:{today}")
+                logger.warning(">>> 当日数据未就绪，已撤销执行标记，等待采集链路触发")
     except Exception as e:
         logger.error(f"策略计算任务失败: {e}")
 
@@ -177,6 +276,66 @@ def _job_error_listener(event):
         )
 
 
+# 每日任务 job_id → 协程函数映射，供 misfire 补偿执行使用
+_RECOVERABLE_JOBS: dict[str, object] = {}
+
+
+def _job_missed_listener(event):
+    """任务错过触发（misfire）监听：告警并尝试当日内补偿执行
+
+    宿主休眠会让容器单调时钟停滞，唤醒后 APScheduler 判定任务已超过
+    misfire_grace_time 而静默丢弃（只发 EVENT_JOB_MISSED，不会执行）。
+    这里把该事件提升为错误日志，并在"仍是当天"时立即补跑，实现自愈。
+    """
+    logger.error(
+        f"定时任务错过触发(misfire): job_id={event.job_id}, "
+        f"scheduled_run_time={event.scheduled_run_time}"
+    )
+    try:
+        asyncio.create_task(_recover_missed_job(event.job_id, event.scheduled_run_time))
+    except RuntimeError as e:
+        logger.error(f"无法调度 misfire 补偿任务: {e}")
+
+
+async def _recover_missed_job(job_id: str, scheduled_run_time) -> None:
+    """补偿执行被 misfire 丢弃的当日任务；跨日任务不补跑，避免重复采集历史数据"""
+    job_func = _RECOVERABLE_JOBS.get(job_id)
+    if job_func is None:
+        return
+    run_date = getattr(scheduled_run_time, "date", lambda: None)()
+    if run_date != datetime.now().date():
+        logger.warning(
+            f"错过任务 {job_id} 的原定时间为 {scheduled_run_time}（非当日），不补跑"
+        )
+        return
+    logger.warning(f">>> 补偿执行错过任务: {job_id} (原定 {scheduled_run_time})")
+    try:
+        await job_func()
+    except Exception as e:
+        logger.error(f"补偿执行错过任务 {job_id} 失败: {e}")
+
+
+WATCHDOG_INTERVAL_SECONDS = 300
+_last_watchdog_tick: datetime | None = None
+
+
+async def _scheduler_watchdog():
+    """定时器漂移看门狗：宿主休眠唤醒后容器单调时钟滞后于墙钟，
+    会让 APScheduler 的等待时长被拉长、任务越过 misfire 窗口被丢弃。
+    看门狗以 5 分钟间隔运行，若两次触发间距远超预期即判定发生时钟漂移并告警。
+    """
+    global _last_watchdog_tick
+    now = datetime.now()
+    if _last_watchdog_tick is not None:
+        gap = (now - _last_watchdog_tick).total_seconds()
+        if gap > WATCHDOG_INTERVAL_SECONDS * 3:
+            logger.error(
+                f"检测到调度器时钟漂移: 看门狗实际间隔 {gap:.0f}s，"
+                f"预期 {WATCHDOG_INTERVAL_SECONDS}s，宿主休眠导致定时器停滞"
+            )
+    _last_watchdog_tick = now
+
+
 def _build_job_store() -> dict:
     """构建 Redis 持久化 job store，失败时回退到内存存储"""
     try:
@@ -196,6 +355,12 @@ def _build_job_store() -> dict:
 
 def setup_scheduler():
     """配置定时任务（持久化到 Redis，重启后任务不丢失）"""
+    _RECOVERABLE_JOBS.update({
+        "collect_data": job_collect_data,
+        "calculate_strategy": job_calculate_strategy,
+        "collect_north_bound": job_collect_north_bound,
+    })
+
     job_stores = _build_job_store()
     scheduler.configure(jobstores=job_stores)
 
@@ -216,10 +381,21 @@ def setup_scheduler():
         id="collect_north_bound", name="北向资金数据采集", replace_existing=True,
         misfire_grace_time=misfire_grace, max_instances=1,
     )
+    # 看门狗：misfire_grace 放大到 24 小时，保证宿主休眠唤醒后必定被触发，
+    # 从而能第一时间记录时钟漂移
+    scheduler.add_job(
+        _scheduler_watchdog, IntervalTrigger(seconds=WATCHDOG_INTERVAL_SECONDS),
+        id="scheduler_watchdog", name="调度器时钟漂移看门狗", replace_existing=True,
+        misfire_grace_time=86400, max_instances=1,
+    )
 
     scheduler.add_listener(_job_error_listener, EVENT_JOB_ERROR)
+    scheduler.add_listener(_job_missed_listener, EVENT_JOB_MISSED)
 
-    logger.info("定时任务配置完成 - 仅限交易日执行 (misfire_grace=3600s, max_instances=1)")
+    logger.info(
+        f"定时任务配置完成 - 仅限交易日执行 "
+        f"(misfire_grace={misfire_grace}s, max_instances=1, watchdog={WATCHDOG_INTERVAL_SECONDS}s)"
+    )
 
 
 async def _run_startup_jobs():
@@ -229,7 +405,7 @@ async def _run_startup_jobs():
     避免重复推送。启动前检查 Redis 去重标记，若今日已执行则跳过。
     """
     today = datetime.now().strftime("%Y-%m-%d")
-    if not await _check_and_mark_executed(f"signal:calculated:{today}"):
+    if await _is_executed(f"signal:calculated:{today}"):
         logger.info(">>> 今日策略已计算，跳过启动任务")
         return
     logger.info(">>> 启动时执行: 数据采集")
@@ -283,30 +459,41 @@ async def health_check():
 async def trigger_collect():
     """手动触发数据采集（后续自动链式触发策略计算）"""
     today = datetime.now().strftime("%Y-%m-%d")
-    if not await _check_and_mark_executed(f"signal:calculated:{today}"):
+    if await _is_executed(f"signal:calculated:{today}"):
         return {"code": 200, "message": "今日策略已计算，跳过重复触发"}
     await job_collect_data()
     return {"code": 200, "message": "数据采集已触发"}
 
 
 @app.post("/trigger/strategy")
-async def trigger_strategy():
-    """手动触发策略计算"""
+async def trigger_strategy(allow_stale: bool = True, force: bool = False):
+    """手动触发策略计算
+
+    Args:
+        allow_stale: 当日无板块数据（含周末/节假日）时，回退到最近有数据的交易日，
+            并以该交易日作为信号日期。手动触发默认开启。
+        force: 忽略"今日已计算"去重标记强制重算；回退场景下一并强制覆盖历史信号
+    """
     today = datetime.now().strftime("%Y-%m-%d")
-    if not await _check_and_mark_executed(f"signal:calculated:{today}"):
-        return {"code": 200, "message": "今日策略已计算，跳过重复触发"}
+    if not force and await _is_executed(f"signal:calculated:{today}"):
+        return {"code": 200, "message": "今日策略已计算，跳过重复触发（force=true 可强制重算）"}
     results = []
     async with httpx.AsyncClient(timeout=120) as client:
         for strategy in ["AGGRESSIVE", "MODERATE", "CONSERVATIVE"]:
             try:
                 resp = await client.post(
                     f"{settings.strategy_url}/calculate?strategy_type={strategy}"
+                    f"&allow_stale={'true' if allow_stale else 'false'}"
+                    f"&force={'true' if force else 'false'}"
                 )
                 data = resp.json()
                 signal_count = len(data.get("data", []))
                 results.append({
                     "strategy": strategy,
                     "signal_count": signal_count,
+                    "signal_date": data.get("signal_date", ""),
+                    "data_ready": data.get("data_ready", False),
+                    "stale": data.get("stale", False),
                     "message": data.get("message", ""),
                 })
                 logger.info(f"策略计算结果 [{strategy}]: {signal_count} 条信号")
@@ -319,9 +506,11 @@ async def trigger_strategy():
                 logger.error(f"策略计算失败 [{strategy}]: {e}")
 
     total_signals = sum(r.get("signal_count", 0) for r in results)
+    ready_dates = sorted({r.get("signal_date", "") for r in results if r.get("data_ready")})
     return {
         "code": 200,
-        "message": f"策略计算完成，共生成 {total_signals} 条信号",
+        "message": f"策略计算完成，共生成 {total_signals} 条信号"
+                   + (f"（信号日期: {', '.join(d for d in ready_dates if d)}）" if ready_dates else ""),
         "data": results,
     }
 
