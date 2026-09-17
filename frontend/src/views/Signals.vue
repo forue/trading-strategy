@@ -40,6 +40,30 @@
         </div>
       </div>
       <el-alert v-if="signalStore.currentSignals.length > 0" :title="`当前有 ${signalStore.currentSignals.length} 条未读信号`" type="warning" :closable="false" show-icon style="margin-bottom: 12px" />
+
+      <el-alert
+        v-if="todayStatus?.position_status === 'EMPTY'"
+        type="info"
+        :closable="false"
+        show-icon
+        style="margin-bottom: 12px"
+      >
+        <template #title>
+          当前空仓（信号日期 {{ todayStatus.signal_date }}<span v-if="todayStatus.stale">，非今日数据</span>）
+        </template>
+        {{ todayStatus.empty_reason || '无板块满足买入条件，保持空仓' }}
+      </el-alert>
+
+      <el-alert
+        v-else-if="todayStatus?.position_status === 'NO_DATA'"
+        type="warning"
+        :closable="false"
+        show-icon
+        style="margin-bottom: 12px"
+        title="今日尚未生成信号"
+      >
+        未查询到信号记录，可点击"触发信号计算"手动生成。
+      </el-alert>
     </div>
 
     <!-- 信号列表 -->
@@ -69,9 +93,10 @@
             <span v-else class="text-muted">--</span>
           </template>
         </el-table-column>
-        <el-table-column prop="direction" label="方向" width="70">
+        <el-table-column prop="direction" label="方向" width="80">
           <template #default="{ row }">
-            <span :class="row.direction === 'BUY' ? 'signal-buy' : 'signal-sell'">
+            <el-tag v-if="isClearSignal(row)" type="warning" size="small">清仓</el-tag>
+            <span v-else :class="row.direction === 'BUY' ? 'signal-buy' : 'signal-sell'">
               {{ row.direction === 'BUY' ? '买入' : '卖出' }}
             </span>
           </template>
@@ -89,7 +114,7 @@
           <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
         </el-table-column>
         <template #empty>
-          <el-empty description="暂无信号数据">
+          <el-empty :description="emptyDescription">
             <el-button type="primary" size="small" @click="triggerCalculate">触发信号计算</el-button>
           </el-empty>
         </template>
@@ -130,6 +155,26 @@ const dateRange = ref<[string, string]>([
 const filterForm = reactive({ strategyType: '', direction: '' })
 const pagination = reactive({ page: 1, size: 20, total: 0 })
 
+// 今日持仓状态：空仓必须显式表达，避免"无信号"被误读为"没计算"
+const todayStatus = ref<{
+  position_status: 'HOLD' | 'EMPTY' | 'NO_DATA'
+  signal_date: string
+  stale: boolean
+  market_regime: string
+  empty_reason: string
+} | null>(null)
+
+async function fetchTodayStatus() {
+  const type = filterForm.strategyType && filterForm.strategyType !== 'ALL'
+    ? filterForm.strategyType
+    : 'MODERATE'
+  try {
+    todayStatus.value = await strategyApi.getTodaySignals(type)
+  } catch {
+    todayStatus.value = null
+  }
+}
+
 const strategyLabelMap: Record<string, string> = { AGGRESSIVE: '激进', MODERATE: '稳健', CONSERVATIVE: '保守' }
 const strategyTagMap: Record<string, string> = { AGGRESSIVE: 'danger', MODERATE: 'warning', CONSERVATIVE: 'success' }
 
@@ -141,6 +186,22 @@ const filteredSignals = computed(() => {
   }
   pagination.total = result.length
   return result
+})
+
+// 清仓信号：卖出且理由含"清仓"（如"市场不景气，空仓清仓"）
+function isClearSignal(sig: any): boolean {
+  return sig?.direction === 'SELL' && String(sig?.reason || '').includes('清仓')
+}
+
+// 空态文案需区分"已计算但空仓"与"尚未计算"
+const emptyDescription = computed(() => {
+  if (todayStatus.value?.position_status === 'EMPTY') {
+    return todayStatus.value.empty_reason || '当前为空仓状态，无持仓信号'
+  }
+  if (todayStatus.value?.position_status === 'NO_DATA') {
+    return '今日尚未生成信号'
+  }
+  return '暂无信号数据'
 })
 
 // Frontend pagination: slice data by current page
@@ -180,6 +241,7 @@ async function fetchSignals() {
       })
     }
     pagination.page = 1 // 重置到第一页
+    await fetchTodayStatus()
   } catch (e: any) {
     ElMessage.error(e?.message || '查询信号失败')
   } finally {

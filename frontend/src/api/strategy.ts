@@ -88,10 +88,27 @@ export const strategyApi = {
     return request.get('/strategy/trade-day/check', { params: { date } })
   },
 
-  calculateSignals(strategyType: string, signalDate?: string): Promise<any[]> {
+  // 手动触发默认开启 allow_stale：周末/节假日或当日数据未入库时，
+  // 自动回退到最近有数据的交易日，并以该交易日作为信号日期（保证信号日期==数据日期）
+  calculateSignals(strategyType: string, signalDate?: string, allowStale = true): Promise<any> {
     return request.post('/strategy/calculate', null, {
-      params: { strategy_type: strategyType, signal_date: signalDate },
+      params: { strategy_type: strategyType, signal_date: signalDate, allow_stale: allowStale },
     })
+  },
+
+  // 今日信号（含持仓状态元信息：空仓/持有/未计算）
+  getTodaySignals(strategyType: string): Promise<{
+    data: any[]
+    signal_date: string
+    stale: boolean
+    position_status: 'HOLD' | 'EMPTY' | 'NO_DATA'
+    market_regime: string
+    empty_reason: string
+  }> {
+    return request.get('/strategy/signals/today', {
+      params: { strategy_type: strategyType },
+      'X-Raw-Response': true,
+    } as any)
   },
 
   getDataAvailability(): Promise<{ has_data: boolean; min_date: string; max_date: string }> {

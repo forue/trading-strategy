@@ -77,11 +77,32 @@
     <!-- Signal Detail Dialog -->
     <el-dialog v-model="signalDialogVisible" :title="`${selectedDate} 信号详情`" width="640px" class="signal-dialog" :style="{ '--dialog-max-h': 'min(75vh, 600px)' }">
       <div class="signal-dialog-body">
+        <!-- 空仓/清仓状态必须显式标注，避免"无信号"被误解为"没计算" -->
+        <el-alert
+          v-if="selectedDateIsEmpty || selectedDateSignals.length === 0"
+          type="info"
+          :closable="false"
+          show-icon
+          style="margin-bottom: 12px"
+          title="该交易日空仓"
+          :description="selectedDateIsEmpty ? selectedDateEmptyReason : '当日未生成任何持仓信号（可能为市场转弱触发空仓，或信号已重新计算）。'"
+        />
+        <el-alert
+          v-else-if="selectedDateIsClear"
+          type="warning"
+          :closable="false"
+          show-icon
+          style="margin-bottom: 12px"
+          title="已清仓"
+          :description="`当日信号为清仓卖出，持仓已全部离场（${selectedDateClearReason}）`"
+        />
+
         <el-table :data="selectedDateSignals" max-height="200">
           <el-table-column prop="sector_name" label="板块" />
           <el-table-column prop="direction" label="方向">
             <template #default="{ row }">
-              <span :class="row.direction === 'BUY' ? 'signal-buy' : 'signal-sell'">
+              <el-tag v-if="isClearSignal(row)" type="warning" size="small">清仓</el-tag>
+              <span v-else :class="row.direction === 'BUY' ? 'signal-buy' : 'signal-sell'">
                 {{ row.direction === 'BUY' ? '买入' : '卖出' }}
               </span>
             </template>
@@ -95,9 +116,23 @@
           </el-table-column>
         </el-table>
 
-        <!-- AI 分析回放 -->
+        <!-- AI 分析回放：信号已清空/清仓时，历史解读必须标注为快照，避免误导 -->
         <div v-if="selectedAnalysis.length > 0" class="analysis-section">
-          <div class="analysis-title">AI 分析回放</div>
+          <div class="analysis-title">
+            AI 分析回放
+            <el-tag v-if="selectedDateStaleAnalysis" type="warning" size="small" style="margin-left: 8px">
+              历史快照
+            </el-tag>
+          </div>
+          <el-alert
+            v-if="selectedDateStaleAnalysis"
+            type="warning"
+            :closable="false"
+            show-icon
+            style="margin-bottom: 8px"
+            :title="(selectedDateSignals.length === 0 || selectedDateIsEmpty) ? '该交易日已空仓，以下为历史分析快照' : '信号已变更，以下为历史分析快照'"
+            description="仅作回顾参考，不可作为当前持仓依据。"
+          />
           <div v-for="(a, idx) in selectedAnalysis" :key="idx" class="analysis-card">
             <div class="analysis-header">
               <span class="analysis-sector">{{ a.sector_name }} ({{ a.direction === 'BUY' ? '买入' : '卖出' }})</span>
@@ -111,7 +146,7 @@
           </div>
         </div>
         <div v-else-if="analysisLoading" class="analysis-empty">加载AI分析中...</div>
-        <div v-else-if="selectedDateSignals.length > 0" class="analysis-empty">该日期暂无AI分析记录</div>
+        <div v-else-if="selectedDateSignals.length > 0 || selectedDateIsEmpty" class="analysis-empty">该日期暂无AI分析记录</div>
       </div>
     </el-dialog>
   </div>
@@ -279,14 +314,25 @@ async function loadHeatmapData() {
 watch(heatmapPeriod, () => loadHeatmapData())
 
 const calendarRealData = ref<any[]>([])
+
+// 空仓标记：后端 /signals/calendar 对"已计算但空仓"的日期输出
+// direction=EMPTY / is_empty_position=true 的标记记录
+function isEmptyPositionSignal(sig: any): boolean {
+  return sig?.is_empty_position === true || sig?.direction === 'EMPTY'
+}
+
 const calendarOption = computed(() => {
   const dateSignalsMap: Record<string, any[]> = {}
+  const emptyDateMap: Record<string, string> = {}
   for (const sig of calendarRealData.value) {
     const d = sig.signal_date || sig.created_at?.substring(0, 10)
-    if (d) {
-      if (!dateSignalsMap[d]) dateSignalsMap[d] = []
-      dateSignalsMap[d].push(sig)
+    if (!d) continue
+    if (isEmptyPositionSignal(sig)) {
+      emptyDateMap[d] = String(sig.reason || '当日空仓，无持仓信号')
+      continue
     }
+    if (!dateSignalsMap[d]) dateSignalsMap[d] = []
+    dateSignalsMap[d].push(sig)
   }
   const calData = Object.entries(dateSignalsMap).map(([date, signals]) => [date, signals.length])
   const start = dayjs(calendarMonth.value + '-01')
@@ -294,6 +340,7 @@ const calendarOption = computed(() => {
   const filledData: any[] = []
   for (let i = 1; i <= daysInMonth; i++) {
     const d = start.date(i).format('YYYY-MM-DD')
+    if (emptyDateMap[d]) continue // 空仓日由下方独立蓝色系列渲染
     const existing = calData.find(item => item[0] === d)
     if (existing) filledData.push(existing)
     else if (dayjs(d).isBefore(dayjs()) || dayjs(d).isSame(dayjs(), 'day')) filledData.push([d, 0])
@@ -302,11 +349,16 @@ const calendarOption = computed(() => {
   const calTextColor = isDark ? '#9da1b0' : '#5a5f6e'
   const calBorderColor = isDark ? '#2a2d38' : '#dcdee0'
   const calEmptyColor = isDark ? '#1e2130' : '#f5f5f5'
+  const calEmptyPositionColor = isDark ? '#2b4a7d' : '#a0cfff'
+  const emptyDates = Object.keys(emptyDateMap)
   return {
     tooltip: {
       formatter: (p: any) => {
         const date = p.data[0]
         const count = p.data[1]
+        if (emptyDateMap[date]) {
+          return `${date}: 空仓<br/>${emptyDateMap[date]}`
+        }
         if (count > 0 && dateSignalsMap[date]) {
           const signals = dateSignalsMap[date]
           const details = signals.slice(0, 5).map((s: any) =>
@@ -319,6 +371,8 @@ const calendarOption = computed(() => {
       },
     },
     visualMap: {
+      // 仅作用于真实的信号数量系列，空仓标记系列不参与着色
+      seriesIndex: 0,
       min: 0, max: 10, orient: 'horizontal', bottom: 0,
       inRange: { color: [calEmptyColor, '#9be9a8', '#40c463', '#30a14e', '#216e39'] },
       textStyle: { color: calTextColor },
@@ -332,28 +386,70 @@ const calendarOption = computed(() => {
       dayLabel: { firstDay: 1, nameMap: 'cn', color: calTextColor },
       monthLabel: { nameMap: 'cn', color: calTextColor },
     },
-    series: [{
-      type: 'heatmap',
-      coordinateSystem: 'calendar',
-      data: filledData,
-    }],
+    series: [
+      {
+        type: 'heatmap',
+        coordinateSystem: 'calendar',
+        data: filledData,
+      },
+      {
+        // 空仓日：固定蓝色，区别于"未计算/无数据"的灰色底
+        type: 'heatmap',
+        coordinateSystem: 'calendar',
+        data: emptyDates.map(d => [d, 0]),
+        itemStyle: {
+          color: calEmptyPositionColor,
+          borderWidth: 1,
+          borderColor: calBorderColor,
+        },
+      },
+    ],
   }
 })
 
 const signalDialogVisible = ref(false)
 const selectedDate = ref('')
 const selectedDateSignals = ref<any[]>([])
+const selectedDateEmptyReason = ref('')
 const selectedAnalysis = ref<any[]>([])
 const analysisLoading = ref(false)
+
+// 清仓信号：卖出且理由含"清仓"（如"市场不景气，空仓清仓"）
+function isClearSignal(sig: any): boolean {
+  return sig?.direction === 'SELL' && String(sig?.reason || '').includes('清仓')
+}
+
+// 当日是否为空仓日（后端标记记录，symbol: direction=EMPTY / is_empty_position=true）
+const selectedDateIsEmpty = computed(() => selectedDateEmptyReason.value !== '')
+
+// 当日信号是否全部为清仓
+const selectedDateIsClear = computed(
+  () => selectedDateSignals.value.length > 0 && selectedDateSignals.value.every(isClearSignal)
+)
+const selectedDateClearReason = computed(() => {
+  const first = selectedDateSignals.value.find(isClearSignal)
+  return String(first?.reason || '').replace(/^[^:]*:\s*/, '')
+})
+// 是否处于"有历史AI分析，但信号已清空、空仓或已清仓"的状态
+const selectedDateStaleAnalysis = computed(
+  () => selectedAnalysis.value.length > 0
+    && (selectedDateSignals.value.length === 0 || selectedDateIsEmpty.value || selectedDateIsClear.value)
+)
 
 async function handleCalendarClick(params: any) {
   if (params.data) {
     const date = params.data[0]
     selectedDate.value = date
-    selectedDateSignals.value = calendarRealData.value.filter((sig: any) => {
+    const dayRecords = calendarRealData.value.filter((sig: any) => {
       const d = sig.signal_date || sig.created_at?.substring(0, 10)
       return d === date
     })
+    // 空仓标记单独提取，避免作为一条"信号"出现在明细表中
+    const emptyMarker = dayRecords.find(isEmptyPositionSignal)
+    selectedDateEmptyReason.value = emptyMarker
+      ? String(emptyMarker.reason || '当日空仓，无持仓信号')
+      : ''
+    selectedDateSignals.value = dayRecords.filter((sig: any) => !isEmptyPositionSignal(sig))
     // 获取AI分析
     analysisLoading.value = true
     selectedAnalysis.value = []

@@ -24,6 +24,10 @@ request.interceptors.response.use(
   (response) => {
     const { code, message, data } = response.data
     if (code === 200 || code === 0) {
+      // 需要读取 data 之外的元信息（如 position_status）时，请求可声明 X-Raw-Response
+      if ((response.config as any)?.['X-Raw-Response']) {
+        return response.data
+      }
       return data
     }
     if (!response.config?.headers?.['X-Silent']) {
