@@ -181,16 +181,34 @@ async def _fetch_signals_from_signal_service(strategy_type: str, signal_date: st
 
 
 async def _handle_signals(message: dict):
-    """处理策略信号"""
-    if not analyzer:
-        logger.warning("LLM 未初始化，跳过信号解读")
-        return
+    """处理策略信号
 
+    每次信号（重新）生成都会先作废该日期的旧 AI 分析，再决定是否解读：
+    信号被重算/清空时，旧的解读必须失效，否则日历回放会展示过期结论。
+    """
     signals = message.get("signals", [])
     strategy_type = message.get("strategy_type", "")
     signal_date = message.get("signal_date", "")
 
+    if not signal_date:
+        logger.warning("信号事件缺少 signal_date，跳过解读")
+        return
+
+    # 无论本次是否有信号，先作废该日期的旧 AI 分析。
+    # 否则信号被重算/清空（如改为空仓、清仓）后，日历回放仍会展示过期的历史解读。
+    cache_key = f"ai:analysis:{strategy_type}:{signal_date}"
+    try:
+        if redis_mgr.delete(cache_key):
+            logger.info(f"已清除过期AI分析: {cache_key}（信号已重新生成）")
+    except Exception as e:
+        logger.warning(f"清除过期AI分析失败: {e}")
+
     if not signals:
+        logger.info(f"{signal_date} 本次无信号（空仓/清仓），不生成AI分析")
+        return
+
+    if not analyzer:
+        logger.warning("LLM 未初始化，跳过信号解读")
         return
 
     logger.info(f"开始解读 {len(signals)} 个信号: strategy={strategy_type}")
