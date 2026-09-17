@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     wecom_enabled: bool = False
     wecom_webhook_url: str = ""
 
+    # AI 分析随信号推送：生成信号后等待 AI 解读完成再合并推送（超时则降级为无AI推送）
+    ai_push_enabled: bool = True
+    ai_push_wait_seconds: int = 120
+
     # Service
     service_port: int = 8004
 

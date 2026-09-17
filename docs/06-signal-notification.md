@@ -1,6 +1,6 @@
 # 信号通知服务设计文档
 
-> 版本: v1.1 | 更新日期: 2026-04-19 | 更新内容: 优化消息模板，添加配置持久化
+> 版本: v1.2 | 更新日期: 2026-09-12 | 更新内容: 外部推送等待 AI 解读合并后再发送（超时降级），空仓信号显式推送
 
 ---
 
@@ -147,40 +147,52 @@ class ConnectionManager:
 Exchange: rotation (topic, durable)
 Queue: signal_notification (durable)
 Routing Key: signal.#   (匹配 signal.generated 等)
+
+Queue: signal_notification_ai (durable，AI解读结果)
+Routing Key: ai.#   (匹配 ai.signal.analyzed)
 ```
 
 ### 4.2 消息处理流程
 
+信号到达后 **WebSocket 广播与 Redis 缓存立即执行**，外部推送（钉钉/企业微信）则
+等待 AI 解读完成后合并推送，确保用户收到的消息自带分析结论。
+
 ```python
-def callback(ch, method, properties, body):
-    message = json.loads(body)
-    event = message.get("event")
+if event == "signals_generated":
+    # 1. WebSocket广播 + 缓存信号（不等待AI，保证前端及时可见）
+    _broadcast_and_cache(signals, strategy_type, signal_date)
 
-    if event == "signals_generated":
-        signals = message["signals"]
-        strategy_type = message["strategy_type"]
-        signal_date = message.get("signal_date", datetime.now().strftime("%Y-%m-%d"))
+    # 2. 外部推送：有买卖信号且 ai_push_enabled 时暂存，等AI解读合并后推送
+    if settings.ai_push_enabled and _has_trade_signal(signals):
+        _pending_push[f"{strategy_type}:{signal_date}"] = {...}
+    else:
+        _do_push(signals, strategy_type, signal_date)
 
-        # 1. 通过WebSocket广播信号（在主事件循环上执行）
-        for signal in signals:
-            asyncio.run_coroutine_threadsafe(
-                ws_manager.broadcast_signal(signal, strategy_type), _main_loop
-            )
-
-        # 2. 外部推送通道（钉钉、企业微信）
-        asyncio.run_coroutine_threadsafe(
-            notify_manager.push_signal(signals, strategy_type, signal_date), _main_loop
-        )
-
-        # 3. 缓存信号到Redis
-        redis_mgr.setex(
-            f"signals:{strategy_type}:{signal_date}",
-            86400 * 7,  # 7天过期
-            json.dumps(signals)
-        )
+# AI解读到达（ai.signal.analyzed）
+if event == "signal_analyzed":
+    pending = _pending_push.pop(f"{strategy_type}:{signal_date}", None)
+    if pending:
+        _do_push(pending.signals, strategy_type, signal_date, ai_analyses=analyses)
 ```
 
+#### 4.2.1 AI 分析随推送（必选能力）
+
+> 要求：推送到钉钉/企业微信等渠道的消息必须包含 AI 分析，供用户决策参考。
+
+- 等待窗口：`ai_push_wait_seconds`（默认 120s），超时未收到解读则**降级推送**
+  （不含 AI 分析）并告警，避免信号被无限期推迟
+- 空仓/无买卖信号：无需等待 AI，直接推送"今日无信号/空仓"通知
+  （`push_signal` 不再因 `signals` 为空而静默返回）
+- 消息中的 AI 段落由 `_build_ai_section()` 统一生成，包含：
+  板块、方向、信心度、解读要点（截断 200 字）、风险提示、操作建议、解读模型
+
 ### 4.3 后台线程
+
+除 RabbitMQ 消费者外，另启动两个守护线程：
+- `start_ai_consumer`：消费 `ai.#`，将 AI 解读与暂存信号合并推送
+- `start_pending_watchdog`：每 15s 扫描暂存队列，处理超时降级推送
+
+### 4.4 消费者线程模型
 
 ```python
 # 在FastAPI启动时，后台线程运行RabbitMQ消费者
@@ -188,7 +200,8 @@ mq_thread = threading.Thread(target=start_rabbitmq_consumer, daemon=True)
 mq_thread.start()
 ```
 
-使用daemon线程确保FastAPI退出时消费者线程自动终止。
+使用daemon线程确保FastAPI退出时消费者线程自动终止。signal / ai 两个消费者与
+watchdog 均由 daemon 线程驱动，随 FastAPI 进程退出自动终止。
 
 ---
 
@@ -234,9 +247,31 @@ GET /signals/calendar?strategy_type=AGGRESSIVE&month=2026-04
 
 逻辑:
   1. 计算月份起止日期
-  2. 调用历史信号查询
-  3. 返回当月所有信号
+  2. 逐日读取信号缓存 signals:{type}:{date} 与状态缓存 signals:{type}:{date}:status
+  3. 返回当月所有信号；对"已计算但空仓"的日期额外输出空仓标记
 ```
+
+**空仓标记**：某交易日已计算但无持仓信号时，额外输出一条标记记录（`sector_name="空仓"`），
+供前端日历以独立颜色区分"空仓"与"未计算/无数据"：
+
+```json
+{
+  "signal_date": "2026-09-11",
+  "strategy_type": "CONSERVATIVE",
+  "sector_name": "空仓",
+  "direction": "EMPTY",
+  "position_ratio": 0.0,
+  "score": 0.0,
+  "is_empty_position": true,
+  "reason": "市场判定熊市，空仓观望（上涨板块占比6%, 平均涨跌-2.04%）"
+}
+```
+
+判定说明：
+- 空仓日的信号缓存是空列表 `"[]"`（键存在）而非缺失，因此**不能**用 `if cached:` 判断"是否有信号"，
+  否则空仓标记会被短路而永不输出；须先反序列化再判断列表是否为空
+- 既无信号缓存也无 `:status` 缓存 → 视为"未计算/无数据"，不输出标记
+- 前端识别规则：`sig.is_empty_position === true || sig.direction === 'EMPTY'`
 
 ### 5.4 推送通道配置
 
@@ -374,6 +409,13 @@ function connectWebSocket() {
     📊 综合评分: 4.1/10
     ⚠️ 卖出理由: 技术面破位，MACD死叉...
 
+🤖 AI 解读（仅供参考）
+  科技（买入） 信心度 78%
+  - 解读: 动量与资金流共振，短期趋势明确...
+  - 风险: 估值分位偏高；成交量回落
+  - 建议: 分批建仓，控制单板块仓位
+  > 解读模型: deepseek-chat
+
 📋 信号统计
 - 买入信号: 2 个
 - 卖出信号: 1 个
@@ -426,7 +468,14 @@ POST /signals/notify/test/{channel}
 3. 服务重启时自动从Redis加载配置
 4. 后续服务重建不会丢失配置（除非Redis被清空）
 
-### 8.2 推送策略
+### 8.4 推送策略
+
+环境变量（signal-notification）：
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `AI_PUSH_ENABLED` | `true` | 是否等待 AI 解读合并推送 |
+| `AI_PUSH_WAIT_SECONDS` | `120` | 等待 AI 解读的最长时间，超时降级为无 AI 推送 |
 
 ```
 信号优先级:

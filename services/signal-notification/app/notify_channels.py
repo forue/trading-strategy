@@ -6,6 +6,46 @@ from loguru import logger
 from typing import Optional
 
 
+def _build_ai_section(ai_analyses: list[dict] = None) -> list[str]:
+    """构建 AI 解读段落（钉钉/企业微信共用）
+
+    每条解读包含：板块、方向、信心度、解读要点、风险提示、操作建议。
+    无解读时返回空列表（调用方无需关心是否启用 AI）。
+    """
+    if not ai_analyses:
+        return []
+
+    parts = ["### 🤖 AI 解读（仅供参考）\n"]
+    for a in ai_analyses:
+        name = a.get("sector_name") or a.get("sector_code") or "未知板块"
+        direction_cn = "买入" if a.get("direction") == "BUY" else "卖出"
+        confidence = a.get("confidence", 0) or 0
+        parts.append(
+            f"**{name}（{direction_cn}）** 信心度 **{confidence * 100:.0f}%**\n"
+        )
+
+        interpretation = (a.get("interpretation") or "").strip()
+        if interpretation:
+            # 单条过长会破坏 Markdown 排版，截断到 200 字
+            parts.append(f"- 解读: {interpretation[:200]}{'...' if len(interpretation) > 200 else ''}\n")
+
+        risks = [r for r in (a.get("risk_factors") or []) if r]
+        if risks:
+            parts.append(f"- 风险: {'；'.join(str(r) for r in risks[:3])}\n")
+
+        suggestion = (a.get("suggestion") or "").strip()
+        if suggestion:
+            parts.append(f"- 建议: {suggestion[:150]}{'...' if len(suggestion) > 150 else ''}\n")
+
+        parts.append("\n")
+
+    model = ai_analyses[0].get("model") if ai_analyses else ""
+    if model:
+        parts.append(f"> 解读模型: {model}\n")
+
+    return parts
+
+
 class DingTalkChannel:
     """钉钉机器人 Webhook 推送通道"""
 
@@ -14,7 +54,7 @@ class DingTalkChannel:
         self.secret = secret
         self.enabled = enabled
 
-    async def send(self, signals: list[dict], strategy_type: str, signal_date: str, is_test: bool = False):
+    async def send(self, signals: list[dict], strategy_type: str, signal_date: str, is_test: bool = False, ai_analyses: list[dict] = None):
         """发送信号到钉钉群"""
         if not self.enabled or not self.webhook_url:
             return
@@ -77,6 +117,9 @@ class DingTalkChannel:
                 text_parts.append("### ⏸️ 今日无信号\n")
                 text_parts.append("当前市场条件未触发交易信号，建议保持现有持仓或空仓观望。\n")
 
+            # AI 解读（随信号一并推送，供决策参考）
+            text_parts.extend(_build_ai_section(ai_analyses))
+
             # 添加统计摘要
             total_signals = len(buy_signals) + len(sell_signals)
             text_parts.append(f"\n**📋 信号统计**\n")
@@ -138,7 +181,7 @@ class WeComChannel:
         self.webhook_url = webhook_url
         self.enabled = enabled
 
-    async def send(self, signals: list[dict], strategy_type: str, signal_date: str, is_test: bool = False):
+    async def send(self, signals: list[dict], strategy_type: str, signal_date: str, is_test: bool = False, ai_analyses: list[dict] = None):
         """发送信号到企业微信群"""
         if not self.enabled or not self.webhook_url:
             return
@@ -200,6 +243,9 @@ class WeComChannel:
             if not buy_signals and not sell_signals:
                 content_parts.append("### ⏸️ 今日无信号\n")
                 content_parts.append("当前市场条件未触发交易信号，建议保持现有持仓或空仓观望。\n")
+
+            # AI 解读（随信号一并推送，供决策参考）
+            content_parts.extend(_build_ai_section(ai_analyses))
 
             # 添加统计摘要
             total_signals = len(buy_signals) + len(sell_signals)
@@ -273,19 +319,17 @@ class NotifyChannelManager:
             },
         }
 
-    async def push_signal(self, signals: list[dict], strategy_type: str, signal_date: str, is_test: bool = False):
-        """向所有已启用的通道推送信号"""
-        if not signals:
-            return
+    async def push_signal(self, signals: list[dict], strategy_type: str, signal_date: str, is_test: bool = False, ai_analyses: list[dict] = None):
+        """向所有已启用的通道推送信号
 
-        # 检查策略类型是否在推送范围内
-        # 由调用方过滤
-
+        空 signals 同样推送：此时代表"已计算但为空仓/无交易"，是需要让用户知晓的状态，
+        通道侧会渲染为"今日无信号"。数据未就绪的场景由策略引擎侧拦截，不会发布事件。
+        """
         if self.dingtalk.enabled:
-            await self.dingtalk.send(signals, strategy_type, signal_date, is_test=is_test)
+            await self.dingtalk.send(signals, strategy_type, signal_date, is_test=is_test, ai_analyses=ai_analyses)
 
         if self.wecom.enabled:
-            await self.wecom.send(signals, strategy_type, signal_date, is_test=is_test)
+            await self.wecom.send(signals, strategy_type, signal_date, is_test=is_test, ai_analyses=ai_analyses)
 
         logger.info(f"外部推送完成: strategy={strategy_type}, 钉钉={'✓' if self.dingtalk.enabled else '✗'}, 企业微信={'✓' if self.wecom.enabled else '✗'}")
 

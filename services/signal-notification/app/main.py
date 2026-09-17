@@ -56,6 +56,10 @@ async def startup_event():
     global _mq_thread
     _mq_thread = threading.Thread(target=start_rabbitmq_consumer, daemon=True)
     _mq_thread.start()
+    # AI解读结果消费者（合并AI分析后推送）
+    threading.Thread(target=start_ai_consumer, daemon=True).start()
+    # 待推送超时兜底
+    threading.Thread(target=start_pending_watchdog, daemon=True).start()
     logger.info("信号通知服务启动完成")
 
 
@@ -101,6 +105,52 @@ def _save_notify_config_to_redis(config: dict):
         logger.error(f"保存推送通道配置到Redis失败: {e}")
 
 
+# 等待 AI 解读的待推送消息：{f"{strategy}:{date}": {payload, created_at}}
+_pending_push: dict[str, dict] = {}
+_pending_lock = threading.Lock()
+
+
+def _pending_key(strategy_type: str, signal_date: str) -> str:
+    return f"{strategy_type}:{signal_date}"
+
+
+def _broadcast_and_cache(signals: list, strategy_type: str, signal_date: str):
+    """WebSocket广播 + 信号缓存（与是否含AI分析无关，始终立即执行）"""
+    if _main_loop and not _main_loop.is_closed():
+        future = asyncio.run_coroutine_threadsafe(
+            ws_manager.broadcast_signals(signals, strategy_type), _main_loop
+        )
+        try:
+            future.result(timeout=5)
+        except Exception as e:
+            logger.error(f"WebSocket广播失败: {e}")
+
+    redis_mgr.setex(
+        f"signals:{strategy_type}:{signal_date}",
+        86400 * 7,
+        json.dumps(signals, ensure_ascii=False),
+    )
+
+
+def _do_push(signals: list, strategy_type: str, signal_date: str, ai_analyses: list = None):
+    """执行外部推送（钉钉/企业微信），可携带 AI 解读"""
+    try:
+        if _main_loop and not _main_loop.is_closed():
+            future = asyncio.run_coroutine_threadsafe(
+                notify_manager.push_signal(
+                    signals, strategy_type, signal_date, ai_analyses=ai_analyses
+                ),
+                _main_loop,
+            )
+            future.result(timeout=15)
+    except Exception as e:
+        logger.error(f"外部推送失败: {e}")
+
+
+def _has_trade_signal(signals: list) -> bool:
+    return any(s.get("direction") in ("BUY", "SELL") for s in signals or [])
+
+
 def start_rabbitmq_consumer():
     """启动RabbitMQ消费者，监听策略信号"""
     def callback(ch, method, properties, body):
@@ -114,33 +164,25 @@ def start_rabbitmq_consumer():
                 strategy_type = message.get("strategy_type", "")
                 signal_date = message.get("signal_date", datetime.now().strftime("%Y-%m-%d"))
 
-                # 1. 通过WebSocket批量推送（一次发送该策略全部信号，避免逐条弹窗）
-                if _main_loop and not _main_loop.is_closed():
-                    future = asyncio.run_coroutine_threadsafe(
-                        ws_manager.broadcast_signals(signals, strategy_type), _main_loop
+                # 1. WebSocket广播 + 缓存信号（不等待AI，保证前端及时可见）
+                _broadcast_and_cache(signals, strategy_type, signal_date)
+
+                # 2. 外部推送：有买卖信号且开启AI推送时，等待AI解读合并后再推送
+                if settings.ai_push_enabled and _has_trade_signal(signals):
+                    with _pending_lock:
+                        _pending_push[_pending_key(strategy_type, signal_date)] = {
+                            "signals": signals,
+                            "strategy_type": strategy_type,
+                            "signal_date": signal_date,
+                            "created_at": datetime.now().timestamp(),
+                        }
+                    logger.info(
+                        f"信号已暂存，等待AI解读后合并推送 "
+                        f"(最多等待{settings.ai_push_wait_seconds}s): {strategy_type} {signal_date}"
                     )
-                    try:
-                        future.result(timeout=5)
-                    except Exception as e:
-                        logger.error(f"WebSocket广播失败: {e}")
-
-                # 2. 外部推送通道（钉钉、企业微信）
-                try:
-                    if _main_loop and not _main_loop.is_closed():
-                        future = asyncio.run_coroutine_threadsafe(
-                            notify_manager.push_signal(signals, strategy_type, signal_date), _main_loop
-                        )
-                        future.result(timeout=10)
-                except Exception as e:
-                    logger.error(f"外部推送失败: {e}")
-
-                # 3. 缓存信号到Redis
-                redis_mgr.setex(
-                    f"signals:{strategy_type}:{signal_date}",
-                    86400 * 7,
-                    json.dumps(signals, ensure_ascii=False),
-                )
-                logger.info(f"信号处理完成: {len(signals)}条, strategy={strategy_type}")
+                else:
+                    _do_push(signals, strategy_type, signal_date)
+                    logger.info(f"信号处理完成: {len(signals)}条, strategy={strategy_type}")
 
         except Exception as e:
             logger.error(f"消息处理失败: {e}")
@@ -153,6 +195,66 @@ def start_rabbitmq_consumer():
         )
     except Exception as e:
         logger.error(f"RabbitMQ消费者启动失败: {e}")
+
+
+def start_ai_consumer():
+    """启动AI解读结果消费者：收到解读后与暂存的信号合并推送"""
+    def callback(ch, method, properties, body):
+        try:
+            message = json.loads(body)
+            if message.get("event") != "signal_analyzed":
+                return
+
+            strategy_type = message.get("strategy_type", "")
+            signal_date = message.get("signal_date", "")
+            analyses = message.get("analyses", [])
+            key = _pending_key(strategy_type, signal_date)
+
+            with _pending_lock:
+                pending = _pending_push.pop(key, None)
+
+            if not pending:
+                logger.debug(f"无待推送信号与AI解读匹配: {key}")
+                return
+
+            logger.info(f"收到AI解读，合并推送: {key} ({len(analyses)}条解读)")
+            _do_push(
+                pending["signals"], strategy_type, signal_date, ai_analyses=analyses
+            )
+        except Exception as e:
+            logger.error(f"AI解读消息处理失败: {e}")
+
+    try:
+        rmq.consume(
+            queue="signal_notification_ai",
+            callback=callback,
+            routing_key="ai.#",
+        )
+    except Exception as e:
+        logger.error(f"AI解读消费者启动失败: {e}")
+
+
+def start_pending_watchdog():
+    """超时兜底：AI解读迟迟未到时，降级为不含AI分析的推送，避免信号被无限期推迟"""
+    import time as _time
+
+    while True:
+        _time.sleep(15)
+        try:
+            now = datetime.now().timestamp()
+            expired = []
+            with _pending_lock:
+                for key, item in list(_pending_push.items()):
+                    if now - item["created_at"] >= settings.ai_push_wait_seconds:
+                        expired.append(_pending_push.pop(key))
+            for item in expired:
+                logger.warning(
+                    f"等待AI解读超时({settings.ai_push_wait_seconds}s)，降级推送: "
+                    f"{item['strategy_type']} {item['signal_date']}"
+                )
+                _do_push(item["signals"], item["strategy_type"], item["signal_date"])
+        except Exception as e:
+            logger.error(f"待推送超时检查失败: {e}")
 
 
 @app.get("/health")
@@ -341,13 +443,68 @@ async def get_signal_history(strategy_type: str, start_date: str, end_date: str)
 
 @app.get("/signals/calendar")
 async def get_signal_calendar(strategy_type: str, month: str):
-    """获取信号日历数据"""
+    """获取信号日历数据
+
+    除真实信号外，还需为"已计算但空仓"的日期输出空仓标记
+    （direction=EMPTY / is_empty_position=True），供前端日历用独立颜色区分
+    "空仓"与"未计算/无数据"。
+
+    注意：已计算但空仓的日期，信号缓存是空列表 "[]"（键存在）而非不存在，
+    因此不能用 `if cached:` 判断"是否有信号"，否则空仓标记会被短路而永远不输出。
+    """
     import calendar
-    start = f"{month}-01"
+    from datetime import timedelta
+
     year, m = month.split("-")
     last_day = calendar.monthrange(int(year), int(m))[1]
-    end = f"{month}-{last_day:02d}"
-    return await get_signal_history(strategy_type, start, end)
+
+    signals: list = []
+    current = datetime(int(year), int(m), 1)
+    for _ in range(last_day):
+        date_str = current.strftime("%Y-%m-%d")
+        current += timedelta(days=1)
+
+        key = f"signals:{strategy_type}:{date_str}"
+        cached = redis_mgr.get(key)
+        day_signals: list = []
+        if cached:
+            try:
+                day_signals = json.loads(cached) or []
+            except (json.JSONDecodeError, TypeError):
+                day_signals = []
+        if day_signals:
+            for sig in day_signals:
+                sig["signal_date"] = date_str
+            signals.extend(day_signals)
+            continue
+
+        raw_status = redis_mgr.get(f"{key}:status")
+        if cached is None and not raw_status:
+            # 既无信号缓存也无状态缓存 → 未计算/无数据，不输出标记
+            continue
+
+        status = {}
+        if raw_status:
+            try:
+                status = json.loads(raw_status) or {}
+            except (json.JSONDecodeError, TypeError):
+                status = {}
+        if status.get("position_status", "EMPTY") != "EMPTY":
+            continue
+
+        signals.append({
+            "signal_date": date_str,
+            "strategy_type": strategy_type,
+            "sector_code": "",
+            "sector_name": "空仓",
+            "direction": "EMPTY",
+            "position_ratio": 0.0,
+            "score": 0.0,
+            "reason": status.get("empty_reason") or "当日空仓，无持仓信号",
+            "is_empty_position": True,
+            "market_regime": status.get("market_regime", ""),
+        })
+    return {"code": 200, "data": signals}
 
 
 if __name__ == "__main__":
