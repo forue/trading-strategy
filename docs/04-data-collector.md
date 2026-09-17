@@ -1,6 +1,6 @@
 # 数据采集服务设计文档
 
-> 版本: v1.1 | 更新日期: 2026-05-12 | 更新: InfluxDB字段保护、北向资金API切换、历史回填
+> 版本: v1.2 | 更新日期: 2026-09-16 | 更新: 历史资金流回填重试与熔断、限流中断感知返回、外部接口调用情况实测
 
 ---
 
@@ -66,16 +66,33 @@
 | 板块资金流(日频) | `stock_board_industry_summary_ths()` | 每日1次 | 同花顺行业板块概要，含主力净流入 |
 | 北向资金 | `stock_hsgt_fund_flow_summary_em()` | 每日1次 | 沪深股通资金流向汇总，沪股通+深股通北向净买额 |
 | 行业K线 | `stock_board_industry_index_ths()` | 每日1次 | 同花顺行业板块日K线(OHLCV) |
-| 板块估值 | `stock_board_industry_cons_em()` | 按需 | 东方财富行业成分股PE/PB，聚合为板块加权估值 |
+| 板块估值 | 复用 `stock_board_industry_summary_ths()` 的市盈率/市净率字段 | 每日1次 | 同花顺行业概要自带板块PE/PB，无需再调东财成分股接口 |
 
 ### 3.2 历史资金流回填
 
 由于 `push2.eastmoney.com` 系列API可能被IP封禁，系统使用以下降级策略:
 
 1. 从 `data.eastmoney.com/bkzj/hy.html` 网页抓取东方财富板块代码(BKxxxx)映射
-2. 直接调用 `push2his.eastmoney.com` 数据接口(非push2域名，通常未被封)
+2. 直接调用 `push2his.eastmoney.com` 数据接口（与 push2 不同域名，抗封能力相对更强，但同属东财，仍可能被出口 IP 级封禁）
 3. 串行请求，间隔2秒，避免触发反爬
 4. 回填结果通过 `_merge_with_existing_data()` 与已有数据双向合并
+
+**重试与熔断（2026-09-16 新增）**：单个板块最多重试 3 次（退避 3s/6s）；若连续 5 个板块
+全部失败，判定为数据源已对该出口 IP 限流/封禁，**立即终止**本次回填并在日志中给出
+"已尝试 N/总数、成功 M"的结论——继续重试只会加重封禁。
+
+`backfill_sector_fund_flow_hist()` 返回结构化结果，便于调用方感知缺口：
+
+```python
+{"count": 写入条数, "success": 成功板块数, "failed": 失败板块数,
+ "total_sectors": 待回填板块数, "aborted": 是否因连续失败提前终止}
+```
+
+`aborted=True` 时 `/collect/backfill-fund-flow` 返回 `code=500` 而非 200，避免调用方把
+"被限流的残缺回填"误当成成功（2026-09-16 实测：出口 IP 被封时 0/77 个板块成功）。
+
+> 已知限制：`push2his.eastmoney.com` 的封禁是出口 IP 级、时效性的，与代码无关，需等限流解除后重试。
+> 同域名的延迟行情节点 `push2delay.eastmoney.com` 未受阻，但仅提供**当日**数据，无法用于历史回填。
 
 ### 3.3 板块代码映射
 
@@ -94,6 +111,38 @@ SECTOR_CODES = {
 }
 # 共28个申万一级行业
 ```
+
+### 3.4 外部接口调用情况（2026-09-16 实测）
+
+容器出口 IP 下逐接口实测（akshare 1.18.55）：
+
+| # | 接口 | 数据源 | 用途 | 调用情况 |
+|---|------|--------|------|---------|
+| 1 | `ak.stock_board_industry_name_ths()` | 同花顺 | 板块列表 | 正常，90×2，0.2s |
+| 2 | `ak.stock_board_industry_summary_ths()` | 同花顺 | 板块资金流/PE/PB | 正常，90×12，0.3s |
+| 3 | `ak.stock_board_industry_index_ths()` | 同花顺 | 行业K线 | 正常，12×7，0.2s |
+| 4 | `ak.stock_hsgt_fund_flow_summary_em()` | 东财 | 北向资金 | 正常，4×13，0.2s |
+| 5 | `ak.tool_trade_date_hist_sina()` | 新浪 | 交易日历 | 正常，8797 行，0.3s |
+| 6 | `GET data.eastmoney.com/bkzj/hy.html` | 东财网页 | EM板块代码映射 | 正常，HTTP 200 / 207KB，0.1s |
+| 7 | `GET push2delay.eastmoney.com/.../fflow/daykline/get` | 东财延迟节点 | 历史资金流备选 | 可用但仅返回 1 条（当日快照） |
+| 8 | `GET push2his.eastmoney.com/.../fflow/daykline/get` | 东财 | 历史资金流回填 | 失败，`RemoteDisconnected`（0.6s 内被重置） |
+| 9 | `ak.stock_sector_fund_flow_hist()` | 东财 push2 | 历史资金流（原生） | 失败，`RemoteDisconnected` |
+| 10 | `ak.stock_board_industry_cons_em()` | 东财 push2 | 板块成分股PE/PB | 失败，`RemoteDisconnected`（8.3s） |
+
+结论：
+
+- 东财 `push2` / `push2his` 两个节点对本出口 IP 已封禁。连接在 1s 内被对端重置（`RemoteDisconnected`），
+  而非超时或 DNS 失败，属 IP 级反爬拦截。受影响的是 #8/#9/#10，即**历史资金流回填当前不可用**；
+  #10 未被业务使用（估值改取同花顺字段，见 3.1），但说明同族接口同样不可依赖。
+- `push2delay` 延迟节点未受阻，但只提供当日快照（实测 `klines` 长度 1），只能作当日兜底，不能替代历史回填。
+- 同花顺（#1~#3）、新浪（#5）、东财 HTML 页面（#6）均不受影响，**当日板块资金流主链路与北向资金采集正常**。
+
+**回填流程实测（2026-09-16 21:05）**：90 个板块中 77 个匹配到 EM 代码，全部请求失败，
+第 5 个板块触发熔断提前终止，`POST /collect/backfill-fund-flow` 返回 `code=500`（"成功 0/77"），
+全流程约 56s；其余 13 个板块因名称无法映射到 EM 代码而未发起请求。
+
+未匹配的 13 个板块：港口航运、公路铁路运输、钢铁、机场航运、建筑材料、建筑装饰、旅游及酒店、
+美容护理、其他社会服务、石油加工贸易、文化传媒、饮料制造、油气开采及服务。
 
 ---
 
@@ -233,12 +282,13 @@ class DataCollector:
         - 写入 InfluxDB north_bound_flow measurement
         """
 
-    def backfill_sector_fund_flow_hist(start_date, end_date) -> int:
+    def backfill_sector_fund_flow_hist(start_date, end_date) -> dict:
         """回填历史板块资金流
         - 从 data.eastmoney.com 网页抓取EM板块代码映射
         - 调用 push2his.eastmoney.com 数据接口
-        - 串行处理，间隔2秒防反爬
+        - 串行处理，间隔2秒防反爬；每板块重试3次，连续5个失败即熔断终止
         - 写入前通过 _merge_with_existing_data() 双向合并
+        - 返回 {count, success, failed, total_sectors, aborted}
         """
 
     def _merge_with_existing_data(new_records: list[dict]) -> list[dict]:
@@ -329,7 +379,9 @@ AkShare调用失败
     │   └─ 被封 → 降级
     ├─ 降级: data.eastmoney.com/bkzj/hy.html 抓取板块代码
     │   └─ push2his.eastmoney.com 直接调数据接口（串行+间隔2秒）
-    └─ 全部失败 → 记录WARNING日志，返回0条
+    │       └─ 单板块重试3次(退避3s/6s)
+    │           └─ 连续5个板块失败 → 熔断终止，返回 aborted=True
+    └─ 全部失败 → 记录ERROR日志，接口返回 code=500（不再静默返回0条）
 ```
 
 ---

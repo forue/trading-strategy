@@ -70,15 +70,20 @@ def test_data_source_format_and_health(monkeypatch):
     assert isinstance(first.get("score"), float)
 
 
-def test_data_source_failure_returns_error(monkeypatch):
+def test_data_source_failure_degrades_gracefully(monkeypatch):
+    """数据源异常时优雅降级：不生成信号，返回 data_ready=false
+
+    数据源抖动（InfluxDB 短暂不可用）属常态故障，接口不应以 5xx 形式暴露，
+    而是明确告知"数据未就绪"，由调度层保留重试机会；异常本身已在服务日志留痕。
+    """
     client = TestClient(strategy_main.app)
-    # 模拟数据源抛出异常，接口应返回 500
+
     def _raise(*args, **kwargs):
         raise RuntimeError("数据源不可用")
     monkeypatch.setattr(strategy_main.influx_query, "query_daily_sectors", _raise)
 
     resp = client.post("/calculate?strategy_type=AGGRESSIVE&signal_date=2026-04-24")
-    # 现在实现中会将异常抛出为 500
-    assert resp.status_code == 500
+    assert resp.status_code == 200
     data = resp.json()
-    assert data.get("detail") is not None
+    assert data.get("data_ready") is False
+    assert data.get("data") == []

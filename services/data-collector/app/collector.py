@@ -643,16 +643,19 @@ class DataCollector:
                 return code
         return None
 
-    def backfill_sector_fund_flow_hist(self, start_date: str = "20240101", end_date: str = None) -> int:
+    def backfill_sector_fund_flow_hist(self, start_date: str = "20240101", end_date: str = None) -> dict:
         """回填历史板块资金流数据
 
         由于 akshare 的 stock_sector_fund_flow_hist() 底层调用 push2.eastmoney.com
         获取板块代码映射时被封，本方法改为:
         1. 从 data.eastmoney.com 网页抓取 EM 板块代码映射
-        2. 直接调用 push2his.eastmoney.com 数据接口（未被封）
+        2. 直接调用 push2his.eastmoney.com 数据接口
         3. 解析主力净流入并写入 InfluxDB
+
+        Returns:
+            {"count": 写入条数, "success": 成功板块数, "failed": 失败板块数,
+             "total_sectors": 待回填板块数, "aborted": 是否因连续失败提前终止}
         """
-        import requests as req
         import time as _time
 
         if end_date is None:
@@ -661,13 +664,13 @@ class DataCollector:
         sector_names = self.get_sector_names()
         if not sector_names:
             logger.warning("无可用板块名称，跳过资金流回填")
-            return 0
+            return {"count": 0, "success": 0, "failed": 0, "total_sectors": 0, "aborted": False}
 
         # 提前获取 EM 代码映射
         em_map = self._get_em_code_map()
         if not em_map:
             logger.warning("无法获取东方财富板块代码映射，跳过回填")
-            return 0
+            return {"count": 0, "success": 0, "failed": 0, "total_sectors": 0, "aborted": False}
 
         # 建立 THS名称 → EM代码 的匹配表
         name_to_em: dict[str, str] = {}
@@ -685,35 +688,52 @@ class DataCollector:
 
         if not name_to_em:
             logger.warning("无任何板块匹配成功，跳过回填")
-            return 0
+            return {"count": 0, "success": 0, "failed": 0, "total_sectors": 0, "aborted": False}
 
         logger.info(f"开始回填 {len(name_to_em)} 个板块的历史资金流 ({start_date}~{end_date})（串行模式，间隔2秒）")
 
         all_records: list[dict] = []
         failed: list[str] = []
+        attempted = 0
+        consecutive_failures = 0
+        aborted = False
+        retry_times = 3
+        max_consecutive_failures = 5  # 连续失败过多说明已被数据源限流/封禁，提前终止避免加重封禁
 
         for idx, (name, em_code) in enumerate(name_to_em.items()):
+            attempted += 1
             ths_code = self._get_sector_name_code_map().get(name, "")
-            try:
-                url = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
-                params = {
-                    "lmt": "0",
-                    "klt": "101",
-                    "fields1": "f1,f2,f3,f7",
-                    "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
-                    "secid": f"90.{em_code}",
-                }
-                headers = {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                    "Referer": f"https://data.eastmoney.com/bkzj/{em_code}.html",
-                }
-                r = req.get(url, params=params, headers=headers, timeout=15)
-                data_json = r.json()
-                klines = data_json.get("data", {}).get("klines")
-                if not klines:
-                    failed.append(name)
-                    continue
+            klines = None
+            for attempt in range(retry_times):
+                try:
+                    klines = self._fetch_em_fund_flow_klines(em_code)
+                    if klines:
+                        break
+                    raise ValueError("接口返回空 klines")
+                except Exception as e:
+                    if attempt < retry_times - 1:
+                        backoff = 3 * (attempt + 1)
+                        logger.debug(
+                            f"回填 {name}({em_code}) 第{attempt + 1}次请求失败: {e}，{backoff}s 后重试"
+                        )
+                        _time.sleep(backoff)
+                    else:
+                        logger.warning(f"回填 {name}({em_code}) 失败(已重试{retry_times}次): {e}")
 
+            if not klines:
+                failed.append(name)
+                consecutive_failures += 1
+                if consecutive_failures >= max_consecutive_failures:
+                    logger.error(
+                        f"资金流回填提前终止: 连续 {consecutive_failures} 个板块请求失败，"
+                        f"疑似数据源限流/封禁；已尝试 {attempted}/{len(name_to_em)} 个"
+                        f"（成功 {attempted - len(failed)} 个），"
+                        f"剩余 {len(name_to_em) - attempted} 个板块待下次重试"
+                    )
+                    aborted = True
+                    break
+            else:
+                consecutive_failures = 0
                 records = []
                 for line in klines:
                     parts = line.split(",")
@@ -747,9 +767,7 @@ class DataCollector:
                 all_records.extend(records)
                 if (idx + 1) % 10 == 0:
                     logger.info(f"资金流回填进度: {idx + 1}/{len(name_to_em)} (已写入 {len(all_records)} 条)")
-            except Exception as e:
-                logger.warning(f"回填 {name}({em_code}) 失败: {e}")
-                failed.append(name)
+
             # 每个请求间隔 2 秒，避免触发反爬
             if idx < len(name_to_em) - 1:
                 _time.sleep(2)
@@ -761,7 +779,36 @@ class DataCollector:
         else:
             logger.warning("资金流回填: 无数据写入")
 
-        return len(all_records)
+        return {
+            "count": len(all_records),
+            "success": attempted - len(failed),
+            "failed": len(failed),
+            "total_sectors": len(name_to_em),
+            "aborted": aborted,
+        }
+
+    def _fetch_em_fund_flow_klines(self, em_code: str) -> list[str]:
+        """获取东方财富板块资金流日K线原始 klines 列表（push2his 接口）
+
+        说明：该接口存在反爬，容器出网 IP 被限流时会返回 RemoteDisconnected，
+        调用方需配合重试与熔断。
+        """
+        import requests as req
+
+        url = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
+        params = {
+            "lmt": "0",
+            "klt": "101",
+            "fields1": "f1,f2,f3,f7",
+            "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
+            "secid": f"90.{em_code}",
+        }
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": f"https://data.eastmoney.com/bkzj/{em_code}.html",
+        }
+        r = req.get(url, params=params, headers=headers, timeout=15)
+        return r.json().get("data", {}).get("klines") or []
 
     _MERGEABLE_FIELDS = (
         "open", "high", "low", "index_close", "index_change_pct",

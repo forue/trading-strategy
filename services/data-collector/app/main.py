@@ -109,10 +109,24 @@ async def collect_history(days: int = 30, date: str = None):
 
 @app.post("/collect/backfill-fund-flow")
 async def backfill_fund_flow(start_date: str = "20240101", end_date: str = None):
-    """回填历史板块资金流数据（使用 stock_sector_fund_flow_hist 接口）"""
+    """回填历史板块资金流数据（使用东财 push2his 历史资金流接口）"""
     try:
-        count = data_collector.backfill_sector_fund_flow_hist(start_date, end_date)
-        return success_response(data={"count": count}, message=f"资金流回填完成，写入 {count} 条记录")
+        result = data_collector.backfill_sector_fund_flow_hist(start_date, end_date)
+        if result.get("aborted"):
+            # 数据源限流导致的提前终止不能当作成功返回，否则调用方无从感知缺口
+            return error_response(
+                message=(
+                    f"资金流回填被数据源限流中断：成功 {result['success']}"
+                    f"/{result['total_sectors']} 个板块，写入 {result['count']} 条记录，请稍后重试"
+                )
+            )
+        return success_response(
+            data=result,
+            message=(
+                f"资金流回填完成，写入 {result['count']} 条记录"
+                + (f"，失败 {result['failed']} 个板块" if result["failed"] else "")
+            ),
+        )
     except Exception as e:
         logger.error(f"资金流回填失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
