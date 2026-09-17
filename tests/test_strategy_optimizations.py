@@ -57,11 +57,27 @@ def test_effective_score_gap_relative():
 
 
 def test_market_filter_aggressive_vs_moderate():
-    sectors = [{"composite_score": 1.0, "index_change_pct": -1.0} for _ in range(15)]
+    """市场偏弱但未触及宽度下限（上涨占比 5/15≈0.33）时，激进策略比稳健策略更易放行"""
+    sectors = [{"composite_score": 1.0, "index_change_pct": 1.0} for _ in range(5)]
+    sectors += [{"composite_score": 1.0, "index_change_pct": -1.0} for _ in range(10)]
     for i in range(3):
         sectors[i]["composite_score"] = 2.5
     p = StrategyParams(min_score_threshold=2.0)
     assert scoring_model._market_is_favorable(sectors, StrategyType.AGGRESSIVE, p) is True
+    p2 = StrategyParams(min_score_threshold=4.0)
+    assert scoring_model._market_is_favorable(sectors, StrategyType.MODERATE, p2) is False
+
+
+def test_market_filter_breadth_floor_blocks_all_strategies():
+    """全市场普跌（上涨占比 < market_breadth_floor）时，所有策略一律不建仓
+
+    覆盖相对动量陷阱：头部板块的高分只是"相对抗跌"，不是绝对强势。
+    """
+    sectors = [{"composite_score": 1.0, "index_change_pct": -1.0} for _ in range(15)]
+    for i in range(3):
+        sectors[i]["composite_score"] = 2.5
+    p = StrategyParams(min_score_threshold=2.0)
+    assert scoring_model._market_is_favorable(sectors, StrategyType.AGGRESSIVE, p) is False
     p2 = StrategyParams(min_score_threshold=4.0)
     assert scoring_model._market_is_favorable(sectors, StrategyType.MODERATE, p2) is False
 

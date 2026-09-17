@@ -52,10 +52,28 @@ def mock_query_daily_sectors(start_date: str, end_date: str, sector_code: str = 
         "pe_percentile": 60.0,
         "pb_percentile": 40.0,
     }
-    return {"2026-04-25": [sector]}
+    # 日期需与请求中的 signal_date 一致：信号日期必须与数据日期严格匹配
+    return {"2026-04-24": [sector]}
 
 
-def test_health_endpoint():
+def test_health_endpoint(monkeypatch):
+    """健康检查聚合逻辑：所有依赖可用返回 healthy，任一失败返回 degraded。
+
+    进程内 TestClient 不会触发 lifespan，`redis_mgr`/`rmq` 单例始终未连接，
+    因此这里显式注入三项依赖的探测结果，保证用例可独立、确定地验证聚合契约。
+    """
+    import types
+
+    monkeypatch.setattr(
+        strategy_main.influx_query, "health_check", lambda: {"status": "pass"}
+    )
+    monkeypatch.setattr(
+        strategy_main.redis_mgr, "_client", types.SimpleNamespace(ping=lambda: True)
+    )
+    monkeypatch.setattr(
+        strategy_main.rmq, "_connection", types.SimpleNamespace(is_open=True)
+    )
+
     client = TestClient(strategy_main.app)
     resp = client.get("/health")
     assert resp.status_code == 200
@@ -63,10 +81,16 @@ def test_health_endpoint():
     assert data.get("service") == "strategy"
     assert data.get("status") == "healthy"
 
+    # 任一依赖异常 -> degraded
+    monkeypatch.setattr(
+        strategy_main.influx_query, "health_check", lambda: {"status": "fail"}
+    )
+    assert client.get("/health").json().get("status") == "degraded"
+
 
 def test_configs_endpoint_structure(monkeypatch):
     # 使用一个简单的伪 Redis，避免真实 Redis 依赖
-    monkeypatch.setattr(strategy_main, "redis_client", FakeRedis())
+    monkeypatch.setattr(strategy_main, "redis_mgr", FakeRedis())
     client = TestClient(strategy_main.app)
     resp = client.get("/configs")
     assert resp.status_code == 200
@@ -78,7 +102,7 @@ def test_configs_endpoint_structure(monkeypatch):
 
 def test_calculate_signals_with_mocked_data(monkeypatch):
     # 注入伪 Redis 与数据源，确保 /calculate 能返回信号数据
-    monkeypatch.setattr(strategy_main, "redis_client", FakeRedis())
+    monkeypatch.setattr(strategy_main, "redis_mgr", FakeRedis())
     monkeypatch.setattr(strategy_main.influx_query, "query_daily_sectors", mock_query_daily_sectors)
 
     client = TestClient(strategy_main.app)

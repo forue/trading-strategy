@@ -711,6 +711,15 @@ class RotationScoringModel:
 
         avg_change = sum(s.get("index_change_pct", 0) for s in scored_sectors) / max(total, 1)
 
+        # 市场宽度绝对下限：全市场普跌时，头部板块的高分只是截面意义上的"相对抗跌"，
+        # 并非绝对强势。此时即使 top10 有达标标的也不建仓，避免相对动量陷阱。
+        breadth_floor = params.market_breadth_floor
+        if breadth_floor is not None and breadth_floor > 0 and up_ratio < breadth_floor:
+            logger.info(
+                f"市场宽度绝对过滤: 上涨占比={up_ratio:.2%} < 下限{breadth_floor:.2%}, 判定 BEAR"
+            )
+            return "BEAR"
+
         bull_threshold = params.market_bull_threshold if params.market_bull_threshold is not None else 0.5
         bear_threshold = params.market_bear_threshold if params.market_bear_threshold is not None else 0.4
 
@@ -781,11 +790,17 @@ class RotationScoringModel:
         params: StrategyParams,
         signal_date: Optional[str] = None,
         current_positions: Optional[dict] = None,
+        regime_history: Optional[list[str]] = None,
+        diagnostics: Optional[dict] = None,
     ) -> list[TradeSignal]:
         """计算每日轮动信号
 
         Args:
             sector_data: 板块数据列表 [{sector_code, sector_name, main_net_inflow, ...}]
+            regime_history: 该日之前的历史市场状态序列（升序，元素为 BULL/NEUTRAL/BEAR）。
+                提供时用于按 favorable_confirm_days 连续确认 BEAR，确认后对持仓生成清仓信号；
+                不传（回测路径）则只"不买入"、不主动卖出，由回测自身的 BEAR_EXIT 流程处理。
+            diagnostics: 可选输出字典，回填市场状态与空仓原因（供接口层展示）
             strategy_type: 策略类型
             params: 策略参数
             signal_date: 信号日期
@@ -927,16 +942,50 @@ class RotationScoringModel:
                 f"类内={json.dumps(cat_s, ensure_ascii=False)}, fallback={fb}, 净流入={display_flow/1e8:.2f}亿)"
             )
 
+        # 市场状态判定：既要"不买入"，也要能输出明确的空仓/清仓信号
+        regime = self._evaluate_market_regime(scored_sectors, strategy_type, params)
+        total_sectors = max(len(scored_sectors), 1)
+        up_ratio = sum(1 for s in scored_sectors if s.get("index_change_pct", 0) > 0) / total_sectors
+        avg_change = sum(s.get("index_change_pct", 0) for s in scored_sectors) / total_sectors
+        breadth_detail = f"上涨板块占比{up_ratio:.0%}, 平均涨跌{avg_change:.2f}%"
+
+        # 连续确认：与回测的 favorable_confirm_days 语义保持一致
+        confirm_days = params.favorable_confirm_days if params.favorable_confirm_days is not None else 2
+        prior = list(regime_history or [])
+        confirmed_bear = False
+        if regime == "BEAR":
+            seq = prior[-(confirm_days - 1):] + [regime] if confirm_days > 1 else [regime]
+            confirmed_bear = len(seq) >= confirm_days and all(r == "BEAR" for r in seq)
+
+        if diagnostics is not None:
+            diagnostics.update({
+                "market_regime": regime,
+                "up_ratio": round(up_ratio, 4),
+                "avg_change": round(avg_change, 4),
+                "confirmed_bear": confirmed_bear,
+                "breadth_detail": breadth_detail,
+                "top_sectors": [
+                    {"sector_name": s.get("sector_name"), "score": s.get("composite_score")}
+                    for s in scored_sectors[:3]
+                ],
+            })
+
         # 根据策略类型生成信号
         signals = []
         if strategy_type == StrategyType.AGGRESSIVE:
-            signals = self._aggressive_rotation(scored_sectors, params, signal_date, current_positions)
+            signals = self._aggressive_rotation(scored_sectors, params, signal_date, current_positions, confirmed_bear, breadth_detail)
         elif strategy_type == StrategyType.MODERATE:
-            signals = self._moderate_rotation(scored_sectors, params, signal_date, current_positions)
+            signals = self._moderate_rotation(scored_sectors, params, signal_date, current_positions, confirmed_bear, breadth_detail)
         elif strategy_type == StrategyType.CONSERVATIVE:
-            signals = self._conservative_rotation(scored_sectors, params, signal_date, current_positions)
+            signals = self._conservative_rotation(scored_sectors, params, signal_date, current_positions, confirmed_bear, breadth_detail)
 
-        logger.info(f"策略 {strategy_type.value} 生成 {len(signals)} 条信号")
+        if regime == "BEAR":
+            logger.info(
+                f"策略 {strategy_type.value} 市场判定 BEAR（{breadth_detail}），"
+                f"连续确认={confirmed_bear}，生成 {len(signals)} 条信号"
+            )
+        else:
+            logger.info(f"策略 {strategy_type.value} 生成 {len(signals)} 条信号")
         return signals
 
     def _calculate_composite_score(
@@ -1128,11 +1177,19 @@ class RotationScoringModel:
         self, scored_sectors: list, params: StrategyParams,
         strategy_type: StrategyType, signal_date: str,
         current_positions: Optional[dict] = None,
+        bear_exit: bool = False,
+        breadth_detail: str = "",
     ) -> list[TradeSignal]:
         """统一轮动策略核心逻辑。
 
         通过 _ROTATION_PROFILES 中的策略差异化参数，将激进/稳健/保守三档策略
         合并为一个方法。保守策略额外包含估值分位预筛选。
+
+        Args:
+            bear_exit: 市场已确认 BEAR 时，对现有持仓生成清仓卖出信号。
+                为 False 时仅"不买入"，不主动卖出（回测路径保持该行为，
+                其熊市清仓由回测自身的 BEAR_EXIT 流程处理）。
+            breadth_detail: 市场宽度描述，用于写入空仓原因
         """
         signals: list[TradeSignal] = []
         current_positions = current_positions or {}
@@ -1158,6 +1215,31 @@ class RotationScoringModel:
         market_good = self._market_is_favorable(scored_sectors, strategy_type, params)
         if not market_good and allow_empty:
             logger.info(f"{label}: 市场不景气，进入空仓模式")
+            # 空仓不是"什么都不做"：已确认 BEAR 且当前有持仓时，
+            # 必须输出清仓卖出信号，否则持仓会无限期滞留、市场转差也无法离场。
+            if bear_exit and current_positions:
+                reason = f"{label}: 市场不景气，空仓清仓"
+                if breadth_detail:
+                    reason += f"（{breadth_detail}）"
+                for code in current_positions:
+                    sec = next(
+                        (s for s in scored_sectors if s.get("sector_code") == code), None
+                    )
+                    if sec is None:
+                        # 持仓板块未出现在当日截面（数据缺失）时，用最小信息兜底，
+                        # 保证清仓信号不丢失
+                        sec = {
+                            "sector_code": code,
+                            "sector_name": SECTOR_MAP.get(code, code),
+                            "composite_score": 0,
+                        }
+                    signals.append(self._build_signal(
+                        sector=sec, strategy_type=strategy_type,
+                        direction=SignalDirection.SELL, position_ratio=0,
+                        score=sec.get("composite_score", 0), signal_date=signal_date,
+                        reason=reason, rank=0, total_sectors=len(scored_sectors),
+                    ))
+                logger.info(f"{label}: 已生成 {len(signals)} 条空仓清仓信号")
             return signals
 
         # 保守策略特有的估值预筛（仅当当日确实存在估值分位数据时启用）
@@ -1284,17 +1366,17 @@ class RotationScoringModel:
 
         return signals
 
-    def _aggressive_rotation(self, scored_sectors: list, params: StrategyParams, signal_date: str, current_positions: Optional[dict] = None) -> list[TradeSignal]:
+    def _aggressive_rotation(self, scored_sectors: list, params: StrategyParams, signal_date: str, current_positions: Optional[dict] = None, bear_exit: bool = False, breadth_detail: str = "") -> list[TradeSignal]:
         """激进轮动：仅取资金强度前2名，满仓轮换"""
-        return self._rotation_core(scored_sectors, params, StrategyType.AGGRESSIVE, signal_date, current_positions)
+        return self._rotation_core(scored_sectors, params, StrategyType.AGGRESSIVE, signal_date, current_positions, bear_exit, breadth_detail)
 
-    def _moderate_rotation(self, scored_sectors: list, params: StrategyParams, signal_date: str, current_positions: Optional[dict] = None) -> list[TradeSignal]:
+    def _moderate_rotation(self, scored_sectors: list, params: StrategyParams, signal_date: str, current_positions: Optional[dict] = None, bear_exit: bool = False, breadth_detail: str = "") -> list[TradeSignal]:
         """稳健轮动：取综合前3名，半仓分散"""
-        return self._rotation_core(scored_sectors, params, StrategyType.MODERATE, signal_date, current_positions)
+        return self._rotation_core(scored_sectors, params, StrategyType.MODERATE, signal_date, current_positions, bear_exit, breadth_detail)
 
-    def _conservative_rotation(self, scored_sectors: list, params: StrategyParams, signal_date: str, current_positions: Optional[dict] = None) -> list[TradeSignal]:
+    def _conservative_rotation(self, scored_sectors: list, params: StrategyParams, signal_date: str, current_positions: Optional[dict] = None, bear_exit: bool = False, breadth_detail: str = "") -> list[TradeSignal]:
         """保守轮动：资金持续流入且估值分位低于阈值"""
-        return self._rotation_core(scored_sectors, params, StrategyType.CONSERVATIVE, signal_date, current_positions)
+        return self._rotation_core(scored_sectors, params, StrategyType.CONSERVATIVE, signal_date, current_positions, bear_exit, breadth_detail)
 
     # 全局实例
 scoring_model = RotationScoringModel()

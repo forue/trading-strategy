@@ -433,6 +433,9 @@ POST /api/auth/logout      - 退出登录
 
 ```
 POST /api/strategy/calculate?strategy_type=AGGRESSIVE    - 触发策略计算
+     &signal_date=2026-09-11                              - 指定信号日期（默认今天）
+     &allow_stale=true                                    - 当日无数据时回退到最近有数据的交易日（信号日期同步修正）
+     &force=false                                         - 回退场景下已有信号时是否强制重算
 GET  /api/strategy/configs                                - 获取策略配置
 PUT  /api/strategy/configs/{id}                           - 更新策略配置
 GET  /api/strategy/signals/today?strategy_type=MODERATE   - 获取今日信号

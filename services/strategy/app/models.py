@@ -63,6 +63,10 @@ class StrategyParams(BaseModel):
     # 动态市场状态参数
     market_bull_threshold: float = 0.5    # 上涨板块占比达到此值为牛市
     market_bear_threshold: float = 0.4    # 上涨板块占比低于此值为熊市
+    # 市场宽度绝对下限：上涨板块占比低于此值时，无论头部板块评分多高都判定为 BEAR。
+    # 用于避免"全市场普跌、少数板块相对少跌"被截面相对评分误判为强势（相对动量陷阱）。
+    # 设为 0 表示不启用该绝对过滤（回退到仅靠 top10 达标的旧行为）。
+    market_breadth_floor: float = 0.25
     favorable_confirm_days: int = 2       # 连续 N 天同向状态才确认
     max_empty_days: int = 10              # 最大空仓天数，超时强制试探建仓
     capital_pct_bull_boost: float = 0.3   # 牛市加仓比例

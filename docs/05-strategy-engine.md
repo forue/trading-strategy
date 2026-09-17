@@ -59,6 +59,7 @@ services/strategy/app/
 | `use_zscore_normalization` | 是否对因子评分进行截面Z-Score归一化（将硬阈值分替换为板块间相对排名得分） |
 | `market_bull_threshold` | 上涨板块占比达到此值判定为牛市（默认 0.5） |
 | `market_bear_threshold` | 上涨板块占比低于此值判定为熊市（默认 0.4） |
+| `market_breadth_floor` | 市场宽度绝对下限：上涨占比低于此值直接判 BEAR，不受头部板块评分影响（默认 0.25，设 0 关闭）。见 6.1.1 |
 | `favorable_confirm_days` | 连续 N 天同向状态才确认（默认 2，防摇摆） |
 | `max_empty_days` | 最大空仓天数，超时强制试探建仓（默认 10） |
 | `bear_reentry_days` | BEAR 空仓回补门控天数（默认 0 = 关闭，出厂当日不再确认 BEAR 即回补）。设置 2~3：BEAR 清仓后须连续 N 日非 BEAR（当日 BULL 也不放行）才允许重新建仓，把弱反弹/下跌中继的首日追高延后以压回撤，代价是牺牲 BEAR 后快速回补的反弹收益 |
@@ -233,31 +234,52 @@ services/strategy/app/
   3. 登录触发: 认证服务登录成功后触发 /collect + /calculate
 
 计算流程:
-  1. 非交易日检查: 使用AkShare交易日历判断，非交易日不生成信号
+  1. 确定目标日期: signal_date（默认今天），并判断是否为交易日
 
-  2. 从Redis获取最新板块数据 (sector_capital_flow:latest)
-      └─ 无缓存时，从InfluxDB读取最近3天数据
-      └─ 仍无数据时，尝试读取最近30天数据
+  2. 按目标日期精确取板块数据（信号日期必须与数据日期一致，见 4.1.1）:
+     └─ Redis 缓存 key: sector_capital_flow:{date}
+     └─ 未命中时从 InfluxDB 按 (date, date) 精确查询（Flux stop 为 end+1 天，含当日）
+     └─ 该日期无数据时：
+        - allow_stale=false（默认，自动调度）→ 拒绝生成信号，返回 data_ready=false
+        - allow_stale=true（手动/登录触发）→ 回退到最近有数据的交易日 D，并将信号日期修正为 D
 
   3. 从Redis读取当前持仓 (positions:{strategy_type})
 
   4. 构建截面上下文（各板块 `_history` 中的 `date` + `index_change_pct` 按日合并）
+     历史序列一律以生效信号日期为界，避免混入信号日之后的走势
 
   5. 遍历每个板块：因子引擎计算 → 绝对综合分；当日板块数≥3 时再算截面分并按 `cross_section_alpha` 混合
 
   6. 按综合分排序，根据策略类型生成信号:
-      - 市场过滤: `_market_is_favorable`（激进与稳健/保守规则不同，见源码）
+      - 市场过滤: `_market_is_favorable`（含市场宽度绝对下限，见 6.1.1）
       - 买入: 前 N 名且过 `min_score_threshold`；调仓需超过有效评分缺口（绝对 + 相对）
       - 卖出: 调出不在新组合中的标的（配合 keep_overlap 等）
       - 仓位: 总仓位 `capital_pct`（单板块上限 `max_position`），波动倒数或等权分配
       - 冷却期: 止损后 cooldown_days 内不建仓
 
-  7. 信号处理:
+  7. 信号处理（仅在数据就绪时执行）:
       a. 更新持仓到Redis (positions:{type}, TTL: 7天)
-      b. 写入Redis缓存 (key: signals:{type}:{date}, TTL: 24h)
+         - 仅在本次确实产生 BUY/SELL 信号时更新；无信号表示"维持现有持仓"，绝不写空仓位
+      b. 写入Redis缓存 (key: signals:{type}:{date}, TTL: 7天)
       c. 通过RabbitMQ发布 signals_generated 事件
       d. 信号通知服务消费事件 → WebSocket推送给前端
 ```
+
+#### 4.1.1 信号日期与数据日期强一致
+
+> 背景：2026-09-11 曾出现"用 9/10 数据生成 9/11 信号"的问题——采集任务与备用计算任务因 misfire 并发执行，
+> 策略在当日数据入库前读到 T-1 快照，且该快照被写入全局 `latest` 缓存（TTL 1h），
+> 导致后续两个策略同样使用 T-1 数据，最终推送了基于 9/10 资金流的银行/证券买入信号，
+> 而 9/11 真实行情是银行 -1.09%、证券 -3.60% 且资金转为净流出。
+
+约束与实现:
+- **约束**：信号日期必须等于所用板块数据的日期，禁止用 T-1 数据生成 T 日信号
+- 板块快照缓存由全局键 `sector_capital_flow:latest` 改为按日期分键 `sector_capital_flow:{date}`，杜绝跨交易日复用
+- `/calculate` 默认严格模式（`allow_stale=false`）：当日数据未入库或非交易日时返回 `data_ready=false`，
+  不写信号缓存、不动持仓、不推送事件，由调度层保留重试机会
+- 手动/登录触发可显式传 `allow_stale=true`：回退到最近有数据的交易日 D，并把**信号日期一并修正为 D**，
+  保证"信号日期 == 数据日期"，不会出现"周六信号用周五数据"的错配
+- 回退场景下若 D 已有信号，默认直接返回已有信号（`force=true` 才重算），避免重复触发覆盖当日持仓
 
 ### 4.2 消息发布格式
 
@@ -267,6 +289,8 @@ services/strategy/app/
   "strategy_type": "AGGRESSIVE",
   "signal_date": "2026-04-18",
   "count": 5,
+  "position_status": "HOLD",
+  "empty_reason": "",
   "signals": [
     {
       "signal_date": "2026-04-18",
@@ -309,15 +333,58 @@ services/strategy/app/
 ### 5.1 触发策略计算
 
 ```
-POST /calculate?strategy_type=AGGRESSIVE&signal_date=2026-04-18
+POST /calculate?strategy_type=AGGRESSIVE&signal_date=2026-04-18&allow_stale=false&force=false
+```
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `strategy_type` | 必填 | AGGRESSIVE / MODERATE / CONSERVATIVE |
+| `signal_date` | 今天 | 期望的信号日期 |
+| `allow_stale` | `false` | 目标日期无数据（非交易日或数据未入库）时，允许回退到最近有数据的交易日，并同步修正信号日期 |
+| `force` | `false` | 回退场景且该日期已有信号时，强制重算覆盖（默认直接返回已有信号） |
 
 响应:
+```json
 {
   "code": 200,
-  "message": "策略计算完成",
-  "data": [ ... signals ... ]
+  "message": "策略计算完成，共生成 2 条信号",
+  "data": [ ... signals ... ],
+  "strategy_type": "AGGRESSIVE",
+  "signal_date": "2026-04-18",
+  "requested_date": "2026-04-18",
+  "data_ready": true,
+  "stale": false,
+  "note": ""
 }
 ```
+
+- `data_ready=false`：目标日期无可用数据且未允许回退，未生成任何信号（不写缓存、不动持仓、不推送）
+- `stale=true`：`signal_date` 已回退到最近有数据的交易日（与 `requested_date` 不同）
+- `position_status`：`HOLD`=持有、`EMPTY`=空仓、`NO_DATA`=未计算
+- `market_regime`：`BULL` / `NEUTRAL` / `BEAR`
+- `empty_reason`：空仓原因（如"市场判定熊市，空仓观望（上涨板块占比6%, 平均涨跌-2.04%）"）
+
+#### 5.1.1 空仓必须被显式表达
+
+> 背景：市场判定 BEAR 时，轮动逻辑原先直接返回空信号列表，接口表现为"什么都没发生"——
+> 前端无法区分"今天没算"和"算出来空仓"，且持有仓位时不会卖出，市场转差也无法离场。
+
+语义约定:
+- 空仓不是"无信号"，而是一个**明确的状态**，必须同时满足：
+  1. 接口返回 `position_status=EMPTY` 与 `empty_reason`
+  2. 持有仓位且市场已连续确认 BEAR 时，输出**清仓 SELL 信号**（而非静默不动）
+- 连续确认：按 `favorable_confirm_days` 判定（激进=1 即单日确认，稳健/保守=2），
+  与回测的 BEAR 确认口径一致；未达确认天数时只"不买入"，不主动卖出，避免假信号频繁清仓
+- 回测路径不传 `regime_history`，保持"只不买入"的原行为，其熊市清仓仍由回测自身的 `BEAR_EXIT` 流程处理，
+  因此本次改动不影响已验证的回测结果
+- 当日市场状态写入 `market_regime:{strategy_type}:{date}`（TTL 30 天），供跨交易日连续确认
+- **重算保留清仓留痕**：`/calculate` 写缓存前，若本次重算得到空仓（无任何信号），而该日缓存中
+  已存在清仓 SELL 记录（`direction=SELL` 且 `reason` 含"清仓"），则保留这些清仓记录并同步写入
+  `:status`（`position_status=EMPTY`、`empty_reason` 取清仓理由），避免"空仓重算"用空列表
+  覆盖掉"当日已清仓"的历史事实
+- **日历空仓标记**：`/signals/calendar` 对"已计算但空仓"的日期输出标记记录
+  （`direction=EMPTY` / `is_empty_position=true`），供前端日历以独立颜色区分空仓与未计算，
+  详见 `docs/06-signal-notification.md` 5.3
 
 ### 5.2 获取策略配置
 
@@ -624,6 +691,24 @@ POST /data/replay/strategy-overlay  - 策略叠加回放
 | NEUTRAL | 不满足 BULL/BEAR | 标准参数 |
 | BEAR | 上涨占比 < 40% 且 avg < 0 | 空仓（单日触发确认），score_gap × 1.5 |
 
+**市场宽度绝对下限**（优先于上表判定）：上涨板块占比低于 `market_breadth_floor`（默认 0.25）时，
+无论头部板块评分多高都直接判定 BEAR。
+
+> 背景：2026-09-10 全市场仅 11.1% 板块上涨、主力净流出 802 亿，银行/证券因"相对抗跌 + 资金逆势流入"
+> 在截面打分中拿到最高分（capital_flow 9.17/9.15），按旧规则 top10 有达标标的即判 NEUTRAL 放行买入，
+> 次日证券 -3.60%、银行 -1.09%。这是典型的**相对动量陷阱**：全市场普跌时"相对少跌"并不等于绝对强势。
+
+回测验证（MODERATE，覆盖两个独立区间）:
+
+| `market_breadth_floor` | 2026-03-11~2026-09-11 | 2025-11-11~2026-05-11 |
+|---|---|---|
+| 0（旧行为） | +0.23%，夏普 0.03，回撤 13.48% | — |
+| **0.25（默认）** | +12.85%，夏普 1.09，回撤 12.74% | **+16.48%，夏普 1.41，回撤 20.16%** |
+| 0.30 | +16.96%，夏普 1.41，回撤 13.05% | **+0.23%，夏普 0.04，回撤 27.71%** |
+
+> 阈值 0.30 虽在区间①更优，但在区间②严重劣化（收益 16.48%→0.23%、回撤 20.2%→27.7%），
+> 属于对单区间的过拟合；0.25 在两个区间均稳健，故作为默认值。需要更保守时可经 `/configs` 调整。
+
 空仓管理:
 - 确认: AGGRESSIVE 连续1天 BEAR 即触发空仓（`favorable_confirm_days=1`）；其余策略默认连续2天
 - 恢复: 当日市场不再确认 BEAR（非连续 `favorable_confirm_days` 天 BEAR）即恢复回补
@@ -755,6 +840,10 @@ POST /data/replay/strategy-overlay  - 策略叠加回放
 1. **趋势止损模式持仓锁定不再冻结**：原实现中 `stop_loss_mode="trend_break"` 时持仓锁定期倒计时被跳过，持仓被永久锁定（`position_hold_counter` 恒为初始值），导致调仓逻辑几乎失效。已修复为：趋势止损模式下锁定期每日照常倒计时，固定止损模式单独保留"单日跌幅>5% 紧急退出"。
 2. **保守策略估值预筛无数据时不空仓**：当 pe/pb 估值分位数据整日缺失时，保守策略此前直接返回空信号（无持仓可用），表现为长期空仓。现改为当日无估值数据时自动退化为综合评分选股，不长期空仓跑输大盘。
 3. **单日快照补充板块历史序列**：实时 `/calculate` 输入为 Redis 当日快照（无 `_history`），走势/技术类因子（ma_trend / mfi / vol_ratio 等）在因子引擎中因数据缺失被剔除。现改为在评分前按信号日期从板块历史 K 线（含资金流字段）补齐 `_history`，使单日信号同样结合走势与技术指标给出。
+4. **信号日期与数据日期强一致**：板块快照缓存由全局 `sector_capital_flow:latest` 改为按日期分键 `sector_capital_flow:{date}`；`/calculate` 新增 `allow_stale` / `force` 参数，默认严格模式下当日数据未入库即拒绝生成信号，手动触发可回退到最近有数据的交易日并同步修正信号日期。详见 4.1.1。
+5. **空信号不再清空持仓**：此前一次计算未产生任何信号时，仍会用空仓位覆盖 Redis `positions:{type}`，导致真实持仓被凭空清零（2026-09-11 首轮计算即触发），进而使下一轮被误判为"空仓首次建仓"而跳过评分缺口门槛直接买入。现仅在确实产生 BUY/SELL 信号时才更新持仓。
+6. **市场宽度绝对下限**：新增 `market_breadth_floor`（默认 0.25），普跌行情下无论头部板块评分多高都判 BEAR，修复"全市场净流出时相对抗跌板块被误判为强势"的相对动量陷阱。回测数据与阈值敏感度见 6.1.1。
+7. **空仓显式化**：市场判定 BEAR 时不再"什么都不返回"——接口输出 `position_status=EMPTY` 与空仓原因；持有仓位且连续确认 BEAR 时输出清仓 SELL 信号。回测路径行为保持不变（见 5.1.1）。
 
 ### 8.2 策略默认参数调整（全窗口基准：上证指数 +17.25%，2025-01-02 ~ 2026-09-04）
 

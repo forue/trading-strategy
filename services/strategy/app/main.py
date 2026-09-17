@@ -254,62 +254,226 @@ def _is_trade_day(date_str: str) -> bool:
     return True
 
 
-@app.post("/calculate")
-async def calculate_signals(strategy_type: StrategyType, signal_date: str = None):
-    """触发策略计算，生成买卖信号。非交易日不生成信号。"""
-    try:
-        effective_date = signal_date or datetime.now().strftime("%Y-%m-%d")
+# 板块日快照缓存 TTL（秒）。按数据日期分键存储，杜绝跨交易日复用。
+SECTOR_SNAPSHOT_TTL = 3600
+# 允许回退时，最多向前查找多少个自然日内的有效板块数据
+STALE_LOOKBACK_DAYS = 30
+# 信号缓存 TTL（7天）：与持仓周期对齐，保证历史信号可追溯、可回看
+SIGNAL_CACHE_TTL = 86400 * 7
+# /signals/today 在今日无信号时，向前回看多少天
+SIGNAL_LOOKBACK_DAYS = 7
+# 市场状态（BULL/NEUTRAL/BEAR）保留天数，用于跨交易日连续确认
+REGIME_TTL = 86400 * 30
+REGIME_HISTORY_DAYS = 10
 
-        # 非交易日检查：不生成信号
-        if not _is_trade_day(effective_date):
-            logger.info(f"{effective_date} 非交易日，跳过策略计算")
-            return {"code": 200, "message": f"{effective_date} 非交易日，不生成信号", "data": []}
+
+def _snapshot_cache_key(date_str: str) -> str:
+    """板块日快照缓存键（按数据日期分键）"""
+    return f"sector_capital_flow:{date_str}"
+
+
+def _load_sector_snapshot(target_date: str) -> list:
+    """按精确日期加载板块快照：Redis → InfluxDB。
+
+    只返回 target_date 当天的数据，绝不回退到其它日期；当天无数据时返回空列表，
+    由调用方决定是拒绝生成信号，还是改用最近有数据的交易日（并同步修正信号日期）。
+    """
+    cache_key = _snapshot_cache_key(target_date)
+    cached = redis_mgr.get(cache_key)
+    if cached:
+        try:
+            rows = json.loads(cached)
+            if rows:
+                logger.info(f"从Redis获取到 {len(rows)} 条板块数据（日期: {target_date}）")
+                return rows
+        except (json.JSONDecodeError, TypeError):
+            logger.warning(f"板块缓存解析失败，回源InfluxDB: {cache_key}")
+
+    try:
+        daily_data = influx_query.query_daily_sectors(target_date, target_date) or {}
+        rows = daily_data.get(target_date) or []
+        if rows:
+            redis_mgr.setex(cache_key, SECTOR_SNAPSHOT_TTL, json.dumps(rows, ensure_ascii=False))
+            logger.info(f"从InfluxDB获取到 {len(rows)} 条板块数据（日期: {target_date}）")
+        else:
+            logger.info(f"InfluxDB中无 {target_date} 的板块数据")
+        return rows
+    except Exception as e:
+        logger.error(f"从InfluxDB读取 {target_date} 板块数据失败: {e}")
+        return []
+
+
+def _regime_key(strategy_type: StrategyType, date_str: str) -> str:
+    """市场状态缓存键（按策略+日期，供连续确认 BEAR 使用）"""
+    return f"market_regime:{strategy_type.value}:{date_str}"
+
+
+def _load_regime_history(
+    strategy_type: StrategyType, before_date: str, days: int = REGIME_HISTORY_DAYS
+) -> list:
+    """读取 before_date 之前的市场状态序列（升序，元素为 BULL/NEUTRAL/BEAR）"""
+    collected = []
+    try:
+        for offset in range(1, days + 1):
+            d = (
+                datetime.strptime(before_date, "%Y-%m-%d") - timedelta(days=offset)
+            ).strftime("%Y-%m-%d")
+            value = redis_mgr.get(_regime_key(strategy_type, d))
+            if value:
+                collected.append(value)
+    except Exception as e:
+        logger.warning(f"读取市场状态历史失败: {e}")
+    collected.reverse()  # 由近及远采集，反转后为时间升序
+    return collected
+
+
+def _save_regime(strategy_type: StrategyType, date_str: str, regime: str) -> None:
+    """记录当日市场状态，供后续交易日做连续确认"""
+    try:
+        redis_mgr.setex(_regime_key(strategy_type, date_str), REGIME_TTL, regime)
+    except Exception as e:
+        logger.warning(f"保存市场状态失败: {e}")
+
+
+def _find_latest_available_date(before_date: str, lookback_days: int = STALE_LOOKBACK_DAYS) -> str:
+    """查找不晚于 before_date 且存在板块数据的最近日期，找不到返回空串"""
+    try:
+        start_date = (
+            datetime.strptime(before_date, "%Y-%m-%d") - timedelta(days=lookback_days)
+        ).strftime("%Y-%m-%d")
+        daily_data = influx_query.query_daily_sectors(start_date, before_date) or {}
+        candidates = [d for d, rows in daily_data.items() if rows and d <= before_date]
+        return max(candidates) if candidates else ""
+    except Exception as e:
+        logger.error(f"查找 {before_date} 之前可用数据日期失败: {e}")
+        return ""
+
+
+def _no_data_response(strategy_type: StrategyType, requested_date: str, message: str) -> dict:
+    """数据未就绪的统一响应：不生成信号、不动持仓、不推送"""
+    return {
+        "code": 200,
+        "message": message,
+        "data": [],
+        "strategy_type": strategy_type.value,
+        "signal_date": requested_date,
+        "data_ready": False,
+        "stale": False,
+    }
+
+
+def _load_previous_clear_signals(strategy_type: str, signal_date: str) -> list:
+    """读取该日已缓存的"清仓"卖出信号（direction=SELL 且理由含"清仓"）。
+
+    用于重算得到空仓时保留清仓留痕，避免被空列表覆盖。
+    """
+    try:
+        raw = redis_mgr.get(f"signals:{strategy_type}:{signal_date}")
+        if not raw:
+            return []
+        return [
+            s for s in (json.loads(raw) or [])
+            if s.get("direction") == "SELL" and "清仓" in str(s.get("reason") or "")
+        ]
+    except (json.JSONDecodeError, TypeError) as e:
+        logger.warning(f"读取历史清仓记录失败（{strategy_type} {signal_date}）: {e}")
+        return []
+
+
+def _merge_clear_records(signal_dicts: list, signals: list, previous_clears: list):
+    """空仓重算时保留历史清仓记录。
+
+    仅当本次计算完全没有信号（空仓）、且该日历史缓存中存在清仓记录时，
+    才用历史清仓记录替换本次的空列表；否则沿用本次计算结果。
+    返回 (最终写入缓存的信号列表, 是否发生了保留)。
+    """
+    if signals or not previous_clears:
+        return signal_dicts, False
+    return previous_clears, True
+
+
+@app.post("/calculate")
+async def calculate_signals(
+    strategy_type: StrategyType,
+    signal_date: str = None,
+    allow_stale: bool = False,
+    force: bool = False,
+):
+    """触发策略计算，生成买卖信号。
+
+    核心约束：信号日期必须与所用板块数据的日期严格一致，禁止用 T-1 数据生成 T 日信号。
+
+    Args:
+        strategy_type: 策略类型
+        signal_date: 期望的信号日期，默认今天
+        allow_stale: 目标日期无数据（含周末/节假日手动触发、数据尚未采集入库）时，
+            是否允许回退到最近有数据的交易日。回退时信号日期会一并修正为该交易日，
+            保证"信号日期 == 数据日期"；为 False 时直接拒绝生成信号。
+        force: 回退场景下若该日期已有信号，是否强制重算（默认直接返回已有信号，
+            避免手动/登录重复触发覆盖当日持仓）
+    """
+    try:
+        requested_date = signal_date or datetime.now().strftime("%Y-%m-%d")
+        effective_date = requested_date
+        is_stale = False
+        note = ""
 
         config = DEFAULT_CONFIGS.get(strategy_type)
         if not config:
             raise HTTPException(status_code=400, detail=f"未知策略类型: {strategy_type}")
 
-        # 尝试从Redis获取最新板块数据
-        sector_data = []
-        cached = redis_mgr.get("sector_capital_flow:latest")
-        if cached:
-            sector_data = json.loads(cached)
-            logger.info(f"从Redis获取到 {len(sector_data)} 条板块数据")
-        else:
-            # 如果Redis中没有数据，从InfluxDB读取最新数据
-            logger.info("Redis中没有板块数据，从InfluxDB读取")
-            try:
-                end_date = effective_date
-                start_date = (datetime.strptime(end_date, "%Y-%m-%d") - timedelta(days=3)).strftime("%Y-%m-%d")
-                daily_data = influx_query.query_daily_sectors(start_date, end_date)
+        # 只取目标日期当天的板块数据，不做任何隐式回退
+        sector_data = _load_sector_snapshot(requested_date) if _is_trade_day(requested_date) else []
 
-                if daily_data and len(daily_data) > 0:
-                    sorted_dates = sorted(daily_data.keys())
-                    latest_date = sorted_dates[-1]
-                    sector_data = daily_data[latest_date]
-                    logger.info(f"从InfluxDB获取到 {len(sector_data)} 条板块数据（日期: {latest_date}）")
+        if not sector_data:
+            if not allow_stale:
+                reason = "非交易日" if not _is_trade_day(requested_date) else "当日板块数据尚未入库"
+                logger.info(f"{requested_date} {reason}，跳过策略计算（allow_stale=False）")
+                return _no_data_response(
+                    strategy_type, requested_date, f"{requested_date} {reason}，不生成信号"
+                )
 
-                    redis_mgr.setex(
-                        "sector_capital_flow:latest", 3600,
-                        json.dumps(sector_data, ensure_ascii=False),
-                    )
-                else:
-                    logger.warning(f"InfluxDB中没有找到板块数据，查询日期范围: {start_date} 到 {end_date}")
-                    earlier_start_date = (datetime.strptime(end_date, "%Y-%m-%d") - timedelta(days=30)).strftime("%Y-%m-%d")
-                    earlier_data = influx_query.query_daily_sectors(earlier_start_date, end_date)
-                    if earlier_data and len(earlier_data) > 0:
-                        sorted_dates = sorted(earlier_data.keys())
-                        latest_date = sorted_dates[-1]
-                        sector_data = earlier_data[latest_date]
-                        logger.info(f"从更早范围获取到 {len(sector_data)} 条板块数据（日期: {latest_date}）")
-                        redis_mgr.setex(
-                            "sector_capital_flow:latest", 3600,
-                            json.dumps(sector_data, ensure_ascii=False),
-                        )
-                    else:
-                        logger.error("InfluxDB中完全找不到板块数据")
-            except Exception as e:
-                logger.error(f"从InfluxDB读取数据失败: {e}")
+            # 手动触发场景：回退到最近有数据的交易日，并把信号日期一并修正
+            fallback_date = _find_latest_available_date(requested_date)
+            if not fallback_date:
+                logger.warning(f"{requested_date} 及此前 {STALE_LOOKBACK_DAYS} 天均无板块数据，无法计算")
+                return _no_data_response(
+                    strategy_type, requested_date,
+                    f"{requested_date} 及此前 {STALE_LOOKBACK_DAYS} 天均无板块数据，不生成信号",
+                )
+
+            effective_date = fallback_date
+            is_stale = True
+            note = f"{requested_date} 无板块数据，已回退到最近有数据的交易日 {fallback_date}"
+            logger.info(note)
+
+            # 历史日期已有信号时默认不重算，避免重复触发覆盖当日持仓
+            cached_signals = redis_mgr.get(f"signals:{strategy_type.value}:{effective_date}")
+            if cached_signals and not force:
+                try:
+                    existing = json.loads(cached_signals)
+                except (json.JSONDecodeError, TypeError):
+                    existing = None
+                if existing is not None:
+                    logger.info(f"{effective_date} 信号已存在，直接返回（force=False）")
+                    return {
+                        "code": 200,
+                        "message": f"{effective_date} 信号已存在，未重复计算",
+                        "data": existing,
+                        "strategy_type": strategy_type.value,
+                        "signal_date": effective_date,
+                        "requested_date": requested_date,
+                        "data_ready": True,
+                        "stale": True,
+                        "note": note,
+                    }
+
+            sector_data = _load_sector_snapshot(effective_date)
+            if not sector_data:
+                logger.error(f"回退日期 {effective_date} 仍无板块数据，放弃计算")
+                return _no_data_response(
+                    strategy_type, requested_date, f"回退日期 {effective_date} 无板块数据，不生成信号"
+                )
 
         # 从Redis读取当前持仓
         current_positions = {}
@@ -319,7 +483,9 @@ async def calculate_signals(strategy_type: StrategyType, signal_date: str = None
                 current_positions = json.loads(positions_raw)
                 logger.info(f"读取到当前持仓: {len(current_positions)}个板块")
         except Exception as e:
-            logger.warning(f"读取持仓失败: {e}")
+            # 持仓损坏会导致后续按"空仓"处理（跳过调仓缺口、清仓信号丢失），必须显眼告警
+            logger.error(f"读取持仓失败，本次按空仓处理，请检查 positions:{strategy_type.value}: {e}")
+            current_positions = {}
 
         # 为单日快照补充板块历史K线/资金流序列。
         # 走势/技术类因子（ma_trend/mfi/vol_ratio等）依赖板块 _history，
@@ -327,10 +493,15 @@ async def calculate_signals(strategy_type: StrategyType, signal_date: str = None
         try:
             if sector_data:
                 from bisect import bisect_right
-                snapshot_date = signal_date or effective_date
+                # 历史序列一律以生效信号日期为界，避免截断到未来或混入 T 日之后的走势
+                snapshot_date = effective_date
                 item_dates = [str(s.get("date", ""))[:10] for s in sector_data if s.get("date")]
                 if item_dates:
-                    snapshot_date = max(item_dates)
+                    data_date = max(item_dates)
+                    if data_date != effective_date:
+                        logger.warning(
+                            f"板块数据自带日期 {data_date} 与信号日期 {effective_date} 不一致，以信号日期为准"
+                        )
                 _hist = _load_sector_history_cache([snapshot_date])
                 _attached = 0
                 for _s in sector_data:
@@ -347,13 +518,21 @@ async def calculate_signals(strategy_type: StrategyType, signal_date: str = None
         except Exception as e:
             logger.warning(f"补充板块历史序列失败（信号仍可生成，但缺少走势/技术维度）: {e}")
 
+        diagnostics: dict = {}
+        regime_history = _load_regime_history(strategy_type, effective_date)
         signals = scoring_model.calculate_daily_signals(
             sector_data=sector_data,
             strategy_type=strategy_type,
             params=config.params,
-            signal_date=signal_date,
+            signal_date=effective_date,
             current_positions=current_positions,
+            regime_history=regime_history,
+            diagnostics=diagnostics,
         )
+
+        # 记录当日市场状态，供后续交易日做连续确认（BEAR 连续确认后才清仓）
+        if diagnostics.get("market_regime"):
+            _save_regime(strategy_type, effective_date, diagnostics["market_regime"])
 
         # 填充 id 和 created_at
         now = datetime.now().isoformat()
@@ -364,37 +543,122 @@ async def calculate_signals(strategy_type: StrategyType, signal_date: str = None
         # 缓存信号到Redis
         signal_dicts = [s.model_dump() for s in signals]
 
-        # 更新持仓到Redis（根据买卖信号）
-        new_positions = {}
-        for s in signals:
-            if s.direction.value == "BUY":
-                new_positions[s.sector_code] = s.position_ratio
-        if new_positions or current_positions:
-            sell_codes = [s.sector_code for s in signals if s.direction.value == "SELL"]
-            for code in sell_codes:
+        # 更新持仓到Redis（仅在确实产生买卖信号时）。
+        # 未产生信号意味着"维持现有持仓"（评分差距不足/市场不景气保持空仓），
+        # 此时绝不能用空仓位覆盖，否则真实持仓会被凭空清零、次日被误判为建仓。
+        buy_signals = [s for s in signals if s.direction.value == "BUY"]
+        sell_signals = [s for s in signals if s.direction.value == "SELL"]
+        if buy_signals or sell_signals:
+            new_positions = {s.sector_code: s.position_ratio for s in buy_signals}
+            for code in [s.sector_code for s in sell_signals]:
                 new_positions.pop(code, None)
             redis_mgr.setex(
                 f"positions:{strategy_type.value}", 86400 * 7,
                 json.dumps(new_positions, ensure_ascii=False),
             )
-            logger.info(f"更新持仓到Redis: {len(new_positions)}个板块")
+            logger.info(
+                f"更新持仓到Redis: {len(new_positions)}个板块 "
+                f"(买入{len(buy_signals)}/卖出{len(sell_signals)})"
+            )
+        else:
+            logger.info(f"本次未产生买卖信号，保持现有持仓不变（{len(current_positions)}个板块）")
+
+        # 持仓状态：空仓必须被明确表达，而不是"什么都不返回"
+        regime = diagnostics.get("market_regime", "")
+        breadth_detail = diagnostics.get("breadth_detail", "")
+        if buy_signals:
+            position_status = "HOLD"
+            empty_reason = ""
+        elif sell_signals:
+            position_status = "EMPTY"
+            empty_reason = f"市场转弱触发清仓（{breadth_detail}）" if breadth_detail else "市场转弱触发清仓"
+        elif current_positions:
+            position_status = "HOLD"
+            empty_reason = ""
+        else:
+            position_status = "EMPTY"
+            if regime == "BEAR":
+                empty_reason = f"市场判定熊市，空仓观望（{breadth_detail}）"
+            else:
+                empty_reason = (
+                    f"无板块满足买入条件（{breadth_detail}）" if breadth_detail
+                    else "无板块满足买入条件"
+                )
+
+        if position_status == "EMPTY":
+            logger.info(f"{strategy_type.value} {effective_date} 空仓: {empty_reason}")
+
+        # 写缓存前保留已发生的"清仓"留痕：
+        # 清仓是已执行的历史事实，一旦某日产生过清仓卖出信号，后续重算若因市场转平
+        # 得到"无信号"，不能用空列表覆盖掉清仓记录，否则日历与推送会丢失"当日已清仓"的证据。
+        if not signals:
+            previous_clears = _load_previous_clear_signals(
+                strategy_type.value, effective_date
+            )
+            signal_dicts, preserved = _merge_clear_records(
+                signal_dicts, signals, previous_clears
+            )
+            if preserved:
+                position_status = "EMPTY"
+                empty_reason = previous_clears[0].get("reason") or empty_reason
+                logger.info(
+                    f"保留 {len(previous_clears)} 条历史清仓记录，避免空仓重算覆盖"
+                    f"（{strategy_type.value} {effective_date}）"
+                )
 
         redis_mgr.setex(
-            f"signals:{strategy_type.value}:{signal_date or datetime.now().strftime('%Y-%m-%d')}",
-            86400, json.dumps(signal_dicts, ensure_ascii=False),
+            f"signals:{strategy_type.value}:{effective_date}",
+            SIGNAL_CACHE_TTL, json.dumps(signal_dicts, ensure_ascii=False),
+        )
+        # 持仓状态与空仓原因一并缓存，供"今日信号"接口表达空仓语义
+        redis_mgr.setex(
+            f"signals:{strategy_type.value}:{effective_date}:status",
+            SIGNAL_CACHE_TTL,
+            json.dumps(
+                {
+                    "position_status": position_status,
+                    "market_regime": regime,
+                    "empty_reason": empty_reason,
+                    "signal_date": effective_date,
+                },
+                ensure_ascii=False,
+            ),
         )
 
         # 通知信号服务
         publish_message("signal.generated", {
             "event": "signals_generated",
             "strategy_type": strategy_type.value,
-            "signal_date": signal_date or datetime.now().strftime("%Y-%m-%d"),
-            "count": len(signals),
+            "signal_date": effective_date,
+            "requested_date": requested_date,
+            "count": len(signal_dicts),
+            "position_status": position_status,
+            "empty_reason": empty_reason,
             "signals": signal_dicts,
             "timestamp": datetime.now().isoformat(),
         })
 
-        return {"code": 200, "message": "策略计算完成", "data": signal_dicts}
+        message = (
+            f"策略计算完成：{position_status}，{empty_reason}"
+            if position_status == "EMPTY"
+            else f"策略计算完成，共生成 {len(signal_dicts)} 条信号"
+        )
+        if note:
+            message = f"{message}；{note}"
+        return {
+            "code": 200,
+            "message": message,
+            "data": signal_dicts,
+            "strategy_type": strategy_type.value,
+            "signal_date": effective_date,
+            "requested_date": requested_date,
+            "data_ready": True,
+            "stale": is_stale,
+            "note": note,
+            "position_status": position_status,
+            "market_regime": regime,
+            "empty_reason": empty_reason,
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -494,12 +758,55 @@ async def reset_config(config_id: int):
 
 @app.get("/signals/today")
 async def get_today_signals(strategy_type: StrategyType):
-    """获取今日信号"""
+    """获取今日信号
+
+    今日无信号时（周末/节假日手动触发生成的信号落在最近交易日），
+    自动回退到最近存在信号的日期并返回，响应中标注实际信号日期。
+    """
+    def _status_of(date_str: str, rows: list, stale: bool) -> dict:
+        """组装响应：持仓状态以信号数组为准，缓存仅补充市场状态与空仓原因"""
+        # 以实际信号为准，避免缓存状态与信号不一致时给出误导性结论
+        position_status = "HOLD" if rows else "EMPTY"
+        regime = ""
+        reason = ""
+        raw_status = redis_mgr.get(f"signals:{strategy_type.value}:{date_str}:status")
+        if raw_status:
+            try:
+                parsed = json.loads(raw_status)
+                regime = parsed.get("market_regime", "")
+                if parsed.get("position_status") == position_status:
+                    reason = parsed.get("empty_reason", "")
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return {
+            "code": 200,
+            "data": rows,
+            "signal_date": date_str,
+            "stale": stale,
+            "position_status": position_status,
+            "market_regime": regime,
+            "empty_reason": reason,
+        }
+
     today = datetime.now().strftime("%Y-%m-%d")
     cached = redis_mgr.get(f"signals:{strategy_type.value}:{today}")
     if cached:
-        return {"code": 200, "data": json.loads(cached)}
-    return {"code": 200, "data": []}
+        return _status_of(today, json.loads(cached), False)
+
+    for offset in range(1, SIGNAL_LOOKBACK_DAYS + 1):
+        fallback = (
+            datetime.strptime(today, "%Y-%m-%d") - timedelta(days=offset)
+        ).strftime("%Y-%m-%d")
+        cached = redis_mgr.get(f"signals:{strategy_type.value}:{fallback}")
+        if cached:
+            logger.info(f"今日无信号，回退返回 {fallback} 的信号")
+            return _status_of(fallback, json.loads(cached), True)
+
+    # 无任何信号缓存：区分于"已计算且空仓"
+    return {
+        "code": 200, "data": [], "signal_date": today, "stale": False,
+        "position_status": "NO_DATA", "market_regime": "", "empty_reason": "",
+    }
 
 
 @app.get("/signals/calendar")
@@ -513,20 +820,56 @@ async def get_signal_calendar(strategy_type: StrategyType, month: str = None):
         last_day = calendar.monthrange(year, mon)[1]
 
         pipe = redis_mgr.pipeline()
+        status_pipe = redis_mgr.pipeline()
         cache_keys = []
         for day in range(1, last_day + 1):
             date_str = f"{month}-{day:02d}"
             cache_key = f"signals:{strategy_type.value}:{date_str}"
             cache_keys.append(date_str)
             pipe.get(cache_key)
+            status_pipe.get(f"{cache_key}:status")
+
+        signal_caches = pipe.execute()
+        status_caches = status_pipe.execute()
 
         results = []
-        for date_str, cached in zip(cache_keys, pipe.execute()):
-            if cached:
-                signals = json.loads(cached)
+        for date_str, cached, raw_status in zip(cache_keys, signal_caches, status_caches):
+            # 注意：已计算但空仓的日期，信号缓存是空列表 "[]"（键存在）而非不存在，
+            # 因此不能用 `if cached:` 判断"是否有信号"，否则空仓标记会被短路而永远不输出。
+            try:
+                signals = json.loads(cached) if cached else []
+            except (json.JSONDecodeError, TypeError):
+                signals = []
+            if signals:
                 for sig in signals:
                     sig["signal_date"] = date_str
                 results.extend(signals)
+                continue
+            if cached is None and not raw_status:
+                # 既无信号缓存也无状态缓存 → 未计算/无数据，不输出标记
+                continue
+            # 已计算但空仓（无持仓信号）：输出标记记录，
+            # 使日历能以独立颜色区分"空仓"与"未计算/无数据"
+            parsed = {}
+            if raw_status:
+                try:
+                    parsed = json.loads(raw_status) or {}
+                except (json.JSONDecodeError, TypeError):
+                    parsed = {}
+            if parsed.get("position_status", "EMPTY") != "EMPTY":
+                continue
+            results.append({
+                "signal_date": date_str,
+                "strategy_type": strategy_type.value,
+                "sector_code": "",
+                "sector_name": "空仓",
+                "direction": "EMPTY",
+                "position_ratio": 0.0,
+                "score": 0.0,
+                "reason": parsed.get("empty_reason") or "当日空仓，无持仓信号",
+                "is_empty_position": True,
+                "market_regime": parsed.get("market_regime", ""),
+            })
 
         return {"code": 200, "data": results}
     except Exception as e:
