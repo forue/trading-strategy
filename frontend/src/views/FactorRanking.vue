@@ -83,11 +83,15 @@
               </span>
             </template>
           </el-table-column>
-          <el-table-column label="北向净流入" width="100" align="right" sortable sort-by="north_inflow">
+          <!-- 北向资金数据源已停止披露，列置灰停用 -->
+          <el-table-column label="北向净流入" width="120" align="right" sortable sort-by="north_inflow" label-class-name="col-disabled" class-name="col-disabled">
+            <template #header>
+              <el-tooltip content="沪深港通自 2024-08-19 起停止披露北向资金净买额，该列已停用" placement="top">
+                <span>北向净流入<el-tag size="small" type="info" effect="plain">已停用</el-tag></span>
+              </el-tooltip>
+            </template>
             <template #default="{ row }">
-              <span :style="{ color: row.north_inflow >= 0 ? '#f56c6c' : '#67c23a' }">
-                {{ row.north_inflow?.toFixed(2) }}亿
-              </span>
+              <span class="disabled-text">{{ row.north_inflow?.toFixed(2) }}亿</span>
             </template>
           </el-table-column>
           <el-table-column label="类别得分" min-width="250">
@@ -110,7 +114,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import { use } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 import { BarChart } from 'echarts/charts'
@@ -118,15 +122,17 @@ import { GridComponent, TooltipComponent } from 'echarts/components'
 import VChart from 'vue-echarts'
 import { strategyApi } from '@/api/strategy'
 import { useThemeStore } from '@/stores/theme'
+import { useStrategyStore } from '@/stores/strategy'
 import { useBreakpoint } from '@/composables/useBreakpoint'
 
 use([CanvasRenderer, BarChart, GridComponent, TooltipComponent])
 
 const bp = useBreakpoint()
 const themeStore = useThemeStore()
+const strategyStore = useStrategyStore()
 
 const loading = ref(false)
-const selectedStrategy = ref('MODERATE')
+const selectedStrategy = ref(strategyStore.currentStrategy as string)
 const selectedDate = ref('')
 const actualDate = ref('')
 const ranking = ref<any[]>([])
@@ -221,6 +227,12 @@ function tableRowClassName({ row }: { row: any }): string {
   return ''
 }
 
+// 全局策略切换时联动刷新排名
+watch(() => strategyStore.currentStrategy, (v) => {
+  selectedStrategy.value = v
+  fetchRanking()
+})
+
 onMounted(() => {
   fetchRanking()
 })
@@ -241,6 +253,9 @@ onMounted(() => {
   &.good { background: var(--accent-warning-light); color: var(--accent-warning); }
 }
 .category-scores { display: flex; flex-wrap: wrap; gap: 4px; }
+.disabled-text { color: var(--text-tertiary); }
+::deep(.col-disabled) { color: var(--text-tertiary) !important; }
+::deep(.col-disabled .el-tag) { margin-left: 4px; transform: scale(0.85); }
 .cat-tag {
   font-size: 11px; padding: 2px 6px;
   background: var(--bg-tertiary); border-radius: var(--radius-sm);

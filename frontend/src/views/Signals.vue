@@ -135,15 +135,17 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, watch, onMounted } from 'vue'
 import { signalApi } from '@/api/signal'
 import { strategyApi } from '@/api/strategy'
 import { useSignalStore } from '@/stores/signal'
+import { useStrategyStore } from '@/stores/strategy'
 import type { TradeSignal } from '@/api/signal'
 import { ElMessage } from 'element-plus'
 import dayjs from 'dayjs'
 
 const signalStore = useSignalStore()
+const strategyStore = useStrategyStore()
 const loading = ref(false)
 const calculating = ref(false)
 const signalList = ref<TradeSignal[]>([])
@@ -152,7 +154,7 @@ const dateRange = ref<[string, string]>([
   dayjs().format('YYYY-MM-DD'),
 ])
 
-const filterForm = reactive({ strategyType: '', direction: '' })
+const filterForm = reactive({ strategyType: strategyStore.currentStrategy as string, direction: '' })
 const pagination = reactive({ page: 1, size: 20, total: 0 })
 
 // 今日持仓状态：空仓必须显式表达，避免"无信号"被误读为"没计算"
@@ -285,6 +287,12 @@ function formatTime(val: string | null | undefined): string {
   if (!val) return '--'
   return val.replace('T', ' ').substring(0, 19)
 }
+
+// 全局策略切换时联动刷新信号列表
+watch(() => strategyStore.currentStrategy, (v) => {
+  filterForm.strategyType = v
+  fetchSignals()
+})
 
 onMounted(() => fetchSignals())
 </script>

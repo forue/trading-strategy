@@ -6,7 +6,7 @@ import 'element-plus/theme-chalk/dark/css-vars.css'
 import zhCn from 'element-plus/dist/locale/zh-cn.mjs'
 import {
   DataBoard, Setting, Bell, Wallet, Monitor, VideoPlay, Tools,
-  TrendCharts, DataLine, User, Lock, ArrowDown, Refresh,
+  TrendCharts, DataLine, DataAnalysis, User, Lock, ArrowDown, Refresh,
   Search, Plus, Edit, Delete, View, Download, Upload,
   Check, Close, Warning, InfoFilled, SuccessFilled,
   Menu, HomeFilled, Operation, Histogram, PieChart,
@@ -20,7 +20,7 @@ const app = createApp(App)
 
 const icons = {
   DataBoard, Setting, Bell, Wallet, Monitor, VideoPlay, Tools,
-  TrendCharts, DataLine, User, Lock, ArrowDown, Refresh,
+  TrendCharts, DataLine, DataAnalysis, User, Lock, ArrowDown, Refresh,
   Search, Plus, Edit, Delete, View, Download, Upload,
   Check, Close, Warning, InfoFilled, SuccessFilled,
   Menu, HomeFilled, Operation, Histogram, PieChart,

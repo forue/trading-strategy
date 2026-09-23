@@ -146,10 +146,13 @@ import {
   type FactorResultItem,
   type StrategyWeightsPayload,
 } from '@/api/strategy'
+import { useStrategyStore } from '@/stores/strategy'
+
+const strategyStore = useStrategyStore()
 
 const sectors = ref<{ sector_code: string; sector_name: string }[]>([])
 const selectedSector = ref('')
-const selectedStrategy = ref('MODERATE')
+const selectedStrategy = ref(strategyStore.currentStrategy as string)
 const loading = ref(false)
 const result = ref<FactorAnalyzeResult | null>(null)
 
@@ -266,7 +269,7 @@ function getCategoryLabel(category: string): string {
 
 const factorLabels: Record<string, string> = {
   main_flow: '主力净流入',
-  north_flow: '北向资金',
+  north_flow: '北向资金(已停用)',
   price_momentum: '价格动量',
   relative_strength: '相对强弱',
   rsi_14: 'RSI强弱指标',
@@ -284,7 +287,7 @@ const factorLabels: Record<string, string> = {
 
 const factorDescriptions: Record<string, string> = {
   main_flow: '主力资金净流入强度，反映机构资金对板块的看好程度。正值越大表示资金流入越多。',
-  north_flow: '北向资金净流入，反映外资对板块的偏好。正值表示外资加仓。',
+  north_flow: '北向资金净流入，反映外资对板块的偏好。正值表示外资加仓。（已停用：沪深港通自 2024-08-19 起停止披露净买额，该因子恒为 0）',
   price_momentum: '近5-10日价格变动趋势，动量越强表示板块上涨动能越大。',
   relative_strength: '板块涨幅相对市场平均的超额收益，正值表示跑赢大盘。',
   rsi_14: '14日相对强弱指标(0-100)。<30超卖，>70超买。用于判断板块是否过度涨跌。',
@@ -331,6 +334,11 @@ function formatDetail(factor: FactorResultItem): string {
 watch(selectedStrategy, () => {
   const st = selectedStrategy.value as keyof typeof DEFAULT_WEIGHTS_SLIDER
   Object.assign(strategyWeights, DEFAULT_WEIGHTS_SLIDER[st] || DEFAULT_WEIGHTS_SLIDER.MODERATE)
+})
+
+// 全局策略切换时同步本页策略（触发权重重置）
+watch(() => strategyStore.currentStrategy, (v) => {
+  selectedStrategy.value = v
 })
 
 loadSectors()

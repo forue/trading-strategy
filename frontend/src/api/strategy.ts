@@ -69,6 +69,74 @@ export interface StrategyConfig {
   is_active: boolean
 }
 
+/** `GET /signals/performance` 返回的复盘统计（按 horizon 口径） */
+export interface DirectionStat {
+  count: number
+  hit_count: number
+  hit_rate: number | null
+  avg_return: number | null
+  avg_return_gross: number | null
+}
+
+export interface MonthlyStat {
+  month: string
+  evaluated: number
+  hit_count: number
+  hit_rate: number | null
+  avg_return: number | null
+  avg_return_gross: number | null
+}
+
+export interface SectorStat {
+  sector_code: string
+  sector_name: string
+  evaluated: number
+  hit_count: number
+  hit_rate: number | null
+  avg_return: number | null
+  avg_return_gross: number | null
+}
+
+export interface EquityPoint {
+  date: string
+  evaluated: number
+  avg_return: number
+  avg_return_gross: number
+  cum_return: number
+}
+
+export interface SignalPerformance {
+  strategy_type: string
+  horizon_days: number
+  start_date: string | null
+  end_date: string | null
+  signal_count: number
+  evaluated_count: number
+  pending_count: number
+  /** 往返交易成本率（买入 + 卖出），来自策略配置 */
+  cost_rate: number
+  /** 命中数 / 命中率：按方向判定正确（卖出后下跌同样计命中） */
+  hit_count: number
+  hit_rate: number | null
+  /** 平均净收益：已按方向取号并扣除往返成本 */
+  avg_return: number | null
+  /** 平均毛收益：已按方向取号、未扣成本 */
+  avg_return_gross: number | null
+  median_return: number | null
+  best_return: number | null
+  worst_return: number | null
+  profit_factor: number | null
+  profit_factor_gross: number | null
+  buy: DirectionStat
+  sell: DirectionStat
+  monthly: MonthlyStat[]
+  sectors: SectorStat[]
+  equity_curve: EquityPoint[]
+  first_signal_date: string | null
+  last_signal_date: string | null
+  horizons: number[]
+}
+
 export interface BacktestHistoryItem {
   id: string
   strategy_type: string
@@ -109,6 +177,28 @@ export const strategyApi = {
       params: { strategy_type: strategyType },
       'X-Raw-Response': true,
     } as any)
+  },
+
+  // 信号复盘统计（/signals/performance 位于策略服务，故走 /strategy 前缀）
+  getSignalPerformance(params: {
+    strategyType: string
+    horizonDays?: number
+    startDate?: string
+    endDate?: string
+  }): Promise<SignalPerformance> {
+    const query: any = { strategy_type: params.strategyType }
+    if (params.horizonDays) query.horizon_days = params.horizonDays
+    if (params.startDate) query.start_date = params.startDate
+    if (params.endDate) query.end_date = params.endDate
+    return request.get('/strategy/signals/performance', { params: query })
+  },
+
+  syncSignalCache(lookbackDays = 7): Promise<any> {
+    return request.post('/strategy/signals/sync', null, { params: { lookback_days: lookbackDays } })
+  },
+
+  backfillSignalOutcomes(lookbackDays = 365): Promise<any> {
+    return request.post('/strategy/signals/backfill', null, { params: { lookback_days: lookbackDays } })
   },
 
   getDataAvailability(): Promise<{ has_data: boolean; min_date: string; max_date: string }> {

@@ -157,9 +157,15 @@
             <span :style="{ color: row.main_net_inflow >= 0 ? '#f56c6c' : '#67c23a' }">{{ (row.main_net_inflow / 1e8).toFixed(2) }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="north_net_inflow" label="北向净流入(亿)" width="130" sortable>
+        <!-- 北向资金数据源已停止披露，列置灰停用 -->
+        <el-table-column prop="north_net_inflow" label="北向净流入(亿)" width="150" sortable label-class-name="col-disabled" class-name="col-disabled">
+          <template #header>
+            <el-tooltip content="沪深港通自 2024-08-19 起停止披露北向资金净买额，该列已停用" placement="top">
+              <span>北向净流入(亿)<el-tag size="small" type="info" effect="plain">已停用</el-tag></span>
+            </el-tooltip>
+          </template>
           <template #default="{ row }">
-            <span :style="{ color: row.north_net_inflow >= 0 ? '#f56c6c' : '#67c23a' }">{{ (row.north_net_inflow / 1e8).toFixed(2) }}</span>
+            <span class="disabled-text">{{ (row.north_net_inflow / 1e8).toFixed(2) }}</span>
           </template>
         </el-table-column>
         <el-table-column prop="turnover" label="成交额(亿)" width="110" sortable>
@@ -211,9 +217,15 @@
             <span :style="{ color: row.main_net_inflow >= 0 ? '#f56c6c' : '#67c23a' }">{{ (row.main_net_inflow / 1e8).toFixed(2) }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="north_net_inflow" label="北向净流入(亿)" width="130" sortable>
+        <!-- 北向资金数据源已停止披露，列置灰停用 -->
+        <el-table-column prop="north_net_inflow" label="北向净流入(亿)" width="150" sortable label-class-name="col-disabled" class-name="col-disabled">
+          <template #header>
+            <el-tooltip content="沪深港通自 2024-08-19 起停止披露北向资金净买额，该列已停用" placement="top">
+              <span>北向净流入(亿)<el-tag size="small" type="info" effect="plain">已停用</el-tag></span>
+            </el-tooltip>
+          </template>
           <template #default="{ row }">
-            <span :style="{ color: row.north_net_inflow >= 0 ? '#f56c6c' : '#67c23a' }">{{ (row.north_net_inflow / 1e8).toFixed(2) }}</span>
+            <span class="disabled-text">{{ (row.north_net_inflow / 1e8).toFixed(2) }}</span>
           </template>
         </el-table-column>
         <el-table-column prop="turnover" label="成交额(亿)" width="110" sortable>
@@ -401,7 +413,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onUnmounted } from 'vue'
+import { ref, reactive, computed, watch, onUnmounted } from 'vue'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
 import { BarChart, LineChart, ScatterChart, CandlestickChart } from 'echarts/charts'
@@ -411,10 +423,12 @@ import { ElMessage } from 'element-plus'
 import { settingsApi } from '@/api/settings'
 import { strategyApi } from '@/api/strategy'
 import { useThemeStore } from '@/stores/theme'
+import { useStrategyStore } from '@/stores/strategy'
 import { useBreakpoint } from '@/composables/useBreakpoint'
 import dayjs from 'dayjs'
 
 const bp = useBreakpoint()
+const strategyStore = useStrategyStore()
 
 use([BarChart, LineChart, ScatterChart, CandlestickChart, GridComponent, TooltipComponent, LegendComponent, DataZoomComponent, MarkLineComponent, MarkPointComponent, CanvasRenderer])
 
@@ -446,7 +460,7 @@ const sectorHistory = ref<any[]>([])
 
 // ============ 策略叠加回放状态 ============
 const overlayDateRange = ref<string[]>([])
-const overlayStrategyType = ref('MODERATE')
+const overlayStrategyType = ref(strategyStore.currentStrategy as string)
 const overlayCapital = ref(1000000)
 const nTrials = ref(50)
 const autoOptimize = ref(false)
@@ -771,11 +785,11 @@ const flowChartOption = computed(() => {
         let html = `<b>${s.sector_name}</b><br/>`
         html += `涨跌幅: ${s.index_change_pct >= 0 ? '+' : ''}${s.index_change_pct.toFixed(2)}%<br/>`
         html += `主力净流入: ${(s.main_net_inflow / 1e8).toFixed(2)}亿<br/>`
-        html += `北向净流入: ${(s.north_net_inflow / 1e8).toFixed(2)}亿`
+        html += `北向净流入: ${(s.north_net_inflow / 1e8).toFixed(2)}亿（已停用）`
         return html
       }
     },
-    legend: { data: ['涨跌幅(%)', '主力净流入(亿)', '北向净流入(亿)'], selectedMode: 'multiple', textStyle: { color: textColor } },
+    legend: { data: ['涨跌幅(%)', '主力净流入(亿)', '北向净流入(亿)(已停用)'], selectedMode: 'multiple', textStyle: { color: textColor } },
     grid: [
       { left: 70, right: 50, top: 35, height: '42%' },
       { left: 70, right: 50, top: '58%', height: '32%' },
@@ -791,12 +805,12 @@ const flowChartOption = computed(() => {
     yAxis: [
       { type: 'value', name: '涨跌幅(%)', position: 'left', gridIndex: 0, nameTextStyle: { color: textColor }, axisLine: { show: true, lineStyle: { color: isDark ? '#7b93f5' : '#409eff' } }, axisLabel: { formatter: '{value}%', color: isDark ? '#646878' : '#9499a6' }, splitLine: { lineStyle: { color: gridColor } } },
       { type: 'value', name: '主力(亿)', position: 'left', gridIndex: 1, offset: 0, nameTextStyle: { color: textColor }, axisLine: { show: true, lineStyle: { color: isDark ? '#f06060' : '#f56c6c' } }, axisLabel: { formatter: '{value}', margin: 8, color: isDark ? '#646878' : '#9499a6' }, splitLine: { lineStyle: { color: gridColor } } },
-      { type: 'value', name: '北向(亿)', position: 'right', gridIndex: 1, axisLine: { show: true, lineStyle: { color: isDark ? '#eebb3c' : '#e6a23c' } }, axisLabel: { formatter: '{value}', margin: 8, color: isDark ? '#646878' : '#9499a6' }, splitLine: { show: false } },
+      { type: 'value', name: '北向(亿)(停用)', position: 'right', gridIndex: 1, axisLine: { show: true, lineStyle: { color: '#909399' } }, axisLabel: { formatter: '{value}', margin: 8, color: isDark ? '#646878' : '#9499a6' }, splitLine: { show: false } },
     ],
     series: [
       { name: '涨跌幅(%)', type: 'bar', xAxisIndex: 0, yAxisIndex: 0, data: changes, itemStyle: { color: (p: any) => p.data >= 0 ? '#f56c6c' : '#67c23a' }, barMaxWidth: 24 },
       { name: '主力净流入(亿)', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: mainFlow, itemStyle: { color: '#f56c6c' }, barMaxWidth: 16 },
-      { name: '北向净流入(亿)', type: 'bar', xAxisIndex: 1, yAxisIndex: 2, data: northFlow, itemStyle: { color: '#e6a23c' }, barMaxWidth: 16 },
+      { name: '北向净流入(亿)(已停用)', type: 'bar', xAxisIndex: 1, yAxisIndex: 2, data: northFlow, itemStyle: { color: '#909399', opacity: 0.5 }, barMaxWidth: 16 },
     ],
   }
 })
@@ -858,11 +872,11 @@ const sectorHistoryChartOption = computed(() => {
         }
         html += `涨跌幅: ${s.index_change_pct?.toFixed(2)}%<br/>`
         html += `主力净流入: ${(s.main_net_inflow / 1e8).toFixed(2)}亿<br/>`
-        html += `北向净流入: ${(s.north_net_inflow / 1e8).toFixed(2)}亿`
+        html += `北向净流入: ${(s.north_net_inflow / 1e8).toFixed(2)}亿（已停用）`
         return html
       },
     },
-    legend: { data: ['K线', 'MA5', 'MA10', '主力净流入(亿)', '北向净流入(亿)'], top: 0, textStyle: { color: textColor } },
+    legend: { data: ['K线', 'MA5', 'MA10', '主力净流入(亿)', '北向净流入(亿)(已停用)'], top: 0, textStyle: { color: textColor } },
     // 上下双面板：上方K线占70%，下方资金流占30%
     grid: [
       { left: 70, right: 20, top: 30, height: '52%' },  // K线主图
@@ -901,9 +915,9 @@ const sectorHistoryChartOption = computed(() => {
         barMaxWidth: 12,
       },
       {
-        name: '北向净流入(亿)', type: 'line', xAxisIndex: 1, yAxisIndex: 1, data: northFlow,
+        name: '北向净流入(亿)(已停用)', type: 'line', xAxisIndex: 1, yAxisIndex: 1, data: northFlow,
         smooth: true, symbol: 'none',
-        lineStyle: { width: 1.5, color: '#409eff' }, itemStyle: { color: '#409eff' },
+        lineStyle: { width: 1.5, color: '#909399', opacity: 0.5 }, itemStyle: { color: '#909399', opacity: 0.5 },
       },
     ],
   }
@@ -1015,6 +1029,11 @@ async function init() {
   await loadAvailableDates()
 }
 
+// 全局策略切换时同步回放策略
+watch(() => strategyStore.currentStrategy, (v) => {
+  overlayStrategyType.value = v
+})
+
 onUnmounted(() => { abortOptimize.value = true; stopAutoPlay() })
 init()
 </script>
@@ -1057,6 +1076,10 @@ init()
 }
 .rebalance-trades { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 4px; }
 .empty-portfolio { color: var(--text-tertiary); font-size: 13px; padding: 8px 0; }
+/* 北向资金功能已停用：列置灰 */
+.disabled-text { color: var(--text-tertiary); }
+::deep(.col-disabled) { color: var(--text-tertiary) !important; }
+::deep(.col-disabled .el-tag) { margin-left: 4px; transform: scale(0.85); }
 .holding-item {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
   padding: 2px 8px; margin: 2px 0; border-radius: 4px; font-size: 12px;

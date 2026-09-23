@@ -1,6 +1,8 @@
 # 前端规范文档
 
-> 版本: v2.0 | 更新日期: 2026-05-13
+> 版本: v2.2 | 更新日期: 2026-09-21 | 更新: 侧边栏图标注册约定（修复复盘菜单图标缺失）；复盘页新增持有期未走完提示
+>
+> 历史版本: v2.1 (2026-09-21) 新增策略复盘页 (`Review.vue` / `/review`)；北向相关展示置灰 | v2.0 (2026-05-13)
 
 ---
 
@@ -49,14 +51,17 @@ frontend/src/
 ├── stores/                 # Pinia 状态管理
 │   ├── user.ts             # 用户状态（Token / 登录登出）
 │   ├── signal.ts           # 信号状态（WebSocket / 信号列表）
+│   ├── strategy.ts         # 策略状态（当前策略档位，跨页面共享）
+│   ├── ai.ts               # AI 助手状态
 │   └── theme.ts            # 主题状态（亮色 / 暗色切换）
 ├── styles/                 # 全局样式
 │   └── index.scss          # 设计 Token + 布局 + 组件样式 + 响应式规则
-├── views/                  # 页面组件 (10个)
+├── views/                  # 页面组件 (11个)
 │   ├── Login.vue           # 登录 / 注册
 │   ├── Dashboard.vue       # 仪表盘
 │   ├── Strategy.vue        # 策略管理 + 回测
 │   ├── Signals.vue         # 交易信号
+│   ├── Review.vue          # 策略复盘（命中率 / 净毛收益 / 板块明细 / 累计曲线）
 │   ├── Fund.vue            # 资金管理
 │   ├── Monitor.vue         # 系统监控
 │   ├── DataReplay.vue      # 数据回放
@@ -78,6 +83,7 @@ frontend/src/
   ├── /                 # 仪表盘 (Dashboard)
   ├── /strategy         # 策略管理 (Strategy)
   ├── /signals          # 交易信号 (Signals)
+  ├── /review           # 策略复盘 (Review)
   ├── /fund             # 资金管理 (Fund)
   ├── /monitor          # 系统监控 (Monitor)
   ├── /data-replay      # 数据回放 (DataReplay)
@@ -118,7 +124,7 @@ timeout: 30s
 |------|------|---------|
 | auth | `api/auth.ts` | login, register, getUserInfo, logout |
 | signal | `api/signal.ts` | getTodaySignals, getSignalHistory, getSignalCalendar |
-| strategy | `api/strategy.ts` | getConfigs, updateConfig, runBacktest, analyzeFactorsBatch |
+| strategy | `api/strategy.ts` | getConfigs, updateConfig, runBacktest, analyzeFactorsBatch, getSignalPerformance, syncSignalCache, backfillSignalOutcomes |
 | fund | `api/fund.ts` | getPositions, getNavCurve, getReturnAttribution, getAccountSummary |
 
 ---
@@ -200,6 +206,17 @@ timeout: 30s
 - **卖出 (SELL)**: 绿色 `var(--accent-success)` （A股绿色为跌）
 
 CSS 工具类：`.signal-buy` / `.signal-sell`
+
+### 6.5 停用指标置灰约定
+
+沪深港通自 2024-08-19 起停止披露北向资金净买额，该指标保留展示但一律置灰并标注"已停用"，避免误读：
+
+- `FactorRanking.vue`：北向净流入列加 `label-class-name="col-disabled"`，表头带 `el-tag` 与 `el-tooltip`
+- `DataReplay.vue`：北向列、图表系列（灰色 + `opacity: 0.5`）、tooltip 文案统一标注"已停用"
+- `FactorAnalysis.vue`：因子标签显示为"北向资金(已停用)"，因子说明标注停用原因
+- `Settings.vue`：北向采集时点输入框 `disabled`，整项加 `feature-disabled` 类并标注"已停用"
+
+CSS 工具类：`.disabled-text`（置灰文本）、`.col-disabled`（表格列置灰）
 
 ---
 
@@ -366,6 +383,8 @@ bp.labelCount(dataLength, minLabels)  // 返回总共显示几个标签
 2. 点击背景遮罩
 3. 路由跳转自动关闭
 
+**图标注册约定**：`navItems` 的 `icon` 是图标名字符串，模板用 `<component :is="item.icon" />` 动态渲染，因此**新增菜单项时必须同步在 `main.ts` 的 `icons` 对象中注册同名图标**，否则该菜单项图标渲染为空且不报错。
+
 ---
 
 ## 九、页面实现参考
@@ -383,6 +402,18 @@ bp.labelCount(dataLength, minLabels)  // 返回总共显示几个标签
 - 回测表单：inline 表单自动换行
 - 回测图表：高度 350px → 280px (平板) → 220px (手机)
 - 指标卡片 (4× `:span="6"`)：响应式 `:xs="12" :sm="6"`
+
+### Review (`views/Review.vue`)
+
+- 头部控制区：策略档位（`strategyStore.currentStrategy`，与全站共享）、持有期（1/3/5/10 交易日）、日期范围、查询、回填收益
+- 指标卡：`grid-template-columns: repeat(auto-fill, minmax(150px, 1fr))`，窄屏自动折行
+- 图表与明细：累计净收益曲线 + 月度命中率、方向拆分 + 板块表现，两列 `1fr 1fr` → ≤900px 单列
+- 图表高度：`class="review-chart"`（280px），禁止内联 `style`（见 8.4）
+- 切换策略档位/持有期自动重新拉取 `/signals/performance`；`backfillSignalOutcomes()` 用于手动触发结算回填
+- 页头标注成交口径（T+1 开盘价买入、第 N 个交易日收盘价结算）与实际往返成本率
+  （`cost_rate`，取自策略配置），避免把毛收益误读为可落袋收益
+- 当所选持有期尚未走完（`evaluated_count === 0` 且 `pending_count > 0`）时，页头显示黄色提示，说明待评估原因并引导切换持有期查看已有数据
+- 指标口径见 `docs/05-strategy-engine.md` 5.13：命中率即方向判定正确率，与平均净收益在符号上自洽
 
 ### DataReplay (`views/DataReplay.vue`)
 

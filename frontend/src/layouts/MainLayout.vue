@@ -40,6 +40,13 @@
           <span>{{ currentPageTitle }}</span>
         </div>
         <div class="header-right">
+          <!-- 全局策略选择：任意页面切换都会驱动其余页面按该策略刷新 -->
+          <el-tooltip content="全局策略：切换后各页面按所选策略刷新" placement="bottom">
+            <el-select v-model="strategyStore.currentStrategy" size="small" class="header-strategy-select">
+              <el-option v-for="o in STRATEGY_OPTIONS" :key="o.value" :label="o.label" :value="o.value" />
+            </el-select>
+          </el-tooltip>
+
           <!-- Theme Toggle -->
           <button class="btn-ghost" :title="theme.mode === 'light' ? '切换深色模式' : '切换浅色模式'" @click="theme.toggle()">
             <el-icon :size="18"><Sunny v-if="theme.mode === 'dark'" /><Moon v-else /></el-icon>
@@ -106,6 +113,7 @@ import { ChatDotRound, Close, Expand, SwitchButton } from '@element-plus/icons-v
 import { useUserStore } from '@/stores/user'
 import { useSignalStore } from '@/stores/signal'
 import { useThemeStore } from '@/stores/theme'
+import { useStrategyStore, STRATEGY_OPTIONS } from '@/stores/strategy'
 import ChatAssistant from '@/components/ChatAssistant.vue'
 
 const route = useRoute()
@@ -113,6 +121,7 @@ const router = useRouter()
 const userStore = useUserStore()
 const signalStore = useSignalStore()
 const theme = useThemeStore()
+const strategyStore = useStrategyStore()
 
 const currentRoute = computed(() => route.path)
 const currentPageTitle = computed(() => (route.meta.title as string) || '仪表盘')
@@ -127,6 +136,7 @@ const navItems = [
   { path: '/', label: '仪表盘', icon: 'DataBoard' },
   { path: '/strategy', label: '策略管理', icon: 'Setting' },
   { path: '/signals', label: '交易信号', icon: 'Bell' },
+  { path: '/review', label: '策略复盘', icon: 'DataAnalysis' },
   { path: '/fund', label: '资金管理', icon: 'Wallet' },
   { path: '/monitor', label: '系统监控', icon: 'Monitor' },
   { path: '/data-replay', label: '数据回放', icon: 'VideoPlay' },
@@ -160,6 +170,11 @@ onUnmounted(() => {
 </script>
 
 <style lang="scss" scoped>
+.header-strategy-select {
+  width: 110px;
+  margin-right: 4px;
+}
+
 .sidebar-footer {
   padding: 12px 14px;
   border-top: 1px solid rgba(255, 255, 255, 0.06);

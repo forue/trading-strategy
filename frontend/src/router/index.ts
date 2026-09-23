@@ -32,6 +32,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '交易信号', icon: 'Bell' },
       },
       {
+        path: 'review',
+        name: 'Review',
+        component: () => import('@/views/Review.vue'),
+        meta: { title: '策略复盘', icon: 'DataAnalysis' },
+      },
+      {
         path: 'fund',
         name: 'Fund',
         component: () => import('@/views/Fund.vue'),

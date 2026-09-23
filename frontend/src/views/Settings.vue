@@ -311,9 +311,11 @@
               <el-time-picker v-model="schedulerTimes.calculate" format="HH:mm" value-format="HH:mm" placeholder="计算时间" @change="saveSettings" />
               <span style="margin-left: 8px; color: var(--text-tertiary); font-size: 13px">每交易日</span>
             </el-form-item>
-            <el-form-item label="北向资金采集">
-              <el-time-picker v-model="schedulerTimes.north_bound" format="HH:mm" value-format="HH:mm" placeholder="采集时间" @change="saveSettings" />
-              <span style="margin-left: 8px; color: var(--text-tertiary); font-size: 13px">每交易日</span>
+            <el-form-item label="北向资金采集" class="feature-disabled">
+              <el-time-picker v-model="schedulerTimes.north_bound" format="HH:mm" value-format="HH:mm" placeholder="采集时间" disabled />
+              <el-tooltip content="沪深港通自 2024-08-19 起停止披露北向资金净买额，采集结果恒为 0，该采集任务已暂停" placement="top">
+                <span class="disabled-note">已停用</span>
+              </el-tooltip>
             </el-form-item>
           </el-form>
         </div>
@@ -536,9 +538,9 @@ async function handleClearAll() {
 const dbStatus = ref<any>(null)
 const schedulerEnabled = ref(true)
 const schedulerTimes = reactive({
-  collect: '15:00',
-  calculate: '15:05',
-  north_bound: '16:00',
+  collect: '15:30',
+  calculate: '15:35',
+  north_bound: '16:00', // 保留字段用于向后兼容，但采集任务已停用
 })
 
 async function loadDbStatus() {
@@ -579,8 +581,8 @@ async function loadSettings() {
     cacheTtlDays.value = data.cache_ttl_days ?? 7
     schedulerEnabled.value = data.scheduler_enabled ?? true
     if (data.scheduler_times) {
-      schedulerTimes.collect = data.scheduler_times.collect || '15:00'
-      schedulerTimes.calculate = data.scheduler_times.calculate || '15:05'
+      schedulerTimes.collect = data.scheduler_times.collect || '15:30'
+      schedulerTimes.calculate = data.scheduler_times.calculate || '15:35'
       schedulerTimes.north_bound = data.scheduler_times.north_bound || '16:00'
     }
   } catch { /* ignore */ }
@@ -597,6 +599,16 @@ onMounted(() => {
 
 <style lang="scss" scoped>
 .settings-page { padding: 0; }
+.feature-disabled {
+  :deep(.el-form-item__label),
+  :deep(.el-input.is-disabled .el-input__inner) { color: var(--text-tertiary); }
+}
+.disabled-note {
+  margin-left: 8px;
+  font-size: 13px;
+  color: var(--text-tertiary);
+  cursor: not-allowed;
+}
 :deep(.el-tabs--border-card) {
   border-radius: var(--radius-md);
   overflow: hidden;

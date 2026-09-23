@@ -32,9 +32,7 @@
         <div class="card-header">
           <span class="card-title">今日策略信号</span>
           <el-select v-model="currentStrategy" size="small" style="width: 120px">
-            <el-option label="激进轮动" value="AGGRESSIVE" />
-            <el-option label="稳健轮动" value="MODERATE" />
-            <el-option label="保守轮动" value="CONSERVATIVE" />
+            <el-option v-for="o in STRATEGY_OPTIONS" :key="o.value" :label="o.label" :value="o.value" />
           </el-select>
         </div>
         <div class="signal-list">
@@ -167,7 +165,9 @@ import { aiApi } from '@/api/ai'
 import AiAnalysisPanel from '@/components/AiAnalysisPanel.vue'
 import RiskAlertPanel from '@/components/RiskAlertPanel.vue'
 import { useThemeStore } from '@/stores/theme'
+import { useStrategyStore, STRATEGY_OPTIONS } from '@/stores/strategy'
 import { useBreakpoint } from '@/composables/useBreakpoint'
+import { storeToRefs } from 'pinia'
 import type { TradeSignal } from '@/api/signal'
 
 const bp = useBreakpoint()
@@ -176,8 +176,11 @@ use([HeatmapChart, ScatterChart, GridComponent, TooltipComponent, VisualMapCompo
 
 const themeStore = useThemeStore()
 
+// 全局策略：与头部选择器、其他页面共用同一状态
+const strategyStore = useStrategyStore()
+const { currentStrategy } = storeToRefs(strategyStore)
+
 const heatmapPeriod = ref('5d')
-const currentStrategy = ref('AGGRESSIVE')
 const calendarMonth = ref(dayjs().format('YYYY-MM'))
 const todaySignals = ref<TradeSignal[]>([])
 
