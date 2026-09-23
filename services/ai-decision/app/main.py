@@ -4,6 +4,7 @@ import os
 import json
 import asyncio
 import threading
+from typing import Optional
 from datetime import datetime
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
@@ -27,6 +28,54 @@ llm_client: BaseLLMClient = None
 signal_llm_client: BaseLLMClient = None  # 信号分析专用 LLM 客户端
 analyzer: SignalAnalyzer = None
 _main_loop: asyncio.AbstractEventLoop = None
+
+
+def _resolve_default_llm_args(config: dict) -> Optional[dict]:
+    """解析默认 LLM 客户端的创建参数（不含 ollama_* 参数）
+
+    ai:config 里的 provider / api_key / base_url 是前端设置页不再写入的遗留字段
+    （设置页只写 temperature / max_tokens / signal_analysis_*），真实凭据保存在
+    ai:providers，因此按 provider id 回查凭据；回查不到时退回信号分析提供商（后端唯一由
+    用户选定的提供商），否则默认客户端恒定创建失败——每日复盘会返回
+    "NoneType object has no attribute chat" 的假报告。
+
+    非 ollama 的提供商统一走 OpenAI 兼容协议分支（与信号分析专用客户端一致）。
+    """
+    provider_mgr = _get_provider_mgr()
+    provider_id = config.get("provider", "")
+    if provider_id == "ollama":
+        return {"provider": "ollama", "model": config.get("ollama_model", settings.ollama_model)}
+
+    # 1. 遗留字段 provider 对应的凭据
+    provider_config = provider_mgr.get(provider_id) if provider_id else None
+    if provider_config and provider_config.api_key:
+        return {
+            "provider": "openai",
+            "api_key": provider_config.api_key,
+            "base_url": provider_config.base_url,
+            "model": config.get("model", settings.ai_model),
+        }
+
+    # 2. 退回信号分析提供商（与其共用凭据与模型）
+    signal_provider = config.get("signal_analysis_provider", "")
+    signal_config = provider_mgr.get(signal_provider) if signal_provider else None
+    if signal_config and signal_config.api_key:
+        return {
+            "provider": "openai",
+            "api_key": signal_config.api_key,
+            "base_url": signal_config.base_url,
+            "model": config.get("signal_analysis_model") or config.get("model", settings.ai_model),
+        }
+
+    # 3. 兜底：ai:config 里直接写了凭据（直接调用 API 写入的旧配置）
+    if config.get("api_key"):
+        return {
+            "provider": config.get("provider", settings.ai_provider),
+            "api_key": config["api_key"],
+            "base_url": config.get("base_url", settings.ai_base_url),
+            "model": config.get("model", settings.ai_model),
+        }
+    return None
 
 
 def _init_llm():
@@ -67,17 +116,16 @@ def _init_llm():
     # 2. 默认 LLM 客户端（辅助用，失败不阻断）
     if not llm_client:
         try:
-            llm_client = ModelAdapterFactory.create(
-                provider=config.get("provider", settings.ai_provider),
-                api_key=config.get("api_key", settings.ai_api_key),
-                base_url=config.get("base_url", settings.ai_base_url),
-                model=config.get("model", settings.ai_model),
-                ollama_base_url=config.get("ollama_base_url", settings.ollama_base_url),
-                ollama_model=config.get("ollama_model", settings.ollama_model),
-            )
-            provider = config.get("provider", settings.ai_provider)
-            model = config.get("model", settings.ai_model) if config.get("provider", settings.ai_provider) == "openai" else config.get("ollama_model", settings.ollama_model)
-            logger.info(f"默认 LLM 客户端初始化完成: provider={provider}, model={model}")
+            llm_args = _resolve_default_llm_args(config)
+            if not llm_args:
+                logger.warning("默认 LLM 客户端未初始化：ai:providers 中没有可用凭据的提供商")
+            else:
+                llm_client = ModelAdapterFactory.create(
+                    ollama_base_url=config.get("ollama_base_url", settings.ollama_base_url),
+                    ollama_model=config.get("ollama_model", settings.ollama_model),
+                    **llm_args,
+                )
+                logger.info(f"默认 LLM 客户端初始化完成: provider={llm_args['provider']}, model={llm_args['model']}")
         except Exception as e:
             logger.warning(f"默认 LLM 客户端初始化失败（信号分析不受影响）: {e}")
 
@@ -163,7 +211,11 @@ def _start_consumer():
 
 
 async def _fetch_signals_from_signal_service(strategy_type: str, signal_date: str) -> list:
-    """从信号通知服务获取信号数据（信号存在 signal 服务的 Redis 中）"""
+    """从信号通知服务获取信号数据（信号存在 signal 服务的 Redis 中）
+
+    上游不可用或返回异常时抛 502：否则调用方会把服务故障当成"当日无信号"，
+    在界面上显示为"暂无信号"，掩盖真实故障。
+    """
     import httpx
     try:
         async with httpx.AsyncClient(timeout=10) as client:
@@ -171,13 +223,18 @@ async def _fetch_signals_from_signal_service(strategy_type: str, signal_date: st
                 f"{settings.signal_url}/signals/today",
                 params={"strategy_type": strategy_type},
             )
-            if resp.json().get("code") == 200:
-                signals = resp.json().get("data", [])
-                # 按日期过滤
-                return [s for s in signals if s.get("signal_date", "") == signal_date] if signals else []
+            body = resp.json()
     except Exception as e:
-        logger.warning(f"从信号服务获取信号失败: {e}")
-    return []
+        logger.error(f"从信号服务获取信号失败: {e}")
+        raise HTTPException(status_code=502, detail=f"信号服务不可用: {e}")
+
+    if body.get("code") != 200:
+        logger.error(f"信号服务返回异常: {body.get('message')}")
+        raise HTTPException(status_code=502, detail=f"信号服务返回异常: {body.get('message')}")
+
+    signals = body.get("data") or []
+    # 按日期过滤
+    return [s for s in signals if s.get("signal_date", "") == signal_date]
 
 
 async def _handle_signals(message: dict):
@@ -214,7 +271,7 @@ async def _handle_signals(message: dict):
     logger.info(f"开始解读 {len(signals)} 个信号: strategy={strategy_type}")
 
     # 获取真实市场数据构建上下文
-    contexts = await _build_signal_contexts(signals)
+    contexts = await _build_signal_contexts(signals, strategy_type)
 
     analyses = await analyzer.analyze_signals(signals, contexts=contexts)
 
@@ -234,30 +291,156 @@ async def _handle_signals(message: dict):
     logger.info(f"信号解读完成: {len(analyses)} 个, strategy={strategy_type}")
 
 
-async def _build_signal_contexts(signals: list[dict]) -> dict:
-    """为信号解读构建真实的市场上下文（含近15天历史数据）"""
+async def _fetch_recent_signals(client, strategy_type: str, start_date: str, end_date: str) -> list[dict]:
+    """拉取指定策略近段时间的历史信号（信号缓存 TTL 仅 7 天，实际可得区间可能更短）"""
+    if not strategy_type:
+        return []
+    try:
+        resp = await client.get(
+            f"{settings.signal_url}/signals/history",
+            params={"strategy_type": strategy_type, "start_date": start_date, "end_date": end_date},
+        )
+        body = resp.json()
+        if body.get("code") == 200:
+            return body.get("data", []) or []
+    except Exception as e:
+        logger.warning(f"获取历史信号失败: {e}")
+    return []
+
+
+def _format_signal_history(sector_signals: list[dict], records: list[dict]) -> str:
+    """把该板块历史信号与行情对齐，生成"信号后收益/胜率"文本
+
+    信号缓存 TTL 仅 7 天，故只按实际可得记录回溯，不夸大样本量。
+    """
+    if not sector_signals:
+        return "近40天内该板块无历史信号记录"
+
+    close_by_date = {}
+    for r in records or []:
+        day = str(r.get("_time") or r.get("date") or "")[:10]
+        close = r.get("index_close")
+        if day and close:
+            close_by_date[day] = float(close)
+    days_sorted = sorted(close_by_date)
+
+    lines = []
+    buy_rets: list[float] = []
+    for sig in sorted(sector_signals, key=lambda x: str(x.get("signal_date", ""))):
+        day = str(sig.get("signal_date", ""))
+        direction = sig.get("direction", "")
+        line = f"- {day} {direction} 评分{sig.get('score', '')}"
+        if day in close_by_date:
+            idx = days_sorted.index(day)
+            end = min(idx + 5, len(days_sorted) - 1)
+            if end > idx:
+                ret = close_by_date[days_sorted[end]] / close_by_date[day] - 1
+                line += f" → 信号后{end - idx}个交易日 {ret * 100:+.2f}%"
+                if direction == "BUY":
+                    buy_rets.append(ret)
+        lines.append(line)
+
+    if buy_rets:
+        wins = sum(1 for r in buy_rets if r > 0)
+        head = (
+            f"近40天该板块历史信号 {len(sector_signals)} 次；其中 BUY 信号 {len(buy_rets)} 次"
+            f"可验证，信号后至最新交易日上涨 {wins} 次（胜率 {wins / len(buy_rets) * 100:.0f}%），"
+            f"平均收益 {sum(buy_rets) / len(buy_rets) * 100:+.2f}%"
+        )
+    else:
+        head = f"近40天该板块历史信号 {len(sector_signals)} 次（信号后收益待后续交易日验证）"
+    return head + "\n" + "\n".join(lines)
+
+
+async def _fetch_market_index_change() -> float | None:
+    """获取真实大盘（上证指数）当日涨跌幅（%），失败返回 None
+
+    提示词中的"大盘涨跌幅"必须用该值。不能用全市场板块涨跌幅的等权均值代替，
+    两者差异显著（2026-09-21 上证 +0.97% vs 板块等权均值 +1.86%），
+    混用会放大市场强弱判断；风险预警阈值（1.0%/2.5%）也因此失真。
+    """
+    try:
+        from .external_data import get_market_indices
+        data = await get_market_indices()
+        for item in data.get("indices") or []:
+            if item.get("name") == "上证指数":
+                return round(float(item.get("change_pct") or 0), 2)
+        logger.warning(f"大盘指数数据中未找到上证指数: {list(data.keys())}")
+    except Exception as e:
+        logger.warning(f"获取大盘指数失败: {e}")
+    return None
+
+
+async def _get_with_retry(client, url: str, params: dict, attempts: int = 3, backoff: float = 2.0):
+    """带退避重试的 GET 请求
+
+    单次超时不代表数据不可得：采集任务在线程池排队或数据源限流时，
+    查询接口可能短暂无响应，故重试若干次再判定失败。
+    """
+    last_exc: Optional[Exception] = None
+    for i in range(attempts):
+        try:
+            return await client.get(url, params=params)
+        except Exception as e:
+            last_exc = e
+            logger.warning(
+                f"请求 {url} 失败（第 {i + 1}/{attempts} 次）: "
+                f"{type(e).__name__}: {str(e) or '无附加信息'}"
+            )
+            if i < attempts - 1:
+                await asyncio.sleep(backoff * (i + 1))
+    raise last_exc
+
+
+async def _build_signal_contexts(signals: list[dict], strategy_type: str = "") -> dict:
+    """为信号解读构建真实的市场上下文（含近25天历史数据 + 历史信号回溯）
+
+    关键请求带退避重试；仍取不到数据的板块写入 data_available=False 的占位上下文，
+    使提示词把这些字段标注为"数据不可用"，避免把 0.0 当作真实行情解读。
+    """
     from .signal_analyzer import MarketContext
     import httpx
     from datetime import timedelta
 
     contexts = {}
     data_collector_url = settings.data_collector_url
+    # 同批信号来自同一策略；未显式传入时取信号自带字段
+    if not strategy_type and signals:
+        strategy_type = signals[0].get("strategy_type", "")
 
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=6) as client:
             today = datetime.now().strftime("%Y-%m-%d")
             start_15d = (datetime.now() - timedelta(days=25)).strftime("%Y-%m-%d")  # 25天确保覆盖15个交易日
+            start_hist = (datetime.now() - timedelta(days=40)).strftime("%Y-%m-%d")
+
+            # 历史信号（供"信号可靠性/历史胜率"分析）
+            recent_signals = await _fetch_recent_signals(client, strategy_type, start_hist, today)
 
             # 获取当日全部板块数据（市场宽度）
-            resp = await client.get(f"{data_collector_url}/query/all-sectors",
-                                    params={"start_date": today, "end_date": today})
             all_sectors = {}
             market_avg = 0.0
-            if resp.json().get("code") == 200 and resp.json().get("data"):
-                for s in resp.json()["data"]:
-                    all_sectors[s.get("sector_code", "")] = s
-                changes = [s.get("index_change_pct", 0) or 0 for s in resp.json()["data"]]
-                market_avg = sum(changes) / max(len(changes), 1)
+            try:
+                resp = await _get_with_retry(
+                    client, f"{data_collector_url}/query/all-sectors",
+                    {"start_date": today, "end_date": today},
+                )
+                body = resp.json()
+                if body.get("code") == 200 and body.get("data"):
+                    for s in body["data"]:
+                        all_sectors[s.get("sector_code", "")] = s
+                    changes = [s.get("index_change_pct", 0) or 0 for s in body["data"]]
+                    market_avg = sum(changes) / max(len(changes), 1)
+            except Exception as e:
+                logger.error(
+                    f"获取全市场板块数据失败（重试后仍未成功）: {type(e).__name__}: {str(e) or '无附加信息'}"
+                )
+
+            if not all_sectors:
+                logger.error("全市场板块数据为空，本次市场宽度与市场情绪将标注为不可用")
+
+            # 大盘指数（真实上证指数）与板块等权均值是两个指标，分别传入上下文
+            market_index_change = await _fetch_market_index_change()
 
             # 为每个信号的板块获取近15天历史数据
             for sig in signals:
@@ -265,9 +448,9 @@ async def _build_signal_contexts(signals: list[dict]) -> dict:
                 if not code:
                     continue
                 try:
-                    hist_resp = await client.get(
-                        f"{data_collector_url}/query/sector-data",
-                        params={"sector_code": code, "start_date": start_15d, "end_date": today},
+                    hist_resp = await _get_with_retry(
+                        client, f"{data_collector_url}/query/sector-data",
+                        {"sector_code": code, "start_date": start_15d, "end_date": today},
                     )
                     hist_data = hist_resp.json()
                     records = hist_data.get("data", []) if hist_data.get("code") == 200 else []
@@ -277,7 +460,11 @@ async def _build_signal_contexts(signals: list[dict]) -> dict:
                     change_today = 0.0
                     main_flow = 0.0
                     turnover = 0.0
-                    avg_flow_5d = 0.0
+                    avg_flow_5d = None
+                    pe_ttm = None
+                    pb = None
+                    pe_percentile = None
+                    pb_percentile = None
 
                     if records:
                         chg = [r.get("index_change_pct", 0) or 0 for r in records]
@@ -290,21 +477,33 @@ async def _build_signal_contexts(signals: list[dict]) -> dict:
                             change_10d = round(sum(chg[-10:]), 2)
                         main_flow = flows[-1] if flows else 0
                         turnover = records[-1].get("turnover", 0) or 0
+                        # 估值取自最新交易日（历史分位需≥10个交易日样本，早期为空）
+                        pe_ttm = records[-1].get("pe_ttm")
+                        pb = records[-1].get("pb")
+                        pe_percentile = records[-1].get("pe_percentile")
+                        pb_percentile = records[-1].get("pb_percentile")
 
-                    # 市场宽度
-                    up_count = sum(1 for s in all_sectors.values() if (s.get("index_change_pct", 0) or 0) > 0)
-                    total = max(len(all_sectors), 1)
-                    up_ratio = up_count / total
-                    if up_ratio >= 0.6:
-                        sentiment = "强势"
-                    elif up_ratio >= 0.5:
-                        sentiment = "偏强"
-                    elif up_ratio >= 0.4:
-                        sentiment = "中性"
-                    elif up_ratio >= 0.3:
-                        sentiment = "偏弱"
+                    # 市场宽度（全市场数据缺失时不得按 0 计算，否则会误判为"弱势"）
+                    if all_sectors:
+                        up_count = sum(1 for s in all_sectors.values() if (s.get("index_change_pct", 0) or 0) > 0)
+                        total = max(len(all_sectors), 1)
+                        up_ratio = up_count / total
+                        if up_ratio >= 0.6:
+                            sentiment = "强势"
+                        elif up_ratio >= 0.5:
+                            sentiment = "偏强"
+                        elif up_ratio >= 0.4:
+                            sentiment = "中性"
+                        elif up_ratio >= 0.3:
+                            sentiment = "偏弱"
+                        else:
+                            sentiment = "弱势"
                     else:
-                        sentiment = "弱势"
+                        sentiment = "未知（全市场板块数据获取失败）"
+
+                    # 该板块历史信号回溯（与行情对齐，给出信号后收益/胜率）
+                    hit_signals = [s for s in recent_signals if s.get("sector_code") == code]
+                    signal_history_text = _format_signal_history(hit_signals, records)
 
                     contexts[code] = MarketContext(
                         sector_code=code,
@@ -314,15 +513,46 @@ async def _build_signal_contexts(signals: list[dict]) -> dict:
                         change_today=change_today,
                         main_flow=main_flow,
                         north_flow=0.0,
+                        # 北向净买额自 2024-08-19 起停止披露，采集值恒为 0，
+                        # 标记为不可用以免 LLM 误读为"外资缺席"
+                        north_flow_available=False,
                         turnover=turnover,
-                        market_change=round(market_avg, 2),
+                        market_change=market_index_change or 0.0,
+                        market_change_available=market_index_change is not None,
+                        # 全市场数据缺失时传 None 而非 0.0，模板会渲染为"数据不可用"
+                        market_avg_change=round(market_avg, 2) if all_sectors else None,
                         market_sentiment=sentiment,
+                        signal_history_text=signal_history_text,
+                        avg_flow_5d=avg_flow_5d,
+                        pe_ttm=pe_ttm,
+                        pb=pb,
+                        pe_percentile=pe_percentile,
+                        pb_percentile=pb_percentile,
+                        etf_code=sig.get("etf_code", ""),
+                        etf_name=sig.get("etf_name", ""),
+                        rank=sig.get("rank"),
+                        total_sectors=sig.get("total_sectors"),
+                        # 未取到该板块行情时标记不可用，提示词据此渲染"数据不可用"
+                        data_available=bool(records),
                     )
                 except Exception as e:
-                    logger.warning(f"获取板块{code}数据失败: {e}")
+                    logger.warning(
+                        f"获取板块{code}数据失败: {type(e).__name__}: {str(e) or '无附加信息'}"
+                    )
+                    # 写入占位上下文，让提示词把该板块行情标注为不可用，
+                    # 而不是把默认值 0.0 当作真实行情解读
+                    contexts[code] = MarketContext(
+                        sector_code=code,
+                        sector_name=sig.get("sector_name", ""),
+                        data_available=False,
+                        etf_code=sig.get("etf_code", ""),
+                        etf_name=sig.get("etf_name", ""),
+                        rank=sig.get("rank"),
+                        total_sectors=sig.get("total_sectors"),
+                    )
 
     except Exception as e:
-        logger.error(f"获取市场数据失败: {e}")
+        logger.error(f"获取市场数据失败: {type(e).__name__}: {str(e) or '无附加信息'}")
 
     return contexts
 
@@ -392,7 +622,7 @@ async def analyze_signal(request: AnalyzeRequest):
         if not signals:
             return success_response(data={"analyses": [], "message": "当日无信号"})
 
-        contexts = await _build_signal_contexts(signals)
+        contexts = await _build_signal_contexts(signals, request.strategy_type)
         analyses = await analyzer.analyze_signals(signals, contexts=contexts)
         analysis_dicts = [a.model_dump() for a in analyses]
 
@@ -435,12 +665,16 @@ async def get_analysis_history(strategy_type: str = "AGGRESSIVE", start_date: st
 
 
 class RiskCheckRequest(BaseModel):
+    """风险检查入参
+
+    未提供的字段用 None 表示：用 0.0 当哨兵会把"真实为 0"（平盘、零盈亏）误判为未提供。
+    """
     strategy_type: str = "MODERATE"
-    positions: dict = {}
-    total_assets: float = 0.0
-    daily_pnl: float = 0.0
-    max_drawdown: float = 0.0
-    market_change: float = 0.0
+    positions: Optional[dict] = None
+    total_assets: Optional[float] = None
+    daily_pnl: Optional[float] = None
+    max_drawdown: Optional[float] = None
+    market_change: Optional[float] = None
 
 
 @app.post("/api/ai/risk-check")
@@ -452,8 +686,8 @@ async def risk_check(request: RiskCheckRequest):
 
         monitor = RiskMonitor()
 
-        # 如果没有传入持仓，从 Redis DB 1 读取（持仓存在 signal 服务的 DB 中）
-        positions = request.positions
+        # 如果没有传入持仓，从 Redis DB 1 读取该策略的持仓（持仓由 strategy 服务写入）
+        positions = request.positions or {}
         if not positions:
             try:
                 import redis as _redis
@@ -462,52 +696,54 @@ async def risk_check(request: RiskCheckRequest):
                     password=settings.redis_password or None, db=1,
                     decode_responses=True, socket_timeout=3,
                 )
-                for st in ["AGGRESSIVE", "MODERATE", "CONSERVATIVE"]:
-                    positions_raw = _pos_client.get(f"positions:{st}")
-                    if positions_raw:
-                        positions = json.loads(positions_raw)
-                        break
+                positions_raw = _pos_client.get(f"positions:{request.strategy_type}")
+                if positions_raw:
+                    positions = json.loads(positions_raw)
                 _pos_client.close()
             except Exception as e:
                 logger.warning(f"读取持仓数据失败: {e}")
 
-        # 获取真实市场数据（如果未传入），使用最近可用日期
+        # 未显式传入时才自动补齐
         market_change = request.market_change
-        daily_pnl = request.daily_pnl
+        if market_change is None:
+            # 大盘涨跌幅取真实上证指数；取不到时保持 0（不触发大盘跌幅预警），
+            # 不能用板块等权均值代替，否则 1.0%/2.5% 的预警阈值会失真
+            index_change = await _fetch_market_index_change()
+            market_change = index_change if index_change is not None else 0.0
 
-        if market_change == 0.0 or daily_pnl == 0.0:
-            try:
-                async with httpx.AsyncClient(timeout=10) as client:
-                    # 往前查找最近有数据的日期
-                    from datetime import timedelta as _td
-                    sectors = []
-                    for delta in range(7):
-                        check_date = (datetime.now() - _td(days=delta)).strftime("%Y-%m-%d")
-                        resp = await client.get(
-                            f"{settings.data_collector_url}/query/all-sectors",
-                            params={"start_date": check_date, "end_date": check_date},
-                        )
-                        if resp.json().get("code") == 200 and resp.json().get("data"):
-                            sectors = resp.json()["data"]
-                            break
-                    if sectors:
-                        changes = [s.get("index_change_pct", 0) or 0 for s in sectors]
-                        if market_change == 0.0:
-                            market_change = round(sum(changes) / max(len(changes), 1), 2)
-                        if daily_pnl == 0.0 and positions:
+        daily_pnl = request.daily_pnl
+        if daily_pnl is None:
+            # 未传入时用持仓的板块加权涨跌幅估算组合当日盈亏
+            daily_pnl = 0.0
+            if positions:
+                try:
+                    async with httpx.AsyncClient(timeout=10) as client:
+                        # 往前查找最近有数据的日期
+                        from datetime import timedelta as _td
+                        sectors = []
+                        for delta in range(7):
+                            check_date = (datetime.now() - _td(days=delta)).strftime("%Y-%m-%d")
+                            resp = await client.get(
+                                f"{settings.data_collector_url}/query/all-sectors",
+                                params={"start_date": check_date, "end_date": check_date},
+                            )
+                            if resp.json().get("code") == 200 and resp.json().get("data"):
+                                sectors = resp.json()["data"]
+                                break
+                        if sectors:
                             sector_map = {s.get("sector_code"): s.get("index_change_pct", 0) or 0 for s in sectors}
                             weighted_pnl = 0.0
                             for code, weight in positions.items():
                                 weighted_pnl += weight * sector_map.get(code, 0)
                             daily_pnl = round(weighted_pnl, 4)
-            except Exception as e:
-                logger.warning(f"获取市场数据失败: {e}")
+                except Exception as e:
+                    logger.warning(f"获取市场数据失败: {e}")
 
         state = PortfolioState(
             positions=positions,
-            total_assets=request.total_assets,
+            total_assets=request.total_assets or 0.0,
             daily_pnl=daily_pnl,
-            max_drawdown=request.max_drawdown,
+            max_drawdown=request.max_drawdown or 0.0,
             market_change=market_change,
         )
 
@@ -527,7 +763,7 @@ async def risk_check(request: RiskCheckRequest):
         return success_response(data={
             "alerts": alert_dicts,
             "alert_count": len(alert_dicts),
-            "overall_risk": "HIGH" if any(a.level == "CRITICAL" for a in alerts) else "MEDIUM" if alerts else "LOW",
+            "overall_risk": "HIGH" if any(a.level.value == "CRITICAL" for a in alerts) else "MEDIUM" if alerts else "LOW",
         })
     except Exception as e:
         logger.error(f"风险检查失败: {e}")
@@ -542,8 +778,9 @@ class DailyReviewRequest(BaseModel):
 async def daily_review(request: DailyReviewRequest):
     """生成每日复盘报告"""
     try:
-        if not analyzer:
-            raise HTTPException(status_code=503, detail="AI 服务未就绪")
+        # 复盘走默认客户端（analyzer 可能由信号专用客户端兜底而存在），两者都要就绪
+        if not analyzer or not llm_client:
+            raise HTTPException(status_code=503, detail="AI 服务未就绪，请检查 LLM 配置")
 
         review_date = request.date or datetime.now().strftime("%Y-%m-%d")
 
@@ -553,11 +790,17 @@ async def daily_review(request: DailyReviewRequest):
             return success_response(data=json.loads(cached))
 
         from .daily_reviewer import DailyReviewer, DailyReviewDataCollector
-        collector = DailyReviewDataCollector(redis_mgr.client)
+        collector = DailyReviewDataCollector(
+            settings.strategy_url, settings.data_collector_url, settings.signal_url
+        )
         market_data = await collector.collect(review_date)
 
         reviewer = DailyReviewer(llm_client)
         report = await reviewer.generate_review(market_data)
+
+        # 生成失败的报告（model=error）只含错误文本，缓存 30 天会让偶发故障长期固化
+        if report.model == "error":
+            raise HTTPException(status_code=502, detail=report.market_summary)
 
         redis_mgr.setex(cache_key, 30 * 86400, json.dumps(report.model_dump(), ensure_ascii=False))
 
@@ -688,14 +931,13 @@ async def update_config(request: UpdateConfigRequest):
 
         # 2. 默认客户端
         try:
-            llm_client_temp = ModelAdapterFactory.create(
-                provider=config["provider"],
-                api_key=config["api_key"],
-                base_url=config["base_url"],
-                model=config["model"],
-                ollama_base_url=config["ollama_base_url"],
-                ollama_model=config["ollama_model"],
-            )
+            llm_args = _resolve_default_llm_args(config)
+            if llm_args:
+                llm_client_temp = ModelAdapterFactory.create(
+                    ollama_base_url=config["ollama_base_url"],
+                    ollama_model=config["ollama_model"],
+                    **llm_args,
+                )
         except Exception as e:
             logger.warning(f"默认 LLM 客户端更新失败（信号分析不受影响）: {e}")
 
@@ -1014,6 +1256,11 @@ async def chat(request: ChatRequest):
 
         # 通过 Agent 执行（支持工具调用）
         agent = _get_agent(request.provider, request.model)
+        if not agent:
+            raise HTTPException(
+                status_code=503,
+                detail=f"AI 服务未就绪：提供商 {request.provider or '默认'} 缺少可用的 API Key",
+            )
         full_content = ""
         full_thinking = ""
         total_tokens = 0

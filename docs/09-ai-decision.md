@@ -1,6 +1,6 @@
 # AI 决策服务设计文档
 
-> 版本: v1.1 | 创建日期: 2026-05-01 | 更新日期: 2026-09-12 | 更新内容: 信号重算时作废过期解读（见 6.3）
+> 版本: v1.3 | 创建日期: 2026-05-01 | 更新日期: 2026-09-23 | 更新内容: 信号解读预算放开至 4000 并支持截断重试（见 3.3）；新增外部数据源容错与 push2 熔断（见 3.5）；市场上下文构建增加重试与显式降级标记（见 3.6）
 
 ---
 
@@ -165,12 +165,14 @@ class PromptEngine:
   - market_context: 从 Redis/InfluxDB 聚合的市场数据
 
 处理:
-  1. 获取板块近期资金流向 (InfluxDB)
-  2. 获取北向资金变化 (Redis)
-  3. 获取该板块历史信号 (Redis)
-  4. 组装 Prompt
-  5. 调用 LLM
-  6. 解析响应，提取结构化结果
+ 1. 取板块近25天行情与资金流（数据采集服务 /query/sector-data）
+ 2. 取当日全板块涨跌，计算市场宽度与情绪（数据采集服务 /query/all-sectors）
+ 3. 取该策略近40天历史信号（信号服务 /signals/history），与该板块行情对齐，
+    计算"信号后收益/胜率"填入 signal_history_text
+ 4. 组装 Prompt
+ 5. 调用 LLM（max_tokens=4000）
+ 6. 解析响应（先按完整 JSON 解析，失败则按字段正则抽取），提取结构化结果；
+    连 interpretation 都提取不到时，提高预算到 8000 重试一次，仍失败才回退原文
 
 输出:
   - SignalAnalysis {
@@ -180,6 +182,36 @@ class PromptEngine:
       suggestion: str          # 操作建议
     }
 ```
+
+**响应容错**：LLM 输出可能因达到 `max_tokens` 而在 JSON 中途截断（历史曾出现
+`max_tokens=1000` 时在 `"suggestion"` 字段处被截断）。`_parse_response()` 先尝试
+`json.loads`，失败时调用 `_extract_fields()` 用正则逐字段抽取 `interpretation` /
+`risk_factors` / `confidence` / `suggestion`，仅在 `interpretation` 也提取不到（正文被从
+中间截断）时返回 `None`。
+
+推理模型（如 `deepseek-v4-flash`）的思维链与正文**共享** `max_tokens` 预算
+（`usage.completion_tokens_details.reasoning_tokens` 计入 `completion_tokens`），实测思维链可达
+1500+ tokens。预算不足时正文 JSON 会被从中间截断，`interpretation` 无法正则匹配，整条解读退化
+为原始 JSON 文本（前端展示为乱码）。因此基准预算取 4000，并在解析返回 `None` 时用 8000
+重试一次，两次都失败才回退原文（`_raw_analysis()`）。
+
+**数据可用性与提示词约束**：
+
+- **北向净买额**：自 2024-08-19 起交易所停止披露，采集值恒为 0。`MarketContext.north_flow_available`
+  为 `False` 时，提示词渲染为"数据不可用（交易所自2024-08-19起停止披露北向资金成交净买额）"
+  而非"0亿"，并在 system prompt 中要求不得由数据缺失推断结论——否则 LLM 会把"0"误读为
+  "外资缺席/流出"，得出与事实相反的资金面判断。
+- **历史信号**：信号缓存 TTL 仅 7 天，`_format_signal_history()` 只按实际可得记录回溯，
+  输出包含信号次数、可验证 BUY 样本数、胜率与平均收益，并显式标注样本量，避免 LLM 以
+  "无历史信号数据"一笔带过或夸大胜率。
+- **板块估值（PE/PB 与分位）**：`MarketContext` 新增 `pe_ttm` / `pb` / `pe_percentile` /
+  `pb_percentile`，取自 data-collector 的申万宏源行业口径（口径与回填方式见
+  `docs/04-data-collector.md` 3.5）。提示词新增「## 板块估值（申万行业口径）」段落，
+  并要求结合估值分位判断是否低估；字段缺失时渲染为"数据不可用"，分位样本不足时
+  渲染为"历史样本不足 10 个交易日不可用"，不得据此臆测估值高低。
+- **资金持续性 / 标的 / 排名**：`MarketContext` 新增 `avg_flow_5d`（近 5 日主力资金日均净流入）、
+  `etf_code` / `etf_name`（建议标的）、`rank` / `total_sectors`（板块当日排名），
+  使提示词可结合短期资金持续性与横向相对位置，而非只看单日资金与绝对评分。
 
 ### 3.4 风险监控器 (Risk Monitor)
 
@@ -208,6 +240,60 @@ class PromptEngine:
       metrics: dict          # 相关指标
     }
 ```
+
+### 3.5 外部数据源容错 (external_data.py)
+
+Agent 工具（`get_market_overview` / `get_market_breadth` 等）依赖 `external_data.py` 获取行情。
+所有外部数据统一遵循「主源 → 备用源 → 过期缓存（标记 `_stale`）→ `{"error": ...}`」四级降级链，
+并按维度设置 TTL 缓存（大盘指数 60s、国际指数 300s、涨跌家数 120s）。
+
+| 数据 | 主源 | 备用源 | 说明 |
+|------|------|--------|------|
+| A股主要指数 | 新浪 `hq.sinajs.cn`（完整行情，含开高低收/成交额） | 东财 `push2`（`ak.stock_zh_index_spot_em`） | 新浪响应约 0.4s，东财被阻断时单次耗时 20s+ |
+| 全球指数 | 东财（字段最多，含 DAX/CAC40/KOSPI） | 新浪 `int_*`（仅 6 个主要指数） | |
+| 涨跌家数 | 东财全A行情 `ak.stock_zh_a_spot_em`（含涨跌幅分布） | 乐咕乐股 `ak.stock_market_activity_legu`（无分布字段） | |
+
+东方财富 **push2 行情集群**（`push2.eastmoney.com` / `82.push2...` / `push2his...`）在部分网络环境
+会被直接重置连接（`RemoteDisconnected`），且 akshare 内部重试叠加退避后单次调用耗时 20s+。
+为此设置了 **push2 熔断**：连续失败后 300s 内 `_push2_available()` 返回 `False`，各数据直接走备用源，
+避免每次调用都白白等待。任一 push2 调用成功即清除熔断。
+
+> `datacenter-web.eastmoney.com`（估值、国债收益率等）不受影响，可正常访问。
+
+- **大盘指数主源改新浪的原因**：新浪完整行情本身已提供开高低收与成交额，字段不逊于东财，而东财
+  在受限网络下几乎不可达，故不再作为首选。
+- **全球指数与涨跌家数仍以东财为主源**：它们的备用源在字段完整性上确有损失（缺少
+  DAX/CAC40/KOSPI、缺少涨跌幅分布），因此保留东财优先，仅靠熔断避免重复等待。
+
+### 3.6 市场上下文构建与降级 (2026-09-23)
+
+信号解读前需向 data-collector 拉取真实行情（全市场板块 + 各板块近 25 天历史），
+构建 `MarketContext` 供提示词使用。下游采集任务本身是长耗时的同步 IO，
+因此这一环节同时做了**重试**与**显式降级**两件事。
+
+**重试**：`_get_with_retry()` 对 `/query/all-sectors` 与 `/query/sector-data` 各尝试 3 次
+（`timeout=6s`，退避 2s / 4s）。单次超时不代表数据不可得，短暂排队后通常即可恢复。
+
+**降级标记**：`MarketContext.data_available` 默认 `False`，只有真正取到该板块行情时才置 `True`。
+取值失败时写入占位上下文，提示词据此把全部数值字段渲染为"数据不可用"：
+
+| 字段 | 正常 | 降级 (`data_available=False`) |
+|------|------|------------------------------|
+| 涨跌幅 / 主力净流入 / 成交额 | 真实数值 | 数据不可用 |
+| 板块平均涨跌幅 | `±x.xx%` | 数据不可用（全市场缺失时传 `None`，不再传 0.0） |
+| 市场情绪 | 强势/偏强/中性/偏弱/弱势 | 数据不可用（本次市场数据获取失败） |
+| 市场情绪（全市场为空） | — | 未知（全市场板块数据获取失败） |
+
+配套约定：
+
+- 提示词新增规则 7：当"板块近期表现"整段均为"数据不可用"时，须在风险因素中说明该局限，
+  信心度不得高于 0.4，且不得据此给出方向性判断。
+- 异常日志统一使用 `type(e).__name__: {str(e) or '无附加信息'}`。`httpx` 异步客户端超时抛出的
+  `ReadTimeout` / `ConnectTimeout` 其 `str()` 为空，仅打印 `{e}` 会得到一条没有任何信息的日志
+  （2026-09-22 故障即因此难以定位）。
+- 统计市场情绪前必须先判断全市场数据是否为空；把空数据当成"0 家上涨"会误判为"弱势"。
+
+> 注意 `e or '默认值'` 对异常对象恒为真（`Exception` 未定义 `__bool__`），必须写 `str(e) or ...`。
 
 ---
 
@@ -313,10 +399,24 @@ Response:
 }
 ```
 
+**失败语义**：同日结果缓存 30 天（`ai:analysis:{strategy_type}:{date}`），命中即返回；
+信号被重新计算时 AI 服务会先作废该日缓存（见 6.3），避免日历回放展示过期结论。
+signal-notification 不可用或返回非 200 时接口返回 **502**，不会退化成"当日无信号"。
+
 ### 5.2 风险检查
 
 ```
 POST /api/ai/risk-check
+
+Request（除 strategy_type 外均可省略，省略时服务端自动补齐）:
+{
+  "strategy_type": "MODERATE",          // 缺省 MODERATE
+  "positions": {"THS881175": 0.14},     // 省略时读取 Redis DB1 的 positions:{strategy_type}
+  "total_assets": 1000000,
+  "daily_pnl": -1.8,                    // 省略时用持仓板块加权涨跌幅估算
+  "max_drawdown": 5.2,
+  "market_change": -1.2                 // 省略时取实时上证指数涨跌幅
+}
 
 Response:
 {
@@ -326,16 +426,26 @@ Response:
       {
         "alert_type": "concentration",
         "level": "WARNING",
-        "title": "仓位集中度过高",
-        "description": "银行板块仓位占比45%，超过40%阈值",
-        "suggestion": "建议分散至2-3个板块",
-        "metrics": {"sector": "银行", "weight": 0.45, "threshold": 0.40}
+        "title": "仓位集中度偏高: THS881175",
+        "description": "板块 THS881175 仓位占比 45%，超过 35% 预警线",
+        "suggestion": "建议适当分散仓位",
+        "metrics": {"sector": "THS881175", "weight": 0.45, "threshold": 0.35}
       }
     ],
+    "alert_count": 1,
     "overall_risk": "MEDIUM"
   }
 }
 ```
+
+**取值语义**：可选字段用 `None` 表示"未提供"，不能用 `0.0` 当哨兵——
+否则平盘（`market_change=0`）或零盈亏会被误判为未提供并被自动值覆盖。
+持仓缺省只读取请求 `strategy_type` 对应的键，不再按
+AGGRESSIVE→MODERATE→CONSERVATIVE 顺序取第一个非空持仓，
+否则请求稳健策略会拿到激进策略的持仓做风险判断。
+
+**阈值**（见 `risk_monitor.py`）：单板块集中度 35%/50%，当日亏损 1.5%/3%，
+最大回撤 5%/10%，大盘跌幅 1.0%/2.5%；`overall_risk` 有 CRITICAL 告警时为 HIGH。
 
 ### 5.3 每日复盘
 
@@ -357,10 +467,22 @@ Response:
     "sector_rotation": "板块轮动...",
     "portfolio_review": "持仓表现...",
     "tomorrow_outlook": "明日展望...",
-    "model": "gpt-4o-mini"
+    "model": "deepseek-v4-flash"
   }
 }
 ```
+
+**失败语义**：报告正常缓存 30 天（`ai:review:{date}`）；LLM 调用失败时
+`DailyReviewer` 返回 `model=error` 的报告，接口改为返回 502 并且**不写缓存**——
+否则偶发故障会被当成正常报告固化 30 天（曾出现 `market_summary` 内容为
+`生成失败: 'NoneType' object has no attribute 'chat'` 的假报告被缓存）。
+
+**数据采集**：`DailyReviewDataCollector` 统一通过各微服务 HTTP 接口取数——
+大盘指数用 `external_data.get_market_indices()`（外部实时行情），板块表现/成交额用
+data-collector `GET /query/all-sectors`，信号用 signal-notification `GET /signals/history`，
+持仓用 strategy `GET /positions`；任一来源失败只降级为占位文案，不影响报告生成。
+指数为实时行情，仅在复盘日期为当日时填充（历史日期无可用指数源）。
+详见 `docs/13-implementation-guide.md` 第 3 项。
 
 ### 5.4 对话式投研
 
@@ -508,3 +630,17 @@ backend-ai-decision:
     timeout: 10s
     retries: 3
 ```
+
+### 8.3 LLM 提供商凭据解析
+
+提供商凭据（api_key / base_url）统一保存在 Redis `ai:providers`；`ai:config` 里的
+`provider` / `api_key` / `base_url` 是设置页不再写入的遗留字段（设置页只写
+`temperature` / `max_tokens` / `signal_analysis_*`），其 `provider` 恒为占位值 `openai`。
+因此默认 LLM 客户端（对话与复盘使用）按以下顺序解析凭据（`_resolve_default_llm_args`）：
+
+1. 遗留字段 `provider` 对应的 `ai:providers` 凭据；
+2. 回退 `signal_analysis_provider` 的凭据与模型（后端唯一由用户选定的提供商）；
+3. 回退 `ai:config` 中直接写入的 `api_key`。
+
+非 ollama 的提供商统一走 OpenAI 兼容协议分支。若三步都拿不到凭据，客户端保持未初始化，
+`/api/ai/chat` 与 `/api/ai/daily-review` 返回 503 而不是 500。

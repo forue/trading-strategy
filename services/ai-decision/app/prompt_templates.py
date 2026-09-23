@@ -36,11 +36,17 @@ SIGNAL_INTERPRETATION = PromptTemplate(
 你的任务是解读量化模型生成的交易信号，给出专业的分析和风险提示。
 
 要求:
-1. 用简洁专业的语言解读信号原因，结合近期信号历史判断信号可靠性
+1. 用简洁专业的语言解读信号原因，结合近期信号历史判断信号可靠性，
+   并结合板块估值分位说明当前是否处于低估值区间（估值数据不可用时跳过该维度）
 2. 列出关键风险因素（2-3条）
 3. 给出信心度（0-1之间的两位小数）
 4. 给出具体的操作建议
 5. 必须以JSON格式输出，不要有其他内容
+6. 数据缺失处理：若某项数据标注为"数据不可用"，说明该字段缺失，不得据此推断结论
+   （例如北向净买额自2024-08-19起停止披露，不得由该项缺失推断"外资缺席/外资流出"），
+   也不得编造该数据；应基于其余可用数据给出分析，并在风险因素中说明该局限
+7. 若"板块近期表现"整段数值均标注为"数据不可用"，说明本次行情数据获取失败（系统性缺失），
+   必须在风险因素中明确指出该局限，信心度不得高于0.4，且不得据此给出方向性判断
 
 输出格式:
 ```json
@@ -58,19 +64,28 @@ SIGNAL_INTERPRETATION = PromptTemplate(
 - 方向: {direction} ({direction_cn})
 - 综合评分: {score}/10
 - 建议仓位: {position_pct}%
+- 建议标的: {etf_text}
+- 板块排名: {rank_text}
 - 策略类型: {strategy_type}
 - 信号理由: {reason}
 
 ## 板块近期表现
-- 近5日涨跌幅: {change_5d}%
-- 近10日涨跌幅: {change_10d}%
-- 今日涨跌幅: {change_today}%
-- 主力净流入: {main_flow}亿
-- 北向净流入: {north_flow}亿
-- 成交额: {turnover}亿
+- 近5日涨跌幅: {change_5d_text}
+- 近10日涨跌幅: {change_10d_text}
+- 今日涨跌幅: {change_today_text}
+- 主力净流入: {main_flow_text}
+- 近5日主力资金日均净流入: {avg_flow_5d_text}
+- 北向净流入: {north_flow_text}
+- 成交额: {turnover_text}
+
+## 板块估值（申万行业口径）
+- TTM（滚动）市盈率: {pe_ttm_text}
+- 市净率: {pb_text}
+- 估值历史分位: {valuation_percentile_text}
 
 ## 市场环境
-- 大盘今日涨跌幅: {market_change}%
+- 大盘今日涨跌幅（上证指数）: {market_change_text}
+- 板块平均涨跌幅: {market_avg_change_text}
 - 市场情绪: {market_sentiment}
 
 ## 近期信号历史
