@@ -25,6 +25,9 @@ def _clean_nan_records(df) -> list[dict]:
         for k, v in rec.items():
             if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
                 rec[k] = 0
+    # InfluxDB pivot 输出不保证按时间有序：某字段缺失的日期会被排到末尾，
+    # 导致调用方 records[-1] 取到的并非最新交易日，故统一按时间升序
+    records.sort(key=lambda r: str(r.get("_time", "")))
     return records
 
 
@@ -78,9 +81,13 @@ class InfluxDBManager:
             for k in ("open", "high", "low"):
                 if item.get(k) is not None and float(item.get(k, 0)) != 0:
                     point = point.field(k, float(item[k]))
-            # 估值字段（有值才写）
-            for k in ("pe_ttm", "pb", "pe_percentile", "pb_percentile"):
+            # 估值字段（有值才写）；PE/PB 为 0 表示无数据，剔除
+            for k in ("pe_ttm", "pb"):
                 if item.get(k) is not None and float(item.get(k, 0)) != 0:
+                    point = point.field(k, float(item[k]))
+            # 分位字段：0 是有效极值（创近一年新低/新高），必须保留
+            for k in ("pe_percentile", "pb_percentile"):
+                if item.get(k) is not None:
                     point = point.field(k, float(item[k]))
             # 基金字段（如果有）
             if item.get("etf_code"):

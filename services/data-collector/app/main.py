@@ -143,6 +143,32 @@ async def backfill_fund_flow(start_date: str = "20240101", end_date: str = None)
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/collect/backfill-valuation")
+def backfill_valuation(days: int = 365):
+    """回填板块历史估值（申万行业口径），使估值分位可立即生成
+
+    耗时较长（申万接口分页拉取，约 60~120 秒），请勿在前端同步等待。
+    本端点为同步函数，FastAPI 会自动放入线程池执行，不会阻塞事件循环。
+
+    Args:
+        days: 回溯自然日数，默认 365 天（与估值分位的 1 年回溯窗口对齐）
+    """
+    try:
+        result = data_collector.backfill_sector_valuation_history(days)
+        if result["records"] == 0:
+            return error_response(message=f"估值回填未取到数据，请检查申万接口（区间 {result['start']}~{result['end']}）")
+        return success_response(
+            data=result,
+            message=(
+                f"估值回填完成：{result['dates']} 个交易日，覆盖 {result['covered_sectors']}"
+                f"/{result['sectors']} 个板块，写入 {result['records']} 条"
+            ),
+        )
+    except Exception as e:
+        logger.error(f"估值回填失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/collect/north-bound")
 async def collect_north_bound(date: str = None):
     """采集北向资金数据

@@ -1,4 +1,6 @@
 """数据采集服务 - AkShare数据采集器（同花顺数据源）"""
+import re
+import requests
 import akshare as ak
 import pandas as pd
 import numpy as np
@@ -21,6 +23,47 @@ class DataCollector:
     _trade_dates_cache_ts: datetime | None = None
     # 缓存板块名称→代码映射
     _sector_name_code_map: dict[str, str] | None = None
+
+    # 申万宏源「指数分析」接口（akshare index_analysis_daily_sw 的上游）
+    # akshare 把 page_size 写死为 50：回填 1 年需 200+ 次请求（容器内约 4.5s/次，约 20 分钟），
+    # 该接口实际支持自定义 page_size，改大后请求数降到个位数，故这里自行翻页。
+    _SW_ANALYSIS_URL = "https://www.swsresearch.com/institute-sw/api/index_analysis/index_analysis_report/"
+    _SW_ANALYSIS_PAGE_SIZE = 5000
+    _SW_ANALYSIS_HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
+    }
+
+    # 同花顺板块 → 申万行业 估值映射。
+    # stock_board_industry_summary_ths() 不返回市盈率/市净率，同花顺亦无行业估值接口，
+    # 故板块估值统一取申万宏源「指数分析」口径（ak.index_analysis_daily_sw）：
+    #   1) 板块名与申万二级行业同名（90 个板块中 66 个）→ 直接匹配
+    #   2) 申万一级行业同名（钢铁/建筑材料/建筑装饰/房地产/银行/美容护理）→ 回退一级
+    #   3) 其余 18 个板块在此显式映射，一对多时按 Σ流通市值/Σ(流通市值/估值) 调和平均合成
+    #
+    # 重要：当日值与历史序列必须同源（同为 index_analysis_daily_sw），估值分位才有可比性。
+    # 乐咕乐股的 sw_index_second_info/first_info 虽为申万行业口径，但统计方法不同
+    # （同日农林牧渔 PE 83.73 vs 33.25、钢铁 30.55 vs 20.34），混用会使分位失真，已弃用。
+    _THS_TO_SW_INDUSTRY = {
+        "种植业与林业": ["种植业", "林业Ⅱ"],
+        "煤炭开采加工": ["煤炭开采", "焦炭Ⅱ"],
+        "油气开采及服务": ["油气开采Ⅱ", "油服工程"],
+        "汽车整车": ["乘用车", "商用车"],
+        "汽车服务及其他": ["汽车服务", "摩托车及其他"],
+        "饮料制造": ["白酒Ⅱ", "非白酒", "饮料乳品"],
+        "食品加工制造": ["食品加工", "休闲食品", "调味发酵品Ⅱ"],
+        "港口航运": ["航运港口"],
+        "公路铁路运输": ["铁路公路"],
+        "机场航运": ["航空机场"],
+        "零售": ["一般零售", "专业连锁Ⅱ", "旅游零售Ⅱ"],
+        "旅游及酒店": ["酒店餐饮", "旅游及景区"],
+        "文化传媒": ["出版", "广告营销", "数字媒体", "电视广播Ⅱ"],
+        "军工装备": ["航天装备Ⅱ", "航空装备Ⅱ", "地面兵装Ⅱ", "航海装备Ⅱ"],
+        "其他社会服务": ["专业服务", "体育Ⅱ"],
+        "石油加工贸易": ["炼化及贸易"],
+        "塑料制品": ["塑料"],
+        "橡胶制品": ["橡胶"],
+    }
 
     _SECTOR_ETF_MAP = {
         "农林牧渔": {"code": "159825", "name": "农业ETF"}, "采掘": {"code": "516260", "name": "矿业ETF"},
@@ -71,6 +114,231 @@ class DataCollector:
     def get_sector_names(self) -> list[str]:
         """获取所有板块名称列表"""
         return list(self._get_sector_name_code_map().keys())
+
+    @staticmethod
+    def _norm_sw_name(name) -> str:
+        """归一化申万行业名（去掉 Ⅱ/Ⅲ 后缀与空白），用于与同花顺板块名同名匹配"""
+        return re.sub(r"[ⅡⅢ]", "", str(name)).strip()
+
+    @staticmethod
+    def _parse_optional_float(val) -> float | None:
+        """解析可空数值字段（同花顺用 "--" 表示缺失）"""
+        text = str(val).strip()
+        if not text or text == "--" or text.lower() == "nan":
+            return None
+        try:
+            return float(text)
+        except (ValueError, TypeError):
+            return None
+
+    def _fetch_sw_analysis(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame | None:
+        """拉取申万宏源「指数分析」数据（symbol: 二级行业/一级行业）
+
+        该接口是系统唯一同时覆盖「当日值」与「历史序列」的申万估值来源
+        （市盈率/市净率/流通市值），自行按大分页翻页以避免 akshare 每页 50 条的低效。
+        取不到数据时返回 None，由调用方保持估值空缺，不编造数值。
+        """
+        params = {
+            "page": 1,
+            "page_size": self._SW_ANALYSIS_PAGE_SIZE,
+            "index_type": symbol,
+            "start_date": f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:]}",
+            "end_date": f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:]}",
+            "type": "DAY",
+            "swindexcode": "all",
+        }
+        frames: list[pd.DataFrame] = []
+        total_num = None
+        try:
+            page = 1
+            while True:
+                params["page"] = page
+                resp = requests.get(
+                    self._SW_ANALYSIS_URL, params=params,
+                    headers=self._SW_ANALYSIS_HEADERS, verify=False, timeout=120,
+                )
+                payload = resp.json().get("data") or {}
+                rows = payload.get("results") or []
+                if total_num is None:
+                    total_num = int(payload.get("count") or 0)
+                if not rows:
+                    break
+                frames.append(pd.DataFrame(rows))
+                if sum(len(f) for f in frames) >= total_num:
+                    break
+                page += 1
+        except Exception as e:
+            logger.warning(f"获取申万{symbol}分析数据失败({start_date}~{end_date}): {e}")
+            return None
+
+        if not frames:
+            return None
+        df = pd.concat(frames, ignore_index=True).rename(columns={
+            "swindexname": "指数名称",
+            "bargaindate": "发布日期",
+            "pe": "市盈率",
+            "pb": "市净率",
+            "negotiablessharesum1": "流通市值",
+        })
+        for col in ("市盈率", "市净率", "流通市值"):
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        logger.info(f"申万{symbol}分析数据获取成功: {len(df)} 行（{start_date}~{end_date}）")
+        return df
+
+    def _sw_valuation_by_date(
+        self, df: pd.DataFrame | None, end_date: str = None
+    ) -> dict[str, dict[str, tuple]]:
+        """把申万分析数据整理为 {发布日期: {归一化行业名: (pe, pb, 流通市值)}}
+
+        仅保留 PE/PB 均为正的行业（亏损行业 PE 无意义，写入会污染估值分位）。
+        end_date 给定时只保留 <= end_date 的记录。
+        """
+        out: dict[str, dict[str, tuple]] = {}
+        if df is None or df.empty:
+            return out
+        for _, row in df.iterrows():
+            d = str(row.get("发布日期", ""))[:10].replace("-", "")
+            if len(d) != 8 or not d.isdigit():
+                continue
+            if end_date and d > end_date:
+                continue
+            name = self._norm_sw_name(row.get("指数名称", ""))
+            pe = self._safe_float(row.get("市盈率"), 0)
+            pb = self._safe_float(row.get("市净率"), 0)
+            cap = self._safe_float(row.get("流通市值"), 0)
+            if name and pe > 0 and pb > 0:
+                out.setdefault(d, {})[name] = (pe, pb, cap)
+        return out
+
+    def fetch_sw_industry_valuation(self, trade_date: str) -> tuple[dict[str, tuple], dict[str, tuple]]:
+        """采集指定交易日的申万行业估值，返回 (二级, 一级) 两张 {行业名: (pe, pb, 流通市值)}
+
+        与历史回填同用申万宏源「指数分析」接口，保证当日值与历史序列口径一致。
+        取 [trade_date-7, trade_date] 窗口内每个行业最近一期的数据，
+        以容忍申万当日数据发布延迟；窗口内无数据的行业保持空缺。
+        """
+        trade_date = trade_date.replace("-", "")
+        start_date = (datetime.strptime(trade_date, "%Y%m%d") - timedelta(days=7)).strftime("%Y%m%d")
+
+        def _latest_table(symbol: str) -> dict[str, tuple]:
+            by_date = self._sw_valuation_by_date(
+                self._fetch_sw_analysis(symbol, start_date, trade_date), end_date=trade_date
+            )
+            table: dict[str, tuple] = {}
+            for d in sorted(by_date):
+                table.update(by_date[d])  # 日期升序覆盖 → 保留最近一期
+            return table
+
+        sw_second = _latest_table("二级行业")
+        sw_first = _latest_table("一级行业")
+        return sw_second, sw_first
+
+    def backfill_sector_valuation_history(self, days: int = 365) -> dict:
+        """用申万行业历史估值回填板块 PE/PB 序列，使估值分位可立即生成
+
+        估值分位需 >=10 个交易日样本，逐日积累需等待两周以上。此方法一次性拉取
+        申万宏源历史估值（与当日采集同源），按板块解析后写入 InfluxDB，回填后
+        立即可算出分位。
+
+        Args:
+            days: 回溯自然日数，默认 365 天（与估值分位的 1 年回溯窗口对齐）
+        Returns:
+            {start, end, dates, sectors, covered_sectors, records}
+        """
+        end_date = datetime.now().strftime("%Y%m%d")
+        start_date = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
+
+        second_by_date = self._sw_valuation_by_date(
+            self._fetch_sw_analysis("二级行业", start_date, end_date)
+        )
+        first_by_date = self._sw_valuation_by_date(
+            self._fetch_sw_analysis("一级行业", start_date, end_date)
+        )
+        all_dates = sorted(set(second_by_date) | set(first_by_date))
+        if not all_dates:
+            logger.warning(f"申万历史估值回填失败：{start_date}~{end_date} 未取到数据")
+            return {"start": start_date, "end": end_date, "dates": 0, "sectors": 0, "records": 0}
+
+        sector_map = self._get_sector_name_code_map()
+        records: list[dict] = []
+        covered_sectors: set[str] = set()
+        for sector_name, code in sector_map.items():
+            sector_code = f"THS{code}" if code else f"THS_{sector_name}"
+            for d in all_dates:
+                pe, pb = self.resolve_sector_valuation(
+                    sector_name, second_by_date.get(d, {}), first_by_date.get(d, {})
+                )
+                if pe is None or pb is None:
+                    continue
+                covered_sectors.add(sector_name)
+                records.append({
+                    "sector_code": sector_code,
+                    "sector_name": sector_name,
+                    "date": d,
+                    "pe_ttm": pe,
+                    "pb": pb,
+                })
+
+        # 只写估值字段，InfluxDB 按同 measurement+tags+时间戳做字段合并，不会覆盖已采行情
+        for i in range(0, len(records), 5000):
+            influx_manager.write_sector_capital_flow(records[i:i + 5000])
+
+        uncovered = sorted(set(sector_map) - covered_sectors)
+        summary = {
+            "start": start_date,
+            "end": end_date,
+            "dates": len(all_dates),
+            "sectors": len(sector_map),
+            "covered_sectors": len(covered_sectors),
+            "records": len(records),
+        }
+        if uncovered:
+            logger.warning(f"未匹配到申万估值、未回填的板块({len(uncovered)}): {uncovered}")
+        logger.info(f"申万历史估值回填完成: {summary}")
+        return summary
+
+    def resolve_sector_valuation(
+        self, sector_name: str, sw_second: dict[str, tuple], sw_first: dict[str, tuple]
+    ) -> tuple[float | None, float | None]:
+        """按同花顺板块名解析板块 PE/PB（申万行业口径），一对多时按市值加权调和平均合成
+
+        取不到时返回 (None, None)，由调用方保持空缺，不编造数值。
+        """
+        key = self._norm_sw_name(sector_name)
+        if key in sw_second:
+            matched = [sw_second[key]]
+        elif sector_name in self._THS_TO_SW_INDUSTRY:
+            matched = []
+            for name in self._THS_TO_SW_INDUSTRY[sector_name]:
+                nk = self._norm_sw_name(name)
+                if nk in sw_second:
+                    matched.append(sw_second[nk])
+                elif nk in sw_first:
+                    matched.append(sw_first[nk])
+        elif key in sw_first:
+            matched = [sw_first[key]]
+        else:
+            return None, None
+
+        if not matched:
+            return None, None
+
+        # 组合板块的估值必须按 Σ流通市值 / Σ(流通市值/估值) 合成（市值加权调和平均）。
+        # 不能对子行业估值做市值加权算术平均：市值占比高但盈利占比极低的子行业会把
+        # 整体估值拉飞——「种植业与林业」由 种植业(PE 54.58/市值 846.84亿) 与
+        # 林业(PE 3673.6/市值 165.97亿) 组成，算术平均得 647.63，调和平均得 65.09。
+        # 用申万官方一级行业值反验：调和平均平均偏差 0.9%（多个行业精确复现），
+        # 算术平均偏差 28.6%（农林牧渔 官方 83.73 vs 算术 251.44）。
+        def _combine(idx: int) -> float:
+            weighted = [(m[idx], m[2]) for m in matched if m[2] > 0]
+            total_cap = sum(cap for _, cap in weighted)
+            if weighted and total_cap > 0:
+                return total_cap / sum(cap / val for val, cap in weighted)
+            # 无流通市值时退化为简单平均
+            return sum(m[idx] for m in matched) / len(matched)
+
+        return round(_combine(0), 2), round(_combine(1), 2)
 
     def get_trade_dates(self, days: int = 365) -> list[str]:
         """获取A股交易日历（从新浪获取真实交易日）
@@ -200,6 +468,8 @@ class DataCollector:
         try:
             df = ak.stock_board_industry_summary_ths()
             if df is not None and not df.empty:
+                # 同花顺行业汇总不返回市盈率/市净率，估值统一取申万宏源口径（每轮仅采集一次）
+                sw_second, sw_first = self.fetch_sw_industry_valuation(trade_date)
                 sector_map = self._get_sector_name_code_map()
                 for _, row in df.iterrows():
                     sector_name = str(row.get("板块", "")).strip()
@@ -211,18 +481,14 @@ class DataCollector:
                     net_inflow_yi = self._safe_float(row.get("净流入", 0))
                     # 转换为元存储（保持与 influx_client 字段单位一致）
                     main_net_inflow = net_inflow_yi * 1e8
-                    # 估值数据处理
-                    pe_str = str(row.get("市盈率", ""))
-                    pb_str = str(row.get("市净率", ""))
-                    try:
-                        pe_ttm = float(pe_str) if pe_str and pe_str != "--" else None
-                    except (ValueError, TypeError):
-                        pe_ttm = None
-                    try:
-                        pb = float(pb_str) if pb_str and pb_str != "--" else None
-                    except (ValueError, TypeError):
-                        pb = None
-                    
+                    # 估值：优先用同花顺自带字段（当前版本为空），否则回退申万行业估值
+                    pe_ttm = self._parse_optional_float(row.get("市盈率"))
+                    pb = self._parse_optional_float(row.get("市净率"))
+                    if pe_ttm is None or pb is None:
+                        sw_pe, sw_pb = self.resolve_sector_valuation(sector_name, sw_second, sw_first)
+                        pe_ttm = sw_pe if pe_ttm is None else pe_ttm
+                        pb = sw_pb if pb is None else pb
+
                     results.append({
                         "sector_code": f"THS{sector_code}" if sector_code else f"THS_{sector_name}",
                         "sector_name": sector_name,
@@ -240,7 +506,14 @@ class DataCollector:
                         "high": None,
                         "low": None,
                     })
-                logger.info(f"同花顺行业汇总采集成功: {len(results)} 个板块")
+                covered = [item for item in results if item["pe_ttm"] is not None and item["pb"] is not None]
+                logger.info(
+                    f"同花顺行业汇总采集成功: {len(results)} 个板块，"
+                    f"估值覆盖 {len(covered)} 个（来源：申万宏源行业 市盈率/市净率）"
+                )
+                if len(covered) < len(results):
+                    missing = [item["sector_name"] for item in results if item["pe_ttm"] is None]
+                    logger.warning(f"未匹配到申万行业估值的板块({len(missing)}): {missing}")
         except Exception as e:
             logger.error(f"同花顺行业汇总采集异常: {e}，返回空数据")
             results = []
@@ -263,7 +536,10 @@ class DataCollector:
                 name = item["sector_name"]
                 close_price = close_prices.get(name)
                 if close_price and close_price > 0:
-                    item["index_close"] = close_price
+                    # 前收 × (1+当日涨跌幅) = 当日收盘，与K线回填口径保持一致
+                    # （index_close 语义为"当日收盘指数"，下游因子/前端/记账均按当日收盘使用）
+                    chg = self._safe_float(item.get("index_change_pct", 0))
+                    item["index_close"] = round(close_price * (1 + chg / 100.0), 3)
                 else:
                     # 无前交易日数据时回退到均价
                     item["index_close"] = close_cache.get(name, item["index_close"])
@@ -592,6 +868,8 @@ class DataCollector:
                 date_str = str(date_val)[:10]
 
             # 北向净流入 = 沪股通北向 + 深股通北向 (第0行和第2行的第5列, 单位亿元)
+            # 注意：2024-08-19 起沪深港通已停止披露北向资金成交净买额，该列恒为 0，
+            # 采集值不具备分析价值（保留写入仅为维持历史序列连续）
             north_sh = self._safe_float(df.iloc[0, 5])
             north_sz = self._safe_float(df.iloc[2, 5]) if len(df) >= 3 else 0.0
             net_inflow = (north_sh + north_sz) * 1e8  # 亿元 → 元
@@ -599,7 +877,13 @@ class DataCollector:
             results = [{"date": date_str, "north_net_inflow": net_inflow}]
 
             influx_manager.write_north_bound_flow(results)
-            logger.info(f"北向资金采集完成: 日期={date_str}, 净流入={net_inflow/1e8:.2f}亿")
+            if net_inflow == 0:
+                logger.warning(
+                    f"北向资金采集完成: 日期={date_str}, 净流入=0.00亿"
+                    f"（数据源已停止披露北向净买额，该指标不可用于分析）"
+                )
+            else:
+                logger.info(f"北向资金采集完成: 日期={date_str}, 净流入={net_inflow/1e8:.2f}亿")
 
             return results
         except Exception as e:
