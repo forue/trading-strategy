@@ -47,6 +47,13 @@ services/strategy/app/
 3. 若当日有效板块数 ≥ 3 且 `cross_section_alpha > 0`：`combine_ranking` 得到 **截面综合分**，最终  
    `composite_score = (1 − α) × 绝对分 + α × 截面分`。
 
+> **估值类因子不参与截面归一化**：`apply_zscore_normalization` 按因子 `raw_value` 做截面
+> Z-Score 并**原地覆盖** score（`5 + z×2`）。估值因子的 raw_value 是历史分位数，
+> 数值越大代表越贵，归一化会把"分位高"映射成高分，与"越便宜得分越高"的因子语义相反。
+> 因此 `pe_percentile`/`pb_percentile` 跳过归一化，保持绝对分位语义。
+> （修复前 2026-09-23：医疗服务真实 PE 分位 88.4% 被归一化成 8.59 分，保守档再由 score
+> 反算得到"估值分位 14.1%" 而买入，与其估值优先的定位完全相反。）
+
 ### 2.2 回退路径
 
 因子引擎异常时使用 `_calculate_composite_score_fallback`（简化资金+动量+估值），并标记 `engine_fallback`（单板块分析 API 返回该字段）。
@@ -326,6 +333,15 @@ services/strategy/app/
   - cache_ttl_days: 缓存有效期天数
   - scheduler_enabled: 调度器开关
   - scheduler_times: 调度时间配置 (默认 {"collect":"15:30","calculate":"15:35","north_bound":"16:00"})
+
+板块日快照缓存 (Redis key: sector_capital_flow:{date}, TTL 3600s):
+  - 按数据日期分键，供按日查询复用，避免每次回源 InfluxDB
+  - 信号计算一律走 force_refresh=True 直接回源 InfluxDB，命中缓存不参与评分：
+    当日采集入库前若已缓存过旧值（例如切换口径前的估值分位），命中缓存会让评分
+    与 AI 解读（后者直查 InfluxDB）在同一分钟拿到两套不同的数据
+  - 回源成功后回写缓存，前端后续查询随之更新
+  - 2026-09-23 事故：保守档据缓存中的"估值分位14.1%"买入医疗服务，真实申万
+    PE 分位为 88.4%、PB 分位 97.5%，与其"估值优先"的定位完全相反
 
 缓存统计 (GET /cache/stats):
   - 返回Redis内存使用、key数量、各类数据计数
