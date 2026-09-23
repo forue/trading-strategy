@@ -1051,7 +1051,8 @@ class RotationScoringModel:
                     count += 1
                 if count > 0:
                     avg_percentile /= count
-                valuation_score = 10.0 - avg_percentile / 10.0 * 10.0
+                # 分位为 0~100 的百分数：0% → 10 分，50% → 5 分，100% → 0 分
+                valuation_score = 10.0 - avg_percentile / 100.0 * 10.0
                 valuation_score = max(0, min(10, valuation_score))
             else:
                 valuation_score = 0

@@ -28,8 +28,8 @@ class PEPercentileFactor(BaseFactor):
             )
 
         # 评分: 低分位 = 高分 (价值投资逻辑)
-        # PE分位 0% → 10分, 50% → 5分, 100% → 0分
-        score = 10.0 - pe_percentile / 10.0 * 10.0
+        # PE分位 0% → 10分, 50% → 5分, 100% → 0分（分位为 0~100 的百分数）
+        score = 10.0 - pe_percentile / 100.0 * 10.0
 
         confidence = 0.8
 
@@ -71,8 +71,9 @@ class PBPercentileFactor(BaseFactor):
                 detail={"error": "PB分位数据缺失"},
             )
 
-        # 评分: 低分位 = 高分
-        score = 10.0 - pb_percentile / 10.0 * 10.0
+        # 评分: 低分位 = 高分（分位为 0~100 的百分数）
+        # PB分位 0% → 10分, 50% → 5分, 100% → 0分
+        score = 10.0 - pb_percentile / 100.0 * 10.0
 
         confidence = 0.8
 
