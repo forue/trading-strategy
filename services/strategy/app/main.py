@@ -281,14 +281,21 @@ def _snapshot_cache_key(date_str: str) -> str:
     return f"sector_capital_flow:{date_str}"
 
 
-def _load_sector_snapshot(target_date: str) -> list:
+def _load_sector_snapshot(target_date: str, force_refresh: bool = False) -> list:
     """按精确日期加载板块快照：Redis → InfluxDB。
 
     只返回 target_date 当天的数据，绝不回退到其它日期；当天无数据时返回空列表，
     由调用方决定是拒绝生成信号，还是改用最近有数据的交易日（并同步修正信号日期）。
+
+    Args:
+        force_refresh: 为 True 时跳过 Redis 缓存直接回源 InfluxDB，并用回源结果覆盖
+            缓存。信号计算必须走此路径——快照缓存 TTL 为 1 小时，若当日采集入库前
+            已缓存过旧值（例如旧口径的估值分位），命中缓存会让评分与 AI 解读
+            （后者直查 InfluxDB）在同一分钟拿到两套不同的数据，导致保守档估值
+            筛选失真。
     """
     cache_key = _snapshot_cache_key(target_date)
-    cached = redis_mgr.get(cache_key)
+    cached = None if force_refresh else redis_mgr.get(cache_key)
     if cached:
         try:
             rows = json.loads(cached)
@@ -432,7 +439,10 @@ async def calculate_signals(
             raise HTTPException(status_code=400, detail=f"未知策略类型: {strategy_type}")
 
         # 只取目标日期当天的板块数据，不做任何隐式回退
-        sector_data = _load_sector_snapshot(requested_date) if _is_trade_day(requested_date) else []
+        sector_data = (
+            _load_sector_snapshot(requested_date, force_refresh=True)
+            if _is_trade_day(requested_date) else []
+        )
 
         if not sector_data:
             if not allow_stale:
@@ -477,7 +487,7 @@ async def calculate_signals(
                         "note": note,
                     }
 
-            sector_data = _load_sector_snapshot(effective_date)
+            sector_data = _load_sector_snapshot(effective_date, force_refresh=True)
             if not sector_data:
                 logger.error(f"回退日期 {effective_date} 仍无板块数据，放弃计算")
                 return _no_data_response(
