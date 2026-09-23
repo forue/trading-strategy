@@ -280,6 +280,28 @@ class DataCollector:
                     "pb": pb,
                 })
 
+        # 同步重算分位：历史日期不会再被当日采集覆盖，只回填 PE/PB 的话，
+        # 切换口径前残留的 pe_percentile/pb_percentile 会一直失真，
+        # 回测与复盘页据此做保守档估值筛选时结论相反。
+        # 口径与 calculate_sector_valuation_percentile 一致：严格小于当前值的
+        # 样本占比，样本不足 10 个交易日时不写入。
+        by_code: dict[str, list[dict]] = {}
+        for r in records:
+            by_code.setdefault(r["sector_code"], []).append(r)
+
+        for rows in by_code.values():
+            pe_series = sorted(x["pe_ttm"] for x in rows if x["pe_ttm"] and x["pe_ttm"] > 0)
+            pb_series = sorted(x["pb"] for x in rows if x["pb"] and x["pb"] > 0)
+            for r in rows:
+                if len(pe_series) >= 10:
+                    r["pe_percentile"] = (
+                        sum(1 for v in pe_series if v < r["pe_ttm"]) / len(pe_series) * 100
+                    )
+                if len(pb_series) >= 10:
+                    r["pb_percentile"] = (
+                        sum(1 for v in pb_series if v < r["pb"]) / len(pb_series) * 100
+                    )
+
         # 只写估值字段，InfluxDB 按同 measurement+tags+时间戳做字段合并，不会覆盖已采行情
         for i in range(0, len(records), 5000):
             influx_manager.write_sector_capital_flow(records[i:i + 5000])
