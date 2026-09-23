@@ -229,7 +229,7 @@ MCP_TOOLS = [
                     },
                     "market_change": {
                         "type": "number",
-                        "description": "大盘涨跌幅（0-1），默认 0"
+                        "description": "大盘（上证指数）涨跌幅（百分比，如 -1.5 表示下跌1.5%），默认 0"
                     }
                 },
                 "required": ["positions"]
@@ -778,7 +778,8 @@ class MCPToolExecutor:
                 "limit_up": breadth["limit_up"],
                 "limit_down": breadth["limit_down"],
                 "up_pct": breadth["up_pct"],
-                "avg_change_pct": breadth["avg_change_pct"],
+                # 备用源（乐咕）不提供涨跌幅分布，缺失时不写入，避免 LLM 把 null 当成 0
+                **{k: breadth[k] for k in ("avg_change_pct",) if k in breadth},
             }
         elif "error" in breadth:
             partial_failures.append("涨跌统计")
@@ -1334,10 +1335,10 @@ class MCPToolExecutor:
                     "limit_up": breadth["limit_up"],
                     "limit_down": breadth["limit_down"],
                     "up_pct": breadth["up_pct"],
-                    "avg_change_pct": breadth["avg_change_pct"],
-                    "median_change_pct": breadth["median_change_pct"],
-                    "above_5pct": breadth["above_5pct"],
-                    "below_neg5pct": breadth["below_neg5pct"],
+                    # 备用源（乐咕）不提供涨跌幅分布，缺失时不写入，避免 LLM 把 null 当成 0
+                    **{k: breadth[k] for k in
+                       ("avg_change_pct", "median_change_pct", "above_5pct", "below_neg5pct")
+                       if k in breadth},
                 }
         except Exception as e:
             logger.warning(f"获取个股涨跌统计失败: {e}")

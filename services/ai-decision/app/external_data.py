@@ -20,6 +20,30 @@ async def _run_with_timeout(func, *args, timeout: int = 20, **kwargs):
         raise TimeoutError(f"AkShare 调用超时({timeout}s)")
 
 
+# 东方财富 push2 行情集群在部分网络环境会被整体重置连接（RemoteDisconnected），
+# 失败一次要耗费数秒且短期内不会自愈，因此记录熔断窗口，窗口内直接使用备用数据源
+_PUSH2_BLOCKED_UNTIL = 0.0
+_PUSH2_COOLDOWN_SECONDS = 300
+
+
+def _push2_available() -> bool:
+    """push2 集群是否处于可用窗口（熔断未打开）"""
+    return time.monotonic() >= _PUSH2_BLOCKED_UNTIL
+
+
+def _mark_push2_unavailable():
+    """标记 push2 集群不可用，冷却期内不再尝试"""
+    global _PUSH2_BLOCKED_UNTIL
+    _PUSH2_BLOCKED_UNTIL = time.monotonic() + _PUSH2_COOLDOWN_SECONDS
+    logger.warning(f"东方财富 push2 行情不可用，{_PUSH2_COOLDOWN_SECONDS}s 内改用备用数据源")
+
+
+def _clear_push2_unavailable():
+    """push2 集群恢复可用"""
+    global _PUSH2_BLOCKED_UNTIL
+    _PUSH2_BLOCKED_UNTIL = 0.0
+
+
 # 缓存: {key: (data, timestamp)}
 _cache: dict[str, tuple[Any, float]] = {}
 _MAX_CACHE_ENTRIES = 200
@@ -85,13 +109,34 @@ def _df_to_records(df) -> list[dict]:
 # ============================================================
 
 async def get_global_market_overview() -> dict:
-    """获取全球主要市场指数行情（含重试和过期缓存降级）"""
+    """获取全球主要市场指数行情（东财 → 新浪降级 → 过期缓存降级）"""
     cached = _get_cached("global_market_overview", "global_market")
     if cached is not None:
         return cached
 
+    if _push2_available():
+        result = await _fetch_global_market_from_em()
+        if result:
+            _set_cached("global_market_overview", result)
+            return result
+
+    # 降级：尝试新浪财经API
+    sina_result = await _fetch_global_market_from_sina()
+    if sina_result and "indices" in sina_result:
+        _set_cached("global_market_overview", sina_result)
+        return sina_result
+
+    # 最终降级：返回过期缓存
+    expired = _get_expired_cache("global_market_overview")
+    if expired:
+        expired["_stale"] = True
+        return expired
+    return {"error": "全球市场数据暂不可用"}
+
+
+async def _fetch_global_market_from_em() -> dict:
+    """从东方财富获取全球指数（重试3次，失败后打开 push2 熔断）"""
     import akshare as ak
-    # 重试3次，间隔递增
     for attempt in range(3):
         try:
             df = await _run_with_timeout(ak.index_global_spot_em, timeout=15)
@@ -111,7 +156,8 @@ async def get_global_market_overview() -> dict:
                     if len(filtered) >= 15:
                         break
 
-            result = {
+            _clear_push2_unavailable()
+            return {
                 "indices": [{
                     "name": r.get("名称", ""),
                     "price": r.get("最新价", ""),
@@ -124,26 +170,13 @@ async def get_global_market_overview() -> dict:
                 } for r in filtered[:15]],
                 "timestamp": str(df.columns[0]) if len(df.columns) > 0 else "",
             }
-            _set_cached("global_market_overview", result)
-            return result
         except Exception as e:
             if attempt < 2:
                 await asyncio.sleep(1 * (attempt + 1))
             else:
                 logger.error(f"获取全球市场行情失败(重试3次): {e}")
-
-    # 降级：尝试新浪财经API
-    sina_result = await _fetch_global_market_from_sina()
-    if sina_result and "indices" in sina_result:
-        _set_cached("global_market_overview", sina_result)
-        return sina_result
-
-    # 最终降级：返回过期缓存
-    expired = _get_expired_cache("global_market_overview")
-    if expired:
-        expired["_stale"] = True
-        return expired
-    return {"error": "全球市场数据暂不可用"}
+                _mark_push2_unavailable()
+    return {}
 
 
 async def _fetch_global_market_from_sina() -> dict:
@@ -473,15 +506,99 @@ async def get_china_us_bond_spread(days: int = 30) -> dict:
 # ============================================================
 
 async def get_market_indices() -> dict:
-    """获取大盘主要指数实时行情（含重试和过期缓存降级）"""
+    """获取大盘主要指数实时行情（新浪主源 → 东财备用 → 过期缓存降级）"""
     cached = _get_cached("market_indices", "market_index")
     if cached is not None:
         return cached
 
+    # 主源用新浪：东方财富 push2 接口在部分网络环境会被直接重置连接（RemoteDisconnected），
+    # akshare 内部重试叠加退避后单次调用耗时 20s+，只能退居备用
+    indices = await _fetch_market_indices_from_sina()
+    source = "sina"
+    if not indices:
+        indices = await _fetch_market_indices_from_em()
+        source = "eastmoney"
+
+    if indices:
+        result = {"indices": indices, "count": len(indices), "source": source}
+        _set_cached("market_indices", result)
+        return result
+
+    expired = _get_expired_cache("market_indices")
+    if expired:
+        expired["_stale"] = True
+        return expired
+    logger.error("获取大盘指数失败：新浪与东方财富均不可用")
+    return {"error": "大盘指数数据暂不可用"}
+
+
+async def _fetch_market_indices_from_sina() -> list:
+    """从新浪财经API获取A股主要指数（主数据源，字段完整且响应快）"""
+    import httpx
+    # key 同时用于拼 URL 和回填名称，名称不取自响应文本，避免 GBK 解码差异
+    codes = {
+        "sh000001": ("上证指数", "000001"), "sz399001": ("深证成指", "399001"),
+        "sz399006": ("创业板指", "399006"), "sh000688": ("科创50", "000688"),
+        "sh000300": ("沪深300", "000300"), "sh000905": ("中证500", "000905"),
+        "sh000852": ("中证1000", "000852"),
+    }
+    try:
+        url = f"https://hq.sinajs.cn/list={','.join(codes.keys())}"
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url, headers={"Referer": "https://finance.sina.com.cn/", "User-Agent": "Mozilla/5.0"})
+            if resp.status_code != 200:
+                return []
+            indices = []
+            for line in resp.text.strip().split("\n"):
+                if "=" not in line:
+                    continue
+                key_part, val_part = line.split("=", 1)
+                key = key_part.split("_")[-1]
+                vals = val_part.strip('" ;\n\r').split(",")
+                info = codes.get(key)
+                if not info or len(vals) < 10:
+                    continue
+                # 完整行情字段：0名称 1今开 2昨收 3现价 4最高 5最低 6买一 7卖一 8成交量(股) 9成交额(元)
+                try:
+                    name, code = info
+                    open_px = float(vals[1])
+                    prev_close = float(vals[2])
+                    price = float(vals[3])
+                    high = float(vals[4])
+                    low = float(vals[5])
+                    amount = float(vals[9])
+                except (ValueError, IndexError):
+                    continue
+                # 集合竞价前现价为 0，用昨收兜底，避免出现 -100% 的假涨跌幅
+                if price <= 0:
+                    price = prev_close
+                change = price - prev_close
+                change_pct = change / prev_close * 100 if prev_close else 0.0
+                indices.append({
+                    "name": name, "code": code,
+                    "price": round(price, 2),
+                    "change_pct": round(change_pct, 2),
+                    "change": round(change, 2),
+                    "volume_yi": round(amount / 1e8, 2),
+                    "high": round(high, 2) if high else "",
+                    "low": round(low, 2) if low else "",
+                    "open": round(open_px, 2) if open_px else "",
+                    "prev_close": round(prev_close, 2),
+                })
+            return indices
+    except Exception as e:
+        logger.warning(f"新浪大盘指数获取失败: {e}")
+    return []
+
+
+async def _fetch_market_indices_from_em() -> list:
+    """从东方财富获取A股主要指数（备用数据源，字段更全但部分网络环境不可达）"""
+    if not _push2_available():
+        return []
     import akshare as ak
-    for attempt in range(3):
+    for attempt in range(2):
         try:
-            df = await asyncio.get_event_loop().run_in_executor(None, ak.stock_zh_index_spot_em)
+            df = await _run_with_timeout(ak.stock_zh_index_spot_em, timeout=15)
             if df is None or df.empty:
                 continue
 
@@ -504,84 +621,43 @@ async def get_market_indices() -> dict:
                         "open": r.get("今开", ""),
                         "prev_close": r.get("昨收", ""),
                     })
-
-            result = {"indices": indices, "count": len(indices)}
-            _set_cached("market_indices", result)
-            return result
-        except Exception as e:
-            if attempt < 2:
-                await asyncio.sleep(1 * (attempt + 1))
-            else:
-                logger.error(f"获取大盘指数失败(重试3次): {e}")
-
-    # 降级：尝试新浪财经API
-    sina_indices = await _fetch_market_indices_from_sina()
-    if sina_indices:
-        result = {"indices": sina_indices, "count": len(sina_indices), "source": "sina"}
-        _set_cached("market_indices", result)
-        return result
-
-    expired = _get_expired_cache("market_indices")
-    if expired:
-        expired["_stale"] = True
-        return expired
-    return {"error": "大盘指数数据暂不可用"}
-
-
-async def _fetch_market_indices_from_sina() -> list:
-    """从新浪财经API获取A股主要指数（备用数据源）"""
-    import httpx
-    codes = {
-        "s_sh000001": ("上证指数", "000001"), "s_sz399001": ("深证成指", "399001"),
-        "s_sz399006": ("创业板指", "399006"), "s_sh000688": ("科创50", "000688"),
-        "s_sh000300": ("沪深300", "000300"), "s_sh000905": ("中证500", "000905"),
-        "s_sh000852": ("中证1000", "000852"),
-    }
-    try:
-        url = f"https://hq.sinajs.cn/list={','.join(codes.keys())}"
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(url, headers={"Referer": "https://finance.sina.com.cn/", "User-Agent": "Mozilla/5.0"})
-            if resp.status_code != 200:
-                return []
-            indices = []
-            for line in resp.text.strip().split("\n"):
-                if "=" not in line:
-                    continue
-                key_part, val_part = line.split("=", 1)
-                key = key_part.split("_")[-1]
-                vals = val_part.strip('" ;\n\r').split(",")
-                info = codes.get(f"s_{key}")
-                if not info or len(vals) < 4:
-                    continue
-                try:
-                    name, code = info
-                    price = float(vals[1])
-                    change = float(vals[2])
-                    change_pct = float(vals[3])
-                except (ValueError, IndexError):
-                    continue
-                indices.append({
-                    "name": name, "code": code, "price": price,
-                    "change_pct": change_pct, "change": change,
-                    "volume_yi": 0, "high": "", "low": "", "open": "",
-                    "prev_close": round(price - change, 2),
-                })
+            _clear_push2_unavailable()
             return indices
-    except Exception as e:
-        logger.warning(f"新浪大盘指数获取失败: {e}")
+        except Exception as e:
+            if attempt < 1:
+                await asyncio.sleep(1)
+            else:
+                logger.warning(f"东方财富大盘指数获取失败: {e}")
+                _mark_push2_unavailable()
     return []
 
 
 async def get_market_breadth_real() -> dict:
-    """获取真实市场涨跌统计（含重试和过期缓存降级）"""
+    """获取真实市场涨跌统计（东财全A行情 → 乐咕涨跌家数备用 → 过期缓存降级）"""
     cached = _get_cached("market_breadth_real", "market_breadth")
     if cached is not None:
         return cached
 
+    result = await _fetch_market_breadth_from_em() if _push2_available() else {}
+    if not result:
+        result = await _fetch_market_breadth_from_legu()
+    if result:
+        _set_cached("market_breadth_real", result)
+        return result
+
+    expired = _get_expired_cache("market_breadth_real")
+    if expired:
+        expired["_stale"] = True
+        return expired
+    return {"error": "市场涨跌数据暂不可用"}
+
+
+async def _fetch_market_breadth_from_em() -> dict:
+    """从东方财富全A行情统计涨跌家数与涨跌幅分布（重试2次，失败后打开 push2 熔断）"""
     import akshare as ak
-    for attempt in range(3):
+    for attempt in range(2):
         try:
-            df = await asyncio.get_event_loop().run_in_executor(None, ak.stock_zh_a_spot_em)
+            df = await _run_with_timeout(ak.stock_zh_a_spot_em, timeout=20)
             if df is None or df.empty:
                 continue
 
@@ -605,7 +681,8 @@ async def get_market_breadth_real() -> dict:
             above_5 = int((changes > 5).sum())
             below_neg5 = int((changes < -5).sum())
 
-            result = {
+            _clear_push2_unavailable()
+            return {
                 "total_stocks": total,
                 "up": up,
                 "down": down,
@@ -618,20 +695,47 @@ async def get_market_breadth_real() -> dict:
                 "up_pct": round(up / total * 100, 1),
                 "avg_change_pct": round(float(changes.mean()), 2),
                 "median_change_pct": round(float(changes.median()), 2),
+                "source": "eastmoney",
             }
-            _set_cached("market_breadth_real", result)
-            return result
         except Exception as e:
-            if attempt < 2:
-                await asyncio.sleep(1 * (attempt + 1))
+            if attempt < 1:
+                await asyncio.sleep(1)
             else:
-                logger.error(f"获取市场涨跌统计失败(重试3次): {e}")
+                logger.error(f"获取市场涨跌统计失败(重试2次): {e}")
+                _mark_push2_unavailable()
+    return {}
 
-    expired = _get_expired_cache("market_breadth_real")
-    if expired:
-        expired["_stale"] = True
-        return expired
-    return {"error": "市场涨跌数据暂不可用"}
+
+async def _fetch_market_breadth_from_legu() -> dict:
+    """从乐咕乐股获取涨跌家数（备用源，无涨跌幅分布字段）"""
+    import akshare as ak
+    try:
+        df = await _run_with_timeout(ak.stock_market_activity_legu, timeout=15)
+        if df is None or df.empty:
+            return {}
+        activity = {str(r["item"]).strip(): r["value"] for _, r in df.iterrows()}
+        up = int(float(activity.get("上涨", 0) or 0))
+        down = int(float(activity.get("下跌", 0) or 0))
+        flat = int(float(activity.get("平盘", 0) or 0))
+        total = up + down + flat
+        if total == 0:
+            return {}
+        return {
+            "total_stocks": total,
+            "up": up,
+            "down": down,
+            "flat": flat,
+            "up_down_ratio": round(up / max(down, 1), 2),
+            "limit_up": int(float(activity.get("真实涨停", 0) or 0)),
+            "limit_down": int(float(activity.get("真实跌停", 0) or 0)),
+            "up_pct": round(up / total * 100, 1),
+            "activity": str(activity.get("活跃度", "")),
+            "stat_time": str(activity.get("统计日期", "")),
+            "source": "legu",
+        }
+    except Exception as e:
+        logger.warning(f"乐咕涨跌家数获取失败: {e}")
+    return {}
 
 
 # ============================================================
