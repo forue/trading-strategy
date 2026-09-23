@@ -165,6 +165,9 @@ if event == "signals_generated":
     # 2. 外部推送：有买卖信号且 ai_push_enabled 时暂存，等AI解读合并后推送
     if settings.ai_push_enabled and _has_trade_signal(signals):
         _pending_push[f"{strategy_type}:{signal_date}"] = {...}
+    elif not _has_trade_signal(signals):
+        # 空仓/清仓（无买卖信号）：仅广播+缓存，不推送外部渠道
+        logger.info("无买卖信号，跳过外部推送，仅广播与缓存")
     else:
         _do_push(signals, strategy_type, signal_date)
 
@@ -181,8 +184,8 @@ if event == "signal_analyzed":
 
 - 等待窗口：`ai_push_wait_seconds`（默认 120s），超时未收到解读则**降级推送**
   （不含 AI 分析）并告警，避免信号被无限期推迟
-- 空仓/无买卖信号：无需等待 AI，直接推送"今日无信号/空仓"通知
-  （`push_signal` 不再因 `signals` 为空而静默返回）
+- 空仓/无买卖信号：仅 WebSocket 广播与 Redis 缓存，**跳过外部渠道推送**——
+  "今日无信号/空仓"属于可从前端直接获知的状态，推送到钉钉/企业微信只会造成打扰
 - 消息中的 AI 段落由 `_build_ai_section()` 统一生成，包含：
   板块、方向、信心度、解读要点（截断 200 字）、风险提示、操作建议、解读模型
 

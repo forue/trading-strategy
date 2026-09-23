@@ -180,6 +180,12 @@ def start_rabbitmq_consumer():
                         f"信号已暂存，等待AI解读后合并推送 "
                         f"(最多等待{settings.ai_push_wait_seconds}s): {strategy_type} {signal_date}"
                     )
+                elif not _has_trade_signal(signals):
+                    # 空仓/清仓（无买卖信号）：仅广播与缓存，不推送外部渠道。
+                    # "今日无信号"属于可从前端直接获知的状态，推送只会造成打扰
+                    logger.info(
+                        f"无买卖信号，跳过外部推送，仅广播与缓存: {strategy_type} {signal_date}"
+                    )
                 else:
                     _do_push(signals, strategy_type, signal_date)
                     logger.info(f"信号处理完成: {len(signals)}条, strategy={strategy_type}")
