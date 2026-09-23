@@ -93,6 +93,18 @@ class RabbitMQManager:
         try:
             if self._connection is None or self._connection.is_closed:
                 self._do_connect()
+            elif self._consume_channel is None:
+                # 纯发布场景长时间空闲后，broker 会按心跳超时关闭连接，而本地
+                # is_open 仍为 True，此时 basic_publish 会写到已失效的 socket 上
+                # （表现为 ConnectionReset，需重试才能成功）。发布前非阻塞处理一次
+                # I/O：读出对端关闭事件并顺带发送心跳，使首次发布即可成功。
+                # 该连接同时存在消费者时不执行，避免与消费线程并发 I/O。
+                try:
+                    self._connection.process_data_events(time_limit=0)
+                except Exception as e:
+                    logger.warning(f"RabbitMQ 连接已失效，重建连接: {e}")
+                    self.close()
+                    self._do_connect()
             if self._publish_channel is None or self._publish_channel.is_closed:
                 self._publish_channel = self._connection.channel()
             return self._publish_channel
