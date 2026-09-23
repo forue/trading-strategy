@@ -1,6 +1,14 @@
-"""数据采集服务 - FastAPI主应用"""
+"""数据采集服务 - FastAPI主应用
+
+注意：collector 与 influx_client 的所有调用都是**同步阻塞**的网络 IO。
+它们必须通过 asyncio.to_thread 放到线程池执行：一旦直接在 async 端点里调用，
+会占住事件循环，导致同一进程内的查询接口（/query/*）在整个采集期间无响应
+（2026-09-22 全量板块K线刷新约 12 秒，期间 ai-decision 取市场数据 10 秒超时，
+信号解读上下文全部缺失）。
+"""
 import sys
 import os
+import asyncio
 from datetime import datetime
 from fastapi import FastAPI, HTTPException
 from loguru import logger
@@ -46,7 +54,7 @@ async def health_check():
     # InfluxDB
     try:
         from .influx_client import influx_manager
-        h = influx_manager.client.health()
+        h = await asyncio.to_thread(influx_manager.client.health)
         checks["influxdb"] = {"status": h.status}
     except Exception as e:
         checks["influxdb"] = {"status": "fail", "message": str(e)}
@@ -70,7 +78,7 @@ async def health_check():
 async def collect_sector_flow(trade_date: str = None):
     """触发板块资金流数据采集"""
     try:
-        results = data_collector.collect_sector_capital_flow(trade_date)
+        results = await asyncio.to_thread(data_collector.collect_sector_capital_flow, trade_date)
         # 通知策略引擎数据已更新
         rmq.publish("data.updated.sector_flow", {
             "event": "sector_flow_updated",
@@ -94,12 +102,13 @@ async def collect_history(days: int = 30, date: str = None):
     """
     try:
         # 先采集指定日期汇总（或当日）
-        results = data_collector.collect_sector_history(days, trade_date=date)
+        results = await asyncio.to_thread(data_collector.collect_sector_history, days, trade_date=date)
         # 再用K线数据填充历史
-        kline_results = data_collector.collect_sector_history_via_kline(days)
-        market = data_collector.collect_market_index_kline(start_date=(
-            (datetime.now() - __import__("datetime").timedelta(days=days + 30)).strftime("%Y%m%d")
-        ))
+        kline_results = await asyncio.to_thread(data_collector.collect_sector_history_via_kline, days)
+        market = await asyncio.to_thread(
+            data_collector.collect_market_index_kline,
+            start_date=(datetime.now() - __import__("datetime").timedelta(days=days + 30)).strftime("%Y%m%d"),
+        )
         total = len(results) + len(kline_results) + len(market)
         return success_response(data={"count": total, "market_kline": len(market)}, message="采集历史数据完成")
     except Exception as e:
@@ -111,7 +120,9 @@ async def collect_history(days: int = 30, date: str = None):
 async def backfill_fund_flow(start_date: str = "20240101", end_date: str = None):
     """回填历史板块资金流数据（使用东财 push2his 历史资金流接口）"""
     try:
-        result = data_collector.backfill_sector_fund_flow_hist(start_date, end_date)
+        result = await asyncio.to_thread(
+            data_collector.backfill_sector_fund_flow_hist, start_date, end_date
+        )
         if result.get("aborted"):
             # 数据源限流导致的提前终止不能当作成功返回，否则调用方无从感知缺口
             return error_response(
@@ -140,7 +151,7 @@ async def collect_north_bound(date: str = None):
         date: 指定采集日期 YYYY-MM-DD，不传则默认今天（非交易日自动回退）
     """
     try:
-        results = data_collector.collect_north_bound_flow(trade_date=date)
+        results = await asyncio.to_thread(data_collector.collect_north_bound_flow, trade_date=date)
         return success_response(data={"count": len(results)}, message="北向资金数据采集完成")
     except Exception as e:
         logger.error(f"北向资金数据采集失败: {e}")
@@ -158,11 +169,16 @@ async def collect_kline(sector_name: str = None, start_date: str = None, end_dat
     """
     try:
         if sector_name:
-            results = data_collector.collect_sector_kline(sector_name, start_date, end_date)
+            results = await asyncio.to_thread(
+                data_collector.collect_sector_kline, sector_name, start_date, end_date
+            )
             if results:
-                influx_manager.write_sector_kline(results)
+                await asyncio.to_thread(influx_manager.write_sector_kline, results)
         else:
-            results = data_collector.collect_all_sectors_kline(start_date, end_date)
+            # 全量采集 90 个板块耗时十余秒，必须在线程池执行
+            results = await asyncio.to_thread(
+                data_collector.collect_all_sectors_kline, start_date, end_date
+            )
         return success_response(data={"count": len(results)}, message="K线数据采集完成")
     except Exception as e:
         logger.error(f"K线数据采集失败: {e}")
@@ -173,7 +189,7 @@ async def collect_kline(sector_name: str = None, start_date: str = None, end_dat
 async def get_trade_dates(days: int = 365):
     """获取交易日历（以今天为基准，返回最近 N 个交易日）"""
     try:
-        trade_dates = data_collector.get_trade_dates(days)
+        trade_dates = await asyncio.to_thread(data_collector.get_trade_dates, days)
         if trade_dates is None:
             return success_response(data=[])
         today = datetime.now().strftime("%Y%m%d")
@@ -189,7 +205,9 @@ async def get_trade_dates(days: int = 365):
 async def query_sector_data(sector_code: str, start_date: str, end_date: str):
     """查询板块历史数据"""
     try:
-        data = influx_manager.query_sector_data(sector_code, start_date, end_date)
+        data = await asyncio.to_thread(
+            influx_manager.query_sector_data, sector_code, start_date, end_date
+        )
         return success_response(data=data)
     except Exception as e:
         logger.error(f"数据查询失败: {e}")
@@ -200,7 +218,7 @@ async def query_sector_data(sector_code: str, start_date: str, end_date: str):
 async def query_all_sectors(start_date: str, end_date: str):
     """查询所有板块数据"""
     try:
-        data = influx_manager.query_all_sectors_data(start_date, end_date)
+        data = await asyncio.to_thread(influx_manager.query_all_sectors_data, start_date, end_date)
         return success_response(data=data)
     except Exception as e:
         logger.error(f"数据查询失败: {e}")
@@ -211,7 +229,7 @@ async def query_all_sectors(start_date: str, end_date: str):
 async def get_sectors():
     """获取板块名称列表（同花顺）"""
     try:
-        sectors = data_collector.get_sector_names()
+        sectors = await asyncio.to_thread(data_collector.get_sector_names)
         return success_response(data=sectors)
     except Exception as e:
         logger.error(f"获取板块列表失败: {e}")
@@ -228,7 +246,9 @@ async def cleanup_data(measurement: str, start_date: str, end_date: str):
         end_date: 结束日期 YYYYMMDD
     """
     try:
-        influx_manager.delete_by_date_range(measurement, start_date, end_date)
+        await asyncio.to_thread(
+            influx_manager.delete_by_date_range, measurement, start_date, end_date
+        )
         return success_response(message=f"已删除 {measurement} {start_date}~{end_date} 的数据")
     except Exception as e:
         logger.error(f"数据清理失败: {e}")
