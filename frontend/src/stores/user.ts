@@ -27,14 +27,14 @@ export const useUserStore = defineStore('user', () => {
     }
   }
 
-  // 检查是否超过自动回测时间点（15:05）
+  // 检查是否超过自动回测时间点（15:35，与调度器备用计算任务对齐）
   function isAfterAutoBacktestTime(): boolean {
     const now = dayjs()
     const currentHour = now.hour()
     const currentMinute = now.minute()
     
-    // 检查是否超过15:05
-    if (currentHour > 15 || (currentHour === 15 && currentMinute >= 5)) {
+    // 检查是否超过15:35
+    if (currentHour > 15 || (currentHour === 15 && currentMinute >= 35)) {
       return true
     }
     return false

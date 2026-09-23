@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.jobstores.redis import RedisJobStore
+from apscheduler.jobstores.base import JobLookupError
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED, EVENT_JOB_MISSED
@@ -156,8 +157,15 @@ async def _is_non_trade_day() -> bool:
     return _is_weekend()
 
 
+# 采集/计算时点：同花顺行业汇总接口在收盘后仍需数分钟完成当日结算，
+# 15:00 整点采集会落库未定盘数据（实测 90 个板块中 81 个涨跌幅、82 个净流入
+# 在盘后仍会变动），因此推迟到 15:30；备用计算任务顺延到 15:35。
+COLLECT_HOUR, COLLECT_MINUTE = 15, 30
+CALCULATE_HOUR, CALCULATE_MINUTE = 15, 35
+
+
 async def job_collect_data():
-    """定时任务：数据采集（每个交易日15:00执行），采集成功后立即触发策略计算，失败最多重试3次
+    """定时任务：数据采集（每个交易日15:30执行），采集成功后立即触发策略计算，失败最多重试3次
 
     采集期间会打上"采集中"标记：备用触发任务据此让行，避免两者并发导致策略
     在入库完成前读到 T-1 数据。
@@ -184,6 +192,9 @@ async def job_collect_data():
                         calculated = await _trigger_strategy_calculation(client)
                         if calculated:
                             await _check_and_mark_executed(f"signal:calculated:{today}")
+                            # 先刷新板块K线再回填：回填要用 T+1 开盘价，行情不新会全部落空
+                            await _trigger_kline_refresh(client)
+                            await _trigger_outcome_backfill(client)
                         else:
                             # 数据虽已采集但策略侧判定未就绪：不标记完成，保留重试机会
                             logger.error(">>> 策略计算因数据未就绪未完成，不标记今日已计算")
@@ -226,6 +237,47 @@ async def _trigger_strategy_calculation(client: httpx.AsyncClient, allow_stale: 
     return calculated
 
 
+async def _trigger_outcome_backfill(client: httpx.AsyncClient) -> None:
+    """触发信号收益回填：为已走完 1/3/5/10 交易日持有期的历史信号结算胜负
+
+    复盘页面的命中率/净收益依赖该回填结果，失败不影响主链路。
+    """
+    try:
+        resp = await client.post(f"{settings.strategy_url}/signals/backfill")
+        payload = resp.json()
+        logger.info(f"信号收益回填: {payload.get('message')} {payload.get('data')}")
+    except Exception as e:
+        logger.error(f"信号收益回填失败: {e}")
+
+
+# 板块K线刷新窗口（自然日）：覆盖最近约 10 个交易日，既能写入当日 OHLC，
+# 也能把此前数据源未就绪而缺失的开盘价补齐
+KLINE_REFRESH_DAYS = 15
+
+
+async def _trigger_kline_refresh(client: httpx.AsyncClient) -> None:
+    """刷新最近若干交易日的板块K线（sector_kline）
+
+    复盘按"T+1 开盘价买入"结算，开盘价只能取自 sector_kline 的真实 OHLC；
+    该测量不随资金流采集更新，若不刷新，新信号的 T+1 开盘价会持续取不到，
+    回填结果全部落空。窗口取 15 个自然日以具备追赶能力。
+    """
+    today = datetime.now()
+    start = (today - timedelta(days=KLINE_REFRESH_DAYS)).strftime("%Y%m%d")
+    end = today.strftime("%Y%m%d")
+    try:
+        resp = await client.post(
+            f"{settings.data_collector_url}/collect/kline",
+            params={"start_date": start, "end_date": end},
+            timeout=180,
+        )
+        payload = resp.json()
+        count = (payload.get("data") or {}).get("count")
+        logger.info(f"板块K线刷新({start}~{end}): {payload.get('message')} 共 {count} 条")
+    except Exception as e:
+        logger.error(f"板块K线刷新失败: {e}")
+
+
 async def job_calculate_strategy():
     """定时任务：策略计算（作为采集链路的备用触发，正常由采集任务链式触发）"""
     if await _is_non_trade_day():
@@ -244,6 +296,9 @@ async def job_calculate_strategy():
     try:
         async with httpx.AsyncClient(timeout=120) as client:
             calculated = await _trigger_strategy_calculation(client)
+            if calculated:
+                await _trigger_kline_refresh(client)
+                await _trigger_outcome_backfill(client)
             if not calculated:
                 # 数据尚未入库：撤销占位，交由后续采集链路重新触发
                 await _clear_executed(f"signal:calculated:{today}")
@@ -253,7 +308,12 @@ async def job_calculate_strategy():
 
 
 async def job_collect_north_bound():
-    """定时任务：北向资金采集（每个交易日16:00执行）"""
+    """【已暂停】北向资金采集任务
+
+    沪深港通自 2024-08-19 起停止披露北向资金成交净买额，采集结果恒为 0，
+    指标已无分析价值（详见 collector.collect_north_bound_flow 注释）。
+    因此不再注册到调度器、也不在启动时调用；保留实现以便数据源恢复后快速重启。
+    """
     if await _is_non_trade_day():
         logger.info(">>> 今日非交易日，跳过北向资金采集")
         return
@@ -353,12 +413,30 @@ def _build_job_store() -> dict:
         return {"default": None}
 
 
+def _purge_legacy_job(job_stores: dict, job_id: str, label: str) -> None:
+    """从持久化 jobstore 中彻底删除已下线的历史任务
+
+    注意：scheduler.remove_job() 在 scheduler.start() 之前只会操作内存中的待注册任务，
+    不会触及 RedisJobStore；任务会在 start() 时被重新加载并继续按原计划触发。
+    因此这里直接删除 jobstore 中的记录，start() 时自然不会再恢复该任务。
+    """
+    store = job_stores.get("default")
+    if store is None:
+        return
+    try:
+        store.remove_job(job_id)
+        logger.info(f"已从持久化存储中移除历史任务: {job_id}（{label}）")
+    except JobLookupError:
+        pass
+    except Exception as e:
+        logger.warning(f"清理历史任务 {job_id} 失败: {e}")
+
+
 def setup_scheduler():
     """配置定时任务（持久化到 Redis，重启后任务不丢失）"""
     _RECOVERABLE_JOBS.update({
         "collect_data": job_collect_data,
         "calculate_strategy": job_calculate_strategy,
-        "collect_north_bound": job_collect_north_bound,
     })
 
     job_stores = _build_job_store()
@@ -367,20 +445,17 @@ def setup_scheduler():
     misfire_grace = 14400  # 4小时容错，覆盖维护窗口，同时避免重启后重复执行历史任务
 
     scheduler.add_job(
-        job_collect_data, CronTrigger(day_of_week="mon-fri", hour=15, minute=0),
+        job_collect_data, CronTrigger(day_of_week="mon-fri", hour=COLLECT_HOUR, minute=COLLECT_MINUTE),
         id="collect_data", name="板块资金流数据采集", replace_existing=True,
         misfire_grace_time=misfire_grace, max_instances=1,
     )
     scheduler.add_job(
-        job_calculate_strategy, CronTrigger(day_of_week="mon-fri", hour=15, minute=5),
+        job_calculate_strategy, CronTrigger(day_of_week="mon-fri", hour=CALCULATE_HOUR, minute=CALCULATE_MINUTE),
         id="calculate_strategy", name="三档轮动策略计算", replace_existing=True,
         misfire_grace_time=misfire_grace, max_instances=1,
     )
-    scheduler.add_job(
-        job_collect_north_bound, CronTrigger(day_of_week="mon-fri", hour=16, minute=0),
-        id="collect_north_bound", name="北向资金数据采集", replace_existing=True,
-        misfire_grace_time=misfire_grace, max_instances=1,
-    )
+    # 北向资金采集已暂停（数据源停止披露）
+    _purge_legacy_job(job_stores, "collect_north_bound", "北向资金采集（功能已暂停）")
     # 看门狗：misfire_grace 放大到 24 小时，保证宿主休眠唤醒后必定被触发，
     # 从而能第一时间记录时钟漂移
     scheduler.add_job(
@@ -403,15 +478,29 @@ async def _run_startup_jobs():
 
     job_collect_data 内部已链式触发策略计算，无需再单独调用 job_calculate_strategy，
     避免重复推送。启动前检查 Redis 去重标记，若今日已执行则跳过。
+
+    未到采集时点时**不补跑采集**：此时行情未收盘或数据源未完成结算，补跑会把未定盘
+    数据（甚至上一交易日快照）写成当日数据并固化当日信号，交由当天定时任务执行即可。
     """
     today = datetime.now().strftime("%Y-%m-%d")
     if await _is_executed(f"signal:calculated:{today}"):
         logger.info(">>> 今日策略已计算，跳过启动任务")
-        return
-    logger.info(">>> 启动时执行: 数据采集")
-    await job_collect_data()
-    logger.info(">>> 启动时执行: 北向资金采集")
-    await job_collect_north_bound()
+    else:
+        now = datetime.now()
+        if (now.hour, now.minute) < (COLLECT_HOUR, COLLECT_MINUTE):
+            logger.info(
+                f">>> 未到采集时点({COLLECT_HOUR:02d}:{COLLECT_MINUTE:02d})，"
+                f"启动任务跳过数据采集，等待定时任务执行"
+            )
+        else:
+            logger.info(">>> 启动时执行: 数据采集")
+            await job_collect_data()
+
+    # 信号收益回填与采集时点无关：每次启动补跑一次，把已走完持有期的信号结算掉
+    async with httpx.AsyncClient(timeout=120) as client:
+        await _trigger_kline_refresh(client)
+        await _trigger_outcome_backfill(client)
+
 
 
 # ---- FastAPI 应用 ----
