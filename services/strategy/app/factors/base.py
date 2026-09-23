@@ -172,13 +172,22 @@ class FactorRegistry:
 
         for fname in factor_names:
             values: list[tuple[int, float]] = []
+            is_valuation = False
             for i, results in enumerate(all_sector_results):
                 for r in results:
                     if r.name == fname and r.confidence > 0:
+                        is_valuation = r.category == FactorCategory.VALUATION
                         values.append((i, r.raw_value))
                         break
+                if is_valuation:
+                    break
 
-            if len(values) < 3:
+            # 估值类因子（PE/PB 历史分位）不参与截面归一化：其 raw_value 是历史
+            # 分位数，数值越大代表越贵，而归一化按 5+z*2 会把"分位高"映射成高分，
+            # 与"越便宜得分越高"的因子语义完全相反。归一化后保守档再由 score
+            # 反算估值分位，会把历史高位的板块判成低估值买入
+            # （2026-09-23：医疗服务真实 PE 分位 88.4%，却被判为 14.1% 买入）。
+            if is_valuation or len(values) < 3:
                 continue
 
             raw_vals = [v[1] for v in values]
