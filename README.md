@@ -40,7 +40,8 @@
 | **MCP Agent** | MCP 协议金融 Agent，支持板块分析、信号解读、风险评估 |
 | **信号推送** | WebSocket 实时推送交易信号，支持邮件/钉钉通知 |
 | **策略回测** | 历史回测、自动优化（Optuna）、策略参数调优 |
-| **数据采集** | AkShare 板块资金流、K线、北向资金，非交易日自动回退 |
+| **数据采集** | AkShare 板块资金流、K线、板块估值（申万口径），非交易日自动回退（北向资金采集已下线，见 `docs/04-data-collector.md`） |
+| **策略复盘** | 信号落库与收益回填，按策略档位/持有期统计胜率、准确率、盈亏比与累计收益曲线（前端「策略复盘」页） |
 
 ---
 
@@ -207,9 +208,13 @@ curl http://localhost:8007/health
 # 采集 30 天历史数据
 docker compose exec backend-data-collector curl -X POST "http://localhost:8003/collect/history?days=30"
 
-# 采集北向资金
-docker compose exec backend-data-collector curl -X POST "http://localhost:8003/collect/north-bound"
+# 回填 1 年板块历史估值（使估值分位立即可用）
+docker compose exec backend-data-collector curl -X POST "http://localhost:8003/collect/backfill-valuation?days=365"
 ```
+
+> 北向资金采集已于 2026-09-21 下线（数据源自 2024-08-19 停止披露），`/collect/north-bound`
+> 端点保留但仅可手动调用。策略复盘需先回填信号收益：
+> `docker compose exec backend-strategy curl -X POST "http://localhost:8002/signals/backfill?lookback_days=365"`
 
 ### 访问前端
 
@@ -264,7 +269,7 @@ docker compose exec backend-data-collector curl -X POST "http://localhost:8003/c
 | `get_sector_ranking` | 板块涨跌排行（涨跌幅、主力净流入） |
 | `analyze_sector` | 分析单个板块（资金流向、技术指标） |
 | `get_today_signals` | 获取今日交易信号 |
-| `get_north_bound` | 获取北向资金流入流出 |
+| `get_north_bound` | 获取北向资金流入流出（数据源自 2024-08-19 停止披露，工具返回"不可用"） |
 | `get_sector_history` | 获取板块历史数据 |
 | `run_backtest` | 运行策略回测 |
 
@@ -388,7 +393,7 @@ mvn spring-boot:run
 
 ### 板块资金轮动评分模型
 
-**数据源**: 申万/同花顺行业板块日线、主力资金与北向资金等（见数据采集与 Influx 模型）。
+**数据源**: 申万/同花顺行业板块日线、主力资金与北向资金等（见数据采集与 Influx 模型）；北向资金自 2024-08-19 起停止披露，相关因子恒为 0，前端展示已置灰。
 
 **评分主路径**: 各板块经 **因子引擎**（`factors/` + `FactorRegistry`）产出因子得分 → **加权合成**（置信度参与类内权重，`combiner/weighted.py`）→ 可选与 **截面排名合成** 按 `StrategyParams.cross_section_alpha` 混合 → 得到排序用综合分。细节与 API 字段以 **`docs/05-strategy-engine.md`**、**`docs/10-factor-engine.md`** 为准。
 
@@ -469,11 +474,21 @@ GET  /api/strategy/factors/config    - 获取因子与默认类别权重
 ```
 POST /api/data/collect/sector-flow     - 采集板块资金流
 POST /api/data/collect/history?days=30 - 采集历史数据
-POST /api/data/collect/north-bound     - 采集北向资金
+POST /api/data/collect/north-bound     - 采集北向资金（调度已下线，仅手动调用）
 GET  /api/data/query/all-sectors       - 查询所有板块数据
 GET  /api/data/trade-dates             - 交易日历
 GET  /api/data/sectors                 - 板块列表
 ```
+
+### 策略复盘
+
+```
+GET  /api/strategy/signals/performance?strategy_type=MODERATE&horizon_days=5 - 信号复盘统计
+POST /api/strategy/signals/sync?lookback_days=7        - 同步信号缓存到 trade_signals
+POST /api/strategy/signals/backfill?lookback_days=365  - 回填 signal_outcomes 收益，供复盘统计
+```
+
+说明见 `docs/05-strategy-engine.md` 5.13。
 
 ### 信号通知
 

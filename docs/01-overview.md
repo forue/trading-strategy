@@ -104,6 +104,12 @@ A股市场存在显著的板块轮动效应，资金在不同行业板块间流�
                                        外部推送通道(DingTalk/WeCom)
 ```
 
+> **连接保活**：各 Python 服务共用 `shared/rabbitmq.py` 中的单例 `RabbitMQManager`，
+> 发布通道与消费通道相互独立（`heartbeat=60`）。纯发布型服务在长时间空闲后，本地
+> `is_open` 仍为 True 但连接已被 broker 因心跳超时关闭，首次发布会抛 `ConnectionReset`。
+> 因此发布通道在无消费者（`_consume_channel is None`）时会先调用
+> `process_data_events(time_limit=0)` 探活，失败则重建连接，避免首次发布失败。
+
 ### 2.4 数据流向
 
 ```
