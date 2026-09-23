@@ -42,6 +42,24 @@ CREATE TABLE IF NOT EXISTS trade_signals (
     UNIQUE(signal_date, strategy_type, sector_code, direction)
 );
 
+-- 信号收益评估表：信号后 N 个交易日的真实收益，用于复盘统计准确率/胜率
+-- 由 strategy 服务在行情到位后回填，见 services/strategy/app/signal_tracker.py
+CREATE TABLE IF NOT EXISTS signal_outcomes (
+    id BIGSERIAL PRIMARY KEY,
+    signal_date DATE NOT NULL,
+    strategy_type VARCHAR(20) NOT NULL,
+    sector_code VARCHAR(20) NOT NULL,
+    direction VARCHAR(10) NOT NULL,
+    horizon_days INT NOT NULL,  -- 评估窗口（交易日个数，取 1/3/5/10）
+    end_date DATE NOT NULL,
+    base_close DECIMAL(12,4) NOT NULL,
+    end_close DECIMAL(12,4) NOT NULL,
+    forward_return DECIMAL(10,6) NOT NULL,
+    is_win BOOLEAN NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(signal_date, strategy_type, sector_code, direction, horizon_days)
+);
+
 -- 持仓记录表
 CREATE TABLE IF NOT EXISTS positions (
     id BIGSERIAL PRIMARY KEY,
@@ -140,6 +158,7 @@ ON CONFLICT DO NOTHING;
 -- 创建索引
 CREATE INDEX IF NOT EXISTS idx_trade_signals_date ON trade_signals(signal_date);
 CREATE INDEX IF NOT EXISTS idx_trade_signals_strategy ON trade_signals(strategy_type);
+CREATE INDEX IF NOT EXISTS idx_signal_outcomes_perf ON signal_outcomes(strategy_type, horizon_days, signal_date);
 CREATE INDEX IF NOT EXISTS idx_positions_user ON positions(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_trades_user_date ON trades(user_id, traded_at);
 CREATE INDEX IF NOT EXISTS idx_account_nav_user_date ON account_nav(user_id, nav_date);

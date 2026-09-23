@@ -1,6 +1,8 @@
 # 策略引擎服务设计文档
 
-> 版本: v2.0 | 更新日期: 2026-09-06 | 更新: T+1回测、19因子体系、动态权重
+> 版本: v2.2 | 更新日期: 2026-09-21 | 更新: 复盘行情源改为 `sector_kline.open` + `sector_capital_flow.index_close`（5.13）；新增信号落库与复盘统计；北向资金相关采集/展示已停用
+>
+> 历史版本: v2.0 (2026-09-06) T+1回测、19因子体系、动态权重
 
 ---
 
@@ -30,6 +32,7 @@ services/strategy/app/
 ├── combiner/        # 因子合成引擎
 ├── models.py        # 数据模型
 ├── influx_query.py  # InfluxDB 查询
+├── signal_tracker.py # 信号落库、收益回填与复盘统计（见 5.13）
 └── config.py        # 配置
 ```
 
@@ -212,6 +215,11 @@ services/strategy/app/
   5. 当回测/历史区间缺少估值分位数据（pe/pb_percentile 均缺失）时，
      自动退化为纯评分选股，避免"空有低估值预筛却无数据可用"导致长期空仓
 
+> 估值分位数据可得性（2026-09-21）：板块 PE/PB 及分位由 data-collector 采集写入
+> `sector_capital_flow`（口径与回填方式见 `docs/04-data-collector.md` 3.5）。
+> 分位需 ≥10 个交易日样本，首次部署可调用 `POST /collect/backfill-valuation?days=365`
+> 一次性回填 1 年历史，无需等待逐日积累。
+
 卖出逻辑:
   1. 综合评分 < min_score_keep 的板块
   2. 趋势破位止损（组合净值有效跌破 trend_ma_days 均线超阈值）
@@ -229,7 +237,7 @@ services/strategy/app/
 
 ```
 触发方式: 
-  1. 定时触发: 任务调度中心 15:00 数据采集后链式触发（或15:05备用触发）
+  1. 定时触发: 任务调度中心 15:30 数据采集后链式触发（或15:35备用触发）
   2. 手动触发: 前端策略管理页触发 /calculate
   3. 登录触发: 认证服务登录成功后触发 /collect + /calculate
 
@@ -261,8 +269,9 @@ services/strategy/app/
       a. 更新持仓到Redis (positions:{type}, TTL: 7天)
          - 仅在本次确实产生 BUY/SELL 信号时更新；无信号表示"维持现有持仓"，绝不写空仓位
       b. 写入Redis缓存 (key: signals:{type}:{date}, TTL: 7天)
-      c. 通过RabbitMQ发布 signals_generated 事件
-      d. 信号通知服务消费事件 → WebSocket推送给前端
+      c. 信号落库 PostgreSQL (trade_signals，按当日+唯一键幂等去重，见 5.13)
+      d. 通过RabbitMQ发布 signals_generated 事件
+      e. 信号通知服务消费事件 → WebSocket推送给前端
 ```
 
 #### 4.1.1 信号日期与数据日期强一致
@@ -316,7 +325,7 @@ services/strategy/app/
   - data_source: 数据源类型 (akshare_ths)
   - cache_ttl_days: 缓存有效期天数
   - scheduler_enabled: 调度器开关
-  - scheduler_times: 调度时间配置
+  - scheduler_times: 调度时间配置 (默认 {"collect":"15:30","calculate":"15:35","north_bound":"16:00"})
 
 缓存统计 (GET /cache/stats):
   - 返回Redis内存使用、key数量、各类数据计数
@@ -439,6 +448,25 @@ GET /signals/today?strategy_type=AGGRESSIVE
 
 响应: 从Redis缓存读取，无则返回空数组
 ```
+
+### 5.4.1 获取策略持仓
+
+```
+GET /positions?strategy_type=AGGRESSIVE
+
+响应: 从 Redis（positions:{strategy_type}）读取当前持仓权重
+{
+  "code": 200,
+  "data": {
+    "positions": {"881101": 0.15, "881105": 0.12},
+    "total_weight": 0.27,
+    "count": 2
+  }
+}
+```
+
+- 只读暴露，持仓由 `/calculate` 计算流程写入（键 `positions:{strategy_type}`，TTL 7 天）；
+- AI 决策复盘（`DailyReviewDataCollector`）与 Agent 工具 `get_current_positions` 均调用此接口。
 
 ### 5.5 获取信号日历
 
@@ -619,6 +647,78 @@ GET /data/replay/day/{date}     - 获取某天数据
 POST /data/replay/strategy-optimize  - 策略参数自动寻优（Optuna）
 POST /data/replay/strategy-overlay  - 策略叠加回放
 ```
+
+### 5.13 信号复盘统计
+
+> 实现在 `signal_tracker.py`。解决"信号只存 Redis（TTL 7 天）、`trade_signals` 长期空置、无法复盘胜率"的问题，
+> 为前端「策略复盘」页提供数据。
+
+**存储**
+
+| 表 | 说明 |
+|----|------|
+| `trade_signals` | 信号落库（`/calculate` 生成信号后写入，唯一键去重），并作为幂等自愈的持久层 |
+| `signal_outcomes` | 信号结果回填表，唯一键 `(signal_date, strategy_type, sector_code, direction, horizon_days)`；索引 `idx_signal_outcomes_perf` |
+
+建表在服务启动时由 `ensure_schema()` 幂等执行（失败降级，不影响主链路）。
+
+**统计口径**
+
+信号在 T 日收盘后（15:35）生成，当天已无法成交，因此：
+
+- 持有期 `HORIZONS = (1, 3, 5, 10)` 交易日，默认口径 5 日
+- 成交假设：**T+1 开盘价买入，第 T+horizon 个交易日收盘价卖出**（entry = `open(T+1)`、
+  exit = `close(T+horizon)`）。不使用 T 日收盘价作基准——那等于假设收盘前已知信号，属于前视偏差
+- 三层收益全部落库，便于审计：
+
+  | 字段 | 含义 |
+  |------|------|
+  | `forward_return` | 板块价格变动 `exit/entry − 1`，未调整方向、未扣成本 |
+  | `direction_return` | 方向收益 = `forward_return ×`（买入 +1 / 卖出 −1） |
+  | `net_return` | 净收益 = `direction_return − cost_rate` |
+
+- **卖出信号必须按方向取号**：SELL 后板块下跌才是策略盈利。若直接拿板块价格变动当策略收益，
+  "胜率"与"命中率"会互相矛盾（同一份数据里出现"胜率 87.5% / 命中率 50%"）
+- 成本 `cost_rate` 取自策略配置（往返 = 2×(佣金+滑点) + 印花税，见第六章），与回测同口径；
+  复盘是收益率口径，不考虑回测里"佣金 5 元下限"的绝对金额约束
+- **"胜率"与"准确率"旧口径已合并为命中率**：命中率 = `direction_return > 0` 的占比（方向判定正确率）
+- **持有期未走完的信号计 `pending`**；`open(T+1)` 缺失的信号计 `no_quote`，两者都不进入命中率分母
+- 行情序列由两个数据源合并（缺一不可）：
+  - **收盘价**取 `sector_capital_flow.index_close`，与策略因子、打分同源
+  - **开盘价**取 `sector_kline.open`（同花顺行业指数真实 OHLC），对 K 线表缺失的日期回退用资金流表的 `open`
+  - `sector_capital_flow` 的 `open` 只在手动调用 `/collect/history` 时才写入，日常定时采集为空字段；
+    若以它作为唯一开盘价来源，绝大多数信号会因取不到 T+1 开盘价而全部落空（实测 `evaluated=0`、`no_quote=23`）
+  - `sector_kline` 由调度器每日刷新最近 15 个自然日的 OHLC（见 `docs/08-scheduler.md` 3.6），
+    既写入当日行情，也能补齐此前数据源未就绪而缺失的开盘价
+- 累计收益曲线按**结算日** `end_date` 聚合，且用**算术累计**（非复利连乘）：同一时刻存在
+  horizon 个头寸，按每日满仓复利会放大波动，该曲线仅用于观察信号质量的时序趋势
+
+**接口**
+
+```
+GET  /signals/performance?strategy_type=MODERATE&horizon_days=5&start_date=&end_date=
+     - 复盘统计：signal_count / evaluated_count / pending_count / cost_rate /
+       hit_count / hit_rate / avg_return（净）/ avg_return_gross（毛）/ median_return /
+       best_return / worst_return / profit_factor（净）/ profit_factor_gross /
+       buy / sell（分方向命中率与净/毛收益）/ monthly（月度命中率）/ sectors（板块）/
+       equity_curve（按结算日算术累计）/ horizons
+
+POST /signals/sync?lookback_days=7
+     - 从 Redis 信号缓存补录到 trade_signals（缓存 TTL 内可用，用于历史信号回填入库）
+
+POST /signals/backfill?lookback_days=365
+     - 为已走完 1/3/5/10 交易日持有期的信号结算，写入 signal_outcomes（幂等）
+     - 返回 signals / evaluated / pending / no_quote，其中 pending、no_quote 按"信号"计数
+     - 由调度器在采集/计算链路成功后及每次启动时触发，详见 docs/08-scheduler.md 3.6
+```
+
+> 口径变更迁移：`signal_outcomes` 新增 `direction_return` / `cost_rate` / `net_return` 三列，
+> 启动时由 `ensure_schema()` 幂等补列，并清除旧口径数据（`direction_return IS NULL`），
+> 随后由回填链路重算。该表是纯派生数据，可由 `trade_signals` + 行情完整重建。
+
+前端页面为「策略复盘」（`frontend/src/views/Review.vue`，路由 `/review`），提供策略档位与持有期切换、
+总览指标卡（命中率 / 平均净收益 / 平均毛收益 / 盈亏比）、分方向命中率、月度命中率、
+板块明细与累计净收益曲线；页头标注成交口径与实际使用的往返成本率。
 
 ---
 

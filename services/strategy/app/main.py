@@ -28,6 +28,7 @@ from .models import (
 )
 from .scoring import scoring_model
 from .influx_query import influx_query
+from . import signal_tracker
 from shared import RabbitMQManager, RedisManager
 
 # 配置日志
@@ -65,6 +66,14 @@ async def lifespan(app: FastAPI):
         password=settings.redis_password,
         db=settings.redis_db,
     )
+    # 必须在 redis 连接建立之后恢复配置：模块导入期调用必然失败（Redis 未连接），
+    # 会导致接口保存的策略配置在服务重启后被丢弃
+    _load_configs_from_redis()
+    # 信号跟踪表：供复盘统计（PG 异常时降级，不影响信号生成主链路）
+    try:
+        signal_tracker.ensure_schema()
+    except Exception as e:
+        logger.error(f"初始化信号跟踪表失败，复盘统计不可用: {e}")
     yield
     rmq.close()
     redis_mgr.close()
@@ -625,6 +634,16 @@ async def calculate_signals(
             ),
         )
 
+        # 落库供长期复盘统计：信号缓存只有 7 天 TTL，过期后无法统计准确率。
+        # PG 异常不能让信号生成失败，这里降级处理。
+        try:
+            await asyncio.to_thread(
+                signal_tracker.save_signals,
+                strategy_type.value, effective_date, signal_dicts,
+            )
+        except Exception as e:
+            logger.error(f"信号落库失败（不影响信号生成）: {e}")
+
         # 通知信号服务
         publish_message("signal.generated", {
             "event": "signals_generated",
@@ -699,10 +718,6 @@ def _save_configs_to_redis():
         logger.info("策略配置已保存到Redis")
     except Exception as e:
         logger.error(f"保存策略配置到Redis失败: {e}")
-
-
-# 启动时从Redis恢复配置
-_load_configs_from_redis()
 
 
 @app.get("/configs")
@@ -809,6 +824,34 @@ async def get_today_signals(strategy_type: StrategyType):
     }
 
 
+@app.get("/positions")
+async def get_positions(strategy_type: StrategyType):
+    """获取指定策略的当前持仓
+
+    持仓由策略计算流程写入 Redis（键 positions:{strategy_type}，TTL 7 天），
+    此处仅做只读暴露，供 AI 决策复盘与前端查询。
+    """
+    try:
+        raw = redis_mgr.get(f"positions:{strategy_type.value}")
+    except Exception as e:
+        logger.error(f"读取持仓失败: positions:{strategy_type.value}: {e}")
+        raise HTTPException(status_code=503, detail="持仓读取失败")
+
+    positions = {}
+    if raw:
+        try:
+            positions = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            logger.error(f"持仓数据解析失败: positions:{strategy_type.value}")
+            positions = {}
+
+    return success_response(data={
+        "positions": positions,
+        "total_weight": round(sum(_safe_num(w) for w in positions.values()), 4),
+        "count": len(positions),
+    })
+
+
 @app.get("/signals/calendar")
 async def get_signal_calendar(strategy_type: StrategyType, month: str = None):
     """获取信号日历数据"""
@@ -874,6 +917,57 @@ async def get_signal_calendar(strategy_type: StrategyType, month: str = None):
         return {"code": 200, "data": results}
     except Exception as e:
         logger.error(f"获取信号日历失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/signals/performance")
+async def get_signal_performance(
+    strategy_type: StrategyType = StrategyType.MODERATE,
+    horizon_days: int = signal_tracker.DEFAULT_HORIZON,
+    start_date: str = None,
+    end_date: str = None,
+):
+    """策略信号复盘统计：命中率、平均净/毛收益、盈亏比等
+
+    口径见 signal_tracker 模块：T+1 开盘价买入、第 N 个交易日收盘价结算；
+    收益已按方向取号（卖出后下跌计为盈利）并扣除往返交易成本；
+    尚未走完持有期的信号计入 pending_count，不进入命中率分母。
+    """
+    try:
+        data = await asyncio.to_thread(
+            signal_tracker.query_performance,
+            strategy_type.value, horizon_days, start_date, end_date,
+        )
+        data["horizons"] = list(signal_tracker.HORIZONS)
+        return {"code": 200, "data": data}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"获取策略复盘统计失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/signals/sync")
+async def sync_signal_cache(lookback_days: int = 7):
+    """把 Redis 中仍然存活的信号补录到数据库（信号缓存仅 7 天，用于兜底）"""
+    try:
+        data = await asyncio.to_thread(signal_tracker.sync_from_cache, lookback_days)
+        return {"code": 200, "data": data, "message": "信号缓存补录完成"}
+    except Exception as e:
+        logger.error(f"补录信号缓存失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/signals/backfill")
+async def backfill_signal_outcomes(
+    lookback_days: int = signal_tracker.DEFAULT_LOOKBACK_DAYS,
+):
+    """回填信号后收益：行情走完持有期后按 T+1 开盘价入场自动评估命中率与净收益"""
+    try:
+        data = await asyncio.to_thread(signal_tracker.backfill_outcomes, lookback_days)
+        return {"code": 200, "data": data, "message": "信号收益回填完成"}
+    except Exception as e:
+        logger.error(f"回填信号收益失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -2427,8 +2521,8 @@ async def get_system_settings():
             "cache_ttl_days": 7,
             "scheduler_enabled": True,
             "scheduler_times": {
-                "collect": "15:00",
-                "calculate": "15:05",
+                "collect": "15:30",
+                "calculate": "15:35",
                 "north_bound": "16:00",
             },
         }
