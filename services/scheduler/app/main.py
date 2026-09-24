@@ -188,6 +188,8 @@ async def job_collect_data():
                     result = resp.json()
                     logger.info(f"数据采集结果: {result}")
                     if result.get("code") == 200:
+                        # ETF 收盘价须早于策略计算入库：策略要用它填充信号 current_price
+                        await _trigger_etf_quotes(client, today)
                         logger.info(">>> 数据采集完成，立即触发策略计算")
                         calculated = await _trigger_strategy_calculation(client)
                         if calculated:
@@ -305,6 +307,118 @@ async def job_calculate_strategy():
                 logger.warning(">>> 当日数据未就绪，已撤销执行标记，等待采集链路触发")
     except Exception as e:
         logger.error(f"策略计算任务失败: {e}")
+
+
+async def job_recalc_nav():
+    """定时任务：收盘后先推送 ETF 收盘价给 fund 盯市，再触发净值重算
+
+    价格由 data-collector 统一采集落库，本任务只做编排：
+    查询当日 ETF 收盘价 → 推给 fund 回写持仓价 → 触发净值重算。
+    非交易日跳过；fund 侧不再保留本地定时任务，避免与调度中心重复触发。
+    """
+    if await _is_non_trade_day():
+        logger.info(">>> 今日非交易日，跳过净值重算")
+        return
+    logger.info(">>> 定时任务触发: 收盘盯市 + 净值重算")
+    trade_date = datetime.now().strftime("%Y-%m-%d")
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            # 1) 按持仓需求驱动：先问 fund 持仓涉及哪些 ETF，只关注这些标的
+            held = await _fetch_held_etf_codes(client)  # None 表示查询失败（按未知处理）
+            prices = {}
+            try:
+                prices = await _fetch_etf_close_prices(client, trade_date)
+            except Exception as e:
+                logger.error(f"查询 ETF 收盘价失败: {e}")
+
+            # 2) 仅补采缺失的持仓标的；持仓未知且完全无价格时才采集映射全集
+            lack = [c for c in held if c not in prices] if held else []
+            if lack or (held is None and not prices):
+                await _trigger_etf_quotes(client, trade_date, lack or None)
+                try:
+                    prices = await _fetch_etf_close_prices(client, trade_date)
+                except Exception as e:
+                    logger.error(f"补采后仍无法获取 ETF 收盘价: {e}")
+                    prices = {}
+
+            # 3) 盯市：由 fund 判断持仓价格是否覆盖完整（fund 才知道自己持有哪些 ETF）
+            resp = await client.post(
+                f"{settings.fund_url}/api/fund/mark-to-market", json={"prices": prices}
+            )
+            payload = resp.json()
+            data = payload.get("data") or {}
+            complete = bool(data.get("complete"))
+            logger.info(f"收盘盯市结果: {payload.get('message')} {data}")
+
+            # 4) 数据不完整即中止：宁可不记账，也不用陈旧价格写入错误净值
+            if not complete:
+                logger.error(
+                    f">>> 当日({trade_date})收盘价覆盖不完整"
+                    f"(持仓 {data.get('open_positions')} 笔, 缺失: {data.get('missing_etf_codes')})，"
+                    f"已跳过净值重算"
+                )
+                return
+
+            resp = await client.post(f"{settings.fund_url}/api/fund/recalc-nav")
+            logger.info(f"净值重算结果: {resp.json()}")
+    except Exception as e:
+        logger.error(f"净值重算任务失败: {e}")
+
+
+async def _trigger_etf_quotes(client: httpx.AsyncClient, trade_date: str,
+                              codes: list = None) -> None:
+    """触发 ETF 收盘价采集（数据源由 data-collector 收口，此处仅编排）
+
+    codes 为空表示采集共享映射全集（供策略信号填价）；传入则只采集指定代码
+    （按持仓需求驱动，避免采集无关标的）。
+    """
+    try:
+        params = {"trade_date": trade_date}
+        if codes:
+            params["codes"] = codes
+        resp = await client.post(
+            f"{settings.data_collector_url}/collect/etf-quotes",
+            params=params,
+            timeout=180,
+        )
+        payload = resp.json()
+        count = (payload.get("data") or {}).get("count")
+        logger.info(f"ETF 收盘价采集: {payload.get('message')} 共 {count} 条")
+    except Exception as e:
+        logger.error(f"ETF 收盘价采集失败: {e}")
+
+
+async def _fetch_held_etf_codes(client: httpx.AsyncClient):
+    """查询 fund 当前持仓涉及的 ETF 代码
+
+    用于按持仓需求驱动采集，避免每天全量采集无关标的。
+    查询失败返回 None，调用方按「持仓未知」处理（退化为全量兜底）。
+    """
+    try:
+        resp = await client.get(f"{settings.fund_url}/api/fund/etf-codes")
+        return list(resp.json().get("data") or [])
+    except Exception as e:
+        logger.warning(f"查询持仓 ETF 代码失败，按未知处理: {e}")
+        return None
+
+
+async def _fetch_etf_close_prices(client: httpx.AsyncClient, trade_date: str) -> dict:
+    """查询指定交易日 ETF 收盘价，返回 {ETF代码: 价格}
+
+    与 strategy 填充信号 current_price 同源（均查 data-collector），
+    保证开仓价与盯市价口径一致。
+
+    查询失败（HTTP 异常/超时）时**抛出异常**：若在此处静默返回空字典，
+    会把「查询失败」误当成「当日无价格」，导致后续静默跳过而无人察觉。
+    """
+    resp = await client.get(
+        f"{settings.data_collector_url}/query/etf-prices", params={"date": trade_date}
+    )
+    resp.raise_for_status()
+    payload = resp.json()
+    prices = payload.get("data") or {}
+    logger.info(f"获取到 {len(prices)} 只 ETF 收盘价")
+    return prices
 
 
 async def job_collect_north_bound():
@@ -437,6 +551,7 @@ def setup_scheduler():
     _RECOVERABLE_JOBS.update({
         "collect_data": job_collect_data,
         "calculate_strategy": job_calculate_strategy,
+        "recalc_nav": job_recalc_nav,
     })
 
     job_stores = _build_job_store()
@@ -452,6 +567,11 @@ def setup_scheduler():
     scheduler.add_job(
         job_calculate_strategy, CronTrigger(day_of_week="mon-fri", hour=CALCULATE_HOUR, minute=CALCULATE_MINUTE),
         id="calculate_strategy", name="三档轮动策略计算", replace_existing=True,
+        misfire_grace_time=misfire_grace, max_instances=1,
+    )
+    scheduler.add_job(
+        job_recalc_nav, CronTrigger(day_of_week="mon-fri", hour=15, minute=40),
+        id="recalc_nav", name="收盘净值重算", replace_existing=True,
         misfire_grace_time=misfire_grace, max_instances=1,
     )
     # 北向资金采集已暂停（数据源停止披露）
