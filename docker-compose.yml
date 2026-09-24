@@ -226,6 +226,7 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD}
       DB_USER: ${DB_USER:-admin}
       DB_PASSWORD: ${DB_PASSWORD}
+      DATA_COLLECTOR_URL: http://backend-data-collector:8003
     depends_on:
       influxdb:
         condition: service_healthy
@@ -304,17 +305,23 @@ services:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:${DB_PORT:-5432}/${DB_NAME:-rotation_db}
       SPRING_DATASOURCE_USERNAME: ${DB_USER:-admin}
       SPRING_DATASOURCE_PASSWORD: ${DB_PASSWORD}
-      SPRING_REDIS_HOST: redis
-      SPRING_REDIS_PORT: 6379
-      SPRING_REDIS_PASSWORD: ${REDIS_PASSWORD}
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+      SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD}
       INFLUXDB_URL: http://influxdb:8086
       INFLUXDB_TOKEN: ${INFLUXDB_TOKEN}
       INFLUXDB_ORG: ${INFLUXDB_ORG:-rotation}
       INFLUXDB_BUCKET: ${INFLUXDB_BUCKET:-market_data}
+      SPRING_RABBITMQ_HOST: rabbitmq
+      SPRING_RABBITMQ_PORT: 5672
+      SPRING_RABBITMQ_USERNAME: ${RABBITMQ_USER:-guest}
+      SPRING_RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      rabbitmq:
         condition: service_healthy
       influxdb:
         condition: service_healthy
@@ -349,6 +356,7 @@ services:
       DATA_COLLECTOR_URL: http://backend-data-collector:8003
       STRATEGY_URL: http://backend-strategy:8002
       SIGNAL_URL: http://backend-signal:8004
+      FUND_URL: http://backend-fund:8005
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_PORT: 5672
       RABBITMQ_USER: ${RABBITMQ_USER:-guest}
@@ -362,6 +370,8 @@ services:
       backend-strategy:
         condition: service_healthy
       backend-signal:
+        condition: service_healthy
+      backend-fund:
         condition: service_healthy
       redis:
         condition: service_healthy
