@@ -265,3 +265,8 @@ ReAct Agent loop (max 5 iterations, 10 tool calls, 120s timeout) with 7 financia
 ## Documentation
 
 Design docs in `docs/` (01-overview.md through 13-implementation-guide.md). README.md has API reference, deployment guide, and troubleshooting FAQ. AGENTS.md has additional architecture detail.
+
+## User Rules
+
+- 任何删除文件的动作执行前必须先确认：包括 `git clean`、`rm`/`del`、`Remove-Item`、Python `os.remove`、清理临时文件等所有形式，未获用户明确确认不得擅自删除。
+- 任何代码提交前必须先完成验证（构建/测试通过）：Java 服务需经 Docker 构建 `mvn package` 及其测试通过，Python 服务需语法检查与测试通过；未经验证的改动不得提交。
