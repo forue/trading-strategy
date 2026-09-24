@@ -6,6 +6,10 @@ import com.rotation.fund.entity.Position;
 import com.rotation.fund.repository.AccountNavRepository;
 import com.rotation.fund.repository.BankTransferRepository;
 import com.rotation.fund.repository.PositionRepository;
+import com.rotation.fund.service.AccountNavService;
+import com.rotation.fund.service.PositionService;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -23,54 +27,65 @@ public class FundController {
     private final PositionRepository positionRepository;
     private final AccountNavRepository accountNavRepository;
     private final BankTransferRepository bankTransferRepository;
+    private final PositionService positionService;
+    private final AccountNavService accountNavService;
+
+    @Value("${fund.internal.enabled:false}")
+    private boolean internalEndpointsEnabled;
 
     public FundController(PositionRepository positionRepository,
                           AccountNavRepository accountNavRepository,
-                          BankTransferRepository bankTransferRepository) {
+                          BankTransferRepository bankTransferRepository,
+                          PositionService positionService,
+                          AccountNavService accountNavService) {
         this.positionRepository = positionRepository;
         this.accountNavRepository = accountNavRepository;
         this.bankTransferRepository = bankTransferRepository;
+        this.positionService = positionService;
+        this.accountNavService = accountNavService;
     }
 
     @GetMapping("/summary")
     public ResponseEntity<?> getAccountSummary(
             @RequestHeader(value = "X-User-Id", defaultValue = "1") Long userId) {
-        List<Position> openPositions = positionRepository.findByUserIdAndStatus(userId, "OPEN");
-        BigDecimal totalMarketValue = openPositions.stream()
-                .map(p -> p.getCurrentPrice() != null && p.getQuantity() != null
-                        ? p.getCurrentPrice().multiply(p.getQuantity())
-                        : BigDecimal.ZERO)
-                .reduce(BigDecimal.ZERO, BigDecimal::add);
-
-        List<BankTransfer> transfers = bankTransferRepository.findByUserIdOrderByTransferDateDesc(userId);
-        BigDecimal netDeposit = BigDecimal.ZERO;
-        for (BankTransfer t : transfers) {
-            if ("DEPOSIT".equals(t.getDirection())) netDeposit = netDeposit.add(t.getAmount());
-            else netDeposit = netDeposit.subtract(t.getAmount());
-        }
-        BigDecimal cash = netDeposit.subtract(totalMarketValue);
-        if (cash.compareTo(BigDecimal.ZERO) < 0) cash = BigDecimal.ZERO;
-
-        List<AccountNav> navList = accountNavRepository.findByUserIdOrderByNavDateDesc(userId);
-        BigDecimal cumulativeReturn = BigDecimal.ZERO;
-        BigDecimal todayPnl = BigDecimal.ZERO;
-        if (!navList.isEmpty()) {
-            AccountNav latest = navList.get(0);
-            cumulativeReturn = latest.getCumulativeReturn() != null ? latest.getCumulativeReturn() : BigDecimal.ZERO;
-            todayPnl = latest.getDailyReturn() != null
-                    ? latest.getDailyReturn().multiply(totalMarketValue).setScale(2, RoundingMode.HALF_UP)
-                    : BigDecimal.ZERO;
-        }
-
-        Map<String, Object> summary = new HashMap<>();
-        summary.put("total_assets", totalMarketValue.add(cash));
-        summary.put("cash", cash);
-        summary.put("market_value", totalMarketValue);
-        summary.put("today_pnl", todayPnl);
-        summary.put("cumulative_return", cumulativeReturn);
-        summary.put("net_deposit", netDeposit);
-
+        Map<String, Object> summary = accountNavService.getSummary(userId);
         return ResponseEntity.ok(Map.of("code", 200, "data", summary));
+    }
+
+    @PostMapping("/recalc-nav")
+    public ResponseEntity<?> recalcNav(
+            @RequestHeader(value = "X-User-Id", defaultValue = "1") Long userId) {
+        AccountNav nav = accountNavService.recalcNav(userId, LocalDate.now());
+        return ResponseEntity.ok(Map.of("code", 200, "message", "净值已重算", "data", nav));
+    }
+
+    /**
+     * 收盘盯市：接收 {ETF代码: 收盘价} 映射，回写 OPEN 持仓最新价。
+     * 由 scheduler 收盘任务调用（scheduler 用 AkShare 取 ETF 收盘价后推送），解决持仓价格永不更新的问题。
+     */
+    @PostMapping("/mark-to-market")
+    public ResponseEntity<?> markToMarket(@RequestBody Map<String, Object> body,
+                                          @RequestHeader(value = "X-User-Id", defaultValue = "1") Long userId) {
+        Map<String, BigDecimal> prices = new HashMap<>();
+        Object raw = body.get("prices");
+        if (raw instanceof Map<?, ?> priceMap) {
+            for (Map.Entry<?, ?> e : priceMap.entrySet()) {
+                prices.put(String.valueOf(e.getKey()), new BigDecimal(String.valueOf(e.getValue())));
+            }
+        }
+        Map<String, Object> result = accountNavService.markToMarket(userId, prices);
+        boolean complete = Boolean.TRUE.equals(result.get("complete"));
+        return ResponseEntity.ok(Map.of("code", 200,
+                "message", complete ? "盯市完成" : "盯市未完成：部分持仓缺少收盘价",
+                "data", result));
+    }
+
+    /** 当前持仓涉及的 ETF 代码，供调度方按需采集收盘价（按持仓需求驱动，避免采集无关标的） */
+    @GetMapping("/etf-codes")
+    public ResponseEntity<?> getHoldingEtfCodes(
+            @RequestHeader(value = "X-User-Id", defaultValue = "1") Long userId) {
+        List<String> codes = positionService.getOpenEtfCodes(userId);
+        return ResponseEntity.ok(Map.of("code", 200, "data", codes));
     }
 
     @GetMapping("/positions")
@@ -120,7 +135,14 @@ public class FundController {
         List<AccountNav> navList = accountNavRepository
                 .findByUserIdAndNavDateBetweenOrderByNavDateAsc(userId, start, end);
 
-        List<Map<String, Object>> result = navList.stream().map(nav -> {
+        // 当日盈亏 = 当日总资产 − 上一净值日总资产（量纲为金额，不能用收益率×资产近似）
+        BigDecimal prevTotal = accountNavRepository
+                .findTopByUserIdAndNavDateBeforeOrderByNavDateDesc(userId, start)
+                .map(AccountNav::getTotalAssets)
+                .orElse(null);
+
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (AccountNav nav : navList) {
             Map<String, Object> item = new HashMap<>();
             item.put("date", nav.getNavDate().toString());
             item.put("total_assets", nav.getTotalAssets());
@@ -131,11 +153,14 @@ public class FundController {
             item.put("cumulative_return", nav.getCumulativeReturn() != null
                     ? nav.getCumulativeReturn().multiply(BigDecimal.valueOf(100)).setScale(2, RoundingMode.HALF_UP)
                     : BigDecimal.ZERO);
-            item.put("daily_pnl_amount", nav.getDailyReturn() != null && nav.getTotalAssets() != null
-                    ? nav.getDailyReturn().multiply(nav.getTotalAssets()).setScale(2, RoundingMode.HALF_UP)
+            item.put("daily_pnl_amount", (prevTotal != null && nav.getTotalAssets() != null)
+                    ? nav.getTotalAssets().subtract(prevTotal).setScale(2, RoundingMode.HALF_UP)
                     : BigDecimal.ZERO);
-            return item;
-        }).collect(Collectors.toList());
+            if (nav.getTotalAssets() != null) {
+                prevTotal = nav.getTotalAssets();
+            }
+            result.add(item);
+        }
 
         return ResponseEntity.ok(Map.of("code", 200, "data", result));
     }
@@ -262,7 +287,7 @@ public class FundController {
 
     @PostMapping("/transfer")
     public ResponseEntity<?> createTransfer(@RequestBody Map<String, Object> body,
-                                             @RequestHeader(value = "X-User-Id", defaultValue = "1") Long userId) {
+                                           @RequestHeader(value = "X-User-Id", defaultValue = "1") Long userId) {
         BankTransfer transfer = new BankTransfer();
         transfer.setUserId(userId);
         transfer.setTransferDate(LocalDate.parse((String) body.get("transfer_date")));
@@ -270,6 +295,7 @@ public class FundController {
         transfer.setAmount(new BigDecimal(body.get("amount").toString()));
         transfer.setRemark((String) body.getOrDefault("remark", ""));
         bankTransferRepository.save(transfer);
+        accountNavService.refreshSummaryCache(userId);
 
         return ResponseEntity.ok(Map.of("code", 200, "message", "转账记录已创建", "data", transfer));
     }
@@ -291,9 +317,41 @@ public class FundController {
 
     @DeleteMapping("/transfer/{id}")
     public ResponseEntity<?> deleteTransfer(@PathVariable Long id,
-                                             @RequestHeader(value = "X-User-Id", defaultValue = "1") Long userId) {
+                                           @RequestHeader(value = "X-User-Id", defaultValue = "1") Long userId) {
         bankTransferRepository.deleteById(id);
+        accountNavService.refreshSummaryCache(userId);
         return ResponseEntity.ok(Map.of("code", 200, "message", "转账记录已删除"));
+    }
+
+    /**
+     * 内部触发端点（仅供本地联调，不依赖 RabbitMQ 即可验证 Service 层）。
+     * 默认关闭，需显式配置 fund.internal.enabled=true 才可用，避免无鉴权下单风险。
+     */
+    @PostMapping("/execute")
+    public ResponseEntity<?> executeTrade(@RequestBody Map<String, Object> body,
+                                         @RequestHeader(value = "X-User-Id", defaultValue = "1") Long userId) {
+        if (!internalEndpointsEnabled) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                    .body(Map.of("code", 403, "message", "内部端点未启用（需设置 fund.internal.enabled=true）"));
+        }
+        String strategyType = (String) body.get("strategyType");
+        String sectorCode = (String) body.get("sectorCode");
+        String sectorName = body.get("sectorName") != null ? (String) body.get("sectorName") : "";
+        String etfCode = body.get("etfCode") != null ? (String) body.get("etfCode") : null;
+        String direction = body.getOrDefault("direction", "BUY").toString();
+        BigDecimal positionRatio = new BigDecimal(body.getOrDefault("positionRatio", "0").toString());
+        BigDecimal currentPrice = body.get("currentPrice") != null
+                ? new BigDecimal(body.get("currentPrice").toString()) : null;
+
+        Position pos;
+        if ("SELL".equals(direction)) {
+            pos = positionService.closePosition(userId, strategyType, sectorCode, currentPrice);
+        } else {
+            pos = positionService.openPosition(userId, strategyType, sectorCode, sectorName, etfCode,
+                    positionRatio, currentPrice);
+        }
+        accountNavService.recalcNav(userId, LocalDate.now());
+        return ResponseEntity.ok(Map.of("code", 200, "message", "执行完成", "data", pos));
     }
 
     @GetMapping("/health")

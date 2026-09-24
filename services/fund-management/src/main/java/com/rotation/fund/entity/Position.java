@@ -25,6 +25,10 @@ public class Position {
     @Column(name = "sector_name", nullable = false, length = 50)
     private String sectorName;
 
+    /** 实际交易标的（ETF 代码），用于收盘盯市回写最新价 */
+    @Column(name = "etf_code", length = 20)
+    private String etfCode;
+
     @Column(nullable = false, length = 10)
     private String direction = "BUY";
 

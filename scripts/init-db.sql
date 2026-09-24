@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS positions (
     strategy_type VARCHAR(20) NOT NULL,
     sector_code VARCHAR(20) NOT NULL,
     sector_name VARCHAR(50) NOT NULL,
+    etf_code VARCHAR(20),  -- 实际交易标的（ETF 代码），收盘盯市按此回写最新价
     direction VARCHAR(10) NOT NULL DEFAULT 'BUY',
     quantity DECIMAL(15,4) NOT NULL,
     avg_price DECIMAL(10,4) NOT NULL,
@@ -84,11 +85,13 @@ CREATE TABLE IF NOT EXISTS trades (
     strategy_type VARCHAR(20) NOT NULL,
     sector_code VARCHAR(20) NOT NULL,
     sector_name VARCHAR(50) NOT NULL,
+    position_id BIGINT,  -- 关联 positions(id)，便于开/平仓配对
     direction VARCHAR(10) NOT NULL,  -- BUY / SELL
     quantity DECIMAL(15,4) NOT NULL,
     price DECIMAL(10,4) NOT NULL,
     amount DECIMAL(15,4) NOT NULL,
     commission DECIMAL(10,4) NOT NULL DEFAULT 0,
+    stamp_tax DECIMAL(10,4) NOT NULL DEFAULT 0,  -- 印花税（仅卖出）
     slippage DECIMAL(10,4) NOT NULL DEFAULT 0,
     signal_date DATE NOT NULL,
     traded_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
