@@ -559,6 +559,31 @@ async def calculate_signals(
             s.id = idx
             s.created_at = now
 
+        # 扩展信号带价：实盘信号生成时填充 ETF 最新价，供 fund-management 开仓计算数量。
+        # 价格统一由 data-collector 采集落库（与收盘盯市同源），此处只查询，不直连数据源。
+        # 仅当 effective_date 为今日时填充，避免历史重算/回测路径引入未来函数。
+        if effective_date == datetime.now().strftime("%Y-%m-%d"):
+            try:
+                import httpx
+
+                with httpx.Client(timeout=30) as client:
+                    resp = client.get(
+                        f"{settings.data_collector_url}/query/etf-prices",
+                        params={"date": effective_date},
+                    )
+                    price_map = resp.json().get("data") or {}
+                for s in signals:
+                    if s.etf_code and s.etf_code in price_map:
+                        s.current_price = float(price_map[s.etf_code])
+                if not price_map and signals:
+                    # 明确告警：无价信号会被 fund 拒绝开仓，避免误以为是"无信号"
+                    logger.warning(
+                        f"当日({effective_date}) ETF 收盘价缺失，信号不带价；"
+                        f"fund 将因价格非正拒绝开仓（不会静默成交）"
+                    )
+            except Exception as e:
+                logger.warning(f"补充信号 ETF 价格失败（不影响信号生成）: {e}")
+
         # 缓存信号到Redis
         signal_dicts = [s.model_dump() for s in signals]
 

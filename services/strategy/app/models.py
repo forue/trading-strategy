@@ -92,6 +92,9 @@ class TradeSignal(BaseModel):
     rank: Optional[int] = None
     total_sectors: Optional[int] = None
     created_at: Optional[str] = None
+    # 扩展信号带价：实盘信号生成时由 strategy 用 AkShare 填充 ETF 最新价，
+    # 供 fund-management 开仓计算买入数量。回测路径不填充（避免未来函数）。
+    current_price: Optional[float] = None
 
 
 class StrategyConfig(BaseModel):

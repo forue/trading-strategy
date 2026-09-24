@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     rabbitmq_user: str = "guest"
     rabbitmq_password: str = ""
 
+    # 外部服务（ETF 收盘价由 data-collector 统一采集，策略只查询，不直连数据源）
+    data_collector_url: str = "http://localhost:8003"
+
     # Service
     service_port: int = 8002
 
