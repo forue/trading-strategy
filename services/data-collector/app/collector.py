@@ -1,11 +1,25 @@
 """数据采集服务 - AkShare数据采集器（同花顺数据源）"""
+import os
 import re
+import sys
 import requests
 import akshare as ak
 import pandas as pd
 import numpy as np
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from loguru import logger
+
+# 引入共享库（services/shared）：板块→ETF 映射的唯一来源，与 strategy 共用同一份，
+# 避免两边映射漂移导致「策略用到的 ETF 采集不到收盘价」
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from shared.sector_etf_map import (
+    SECTOR_MAP,
+    SECTOR_ETF_MAP,
+    SECTOR_ETF_CANDIDATES,
+    all_etf_codes,
+    default_etf,
+)
 
 from .config import settings
 from .influx_client import influx_manager
@@ -65,30 +79,12 @@ class DataCollector:
         "橡胶制品": ["橡胶"],
     }
 
-    _SECTOR_ETF_MAP = {
-        "农林牧渔": {"code": "159825", "name": "农业ETF"}, "采掘": {"code": "516260", "name": "矿业ETF"},
-        "化工": {"code": "159870", "name": "化工ETF"}, "钢铁": {"code": "562300", "name": "钢铁ETF"},
-        "有色金属": {"code": "512400", "name": "有色金属ETF"}, "电子": {"code": "159997", "name": "电子ETF"},
-        "家用电器": {"code": "159746", "name": "家电ETF"}, "食品饮料": {"code": "512170", "name": "食品饮料ETF"},
-        "纺织服装": {"code": "159573", "name": "纺织服装ETF"}, "轻工制造": {"code": "159608", "name": "轻工ETF"},
-        "医药生物": {"code": "512010", "name": "医药ETF"}, "公用事业": {"code": "159611", "name": "公用事业ETF"},
-        "交通运输": {"code": "159662", "name": "交运ETF"}, "房地产": {"code": "512200", "name": "房地产ETF"},
-        "商业贸易": {"code": "159828", "name": "消费ETF"}, "休闲服务": {"code": "159766", "name": "旅游ETF"},
-        "综合": {"code": "511020", "name": "综合ETF"}, "建筑材料": {"code": "159745", "name": "建材ETF"},
-        "建筑装饰": {"code": "159740", "name": "基建ETF"}, "电气设备": {"code": "159611", "name": "新能源ETF"},
-        "国防军工": {"code": "512810", "name": "军工ETF"}, "计算机": {"code": "512720", "name": "计算机ETF"},
-        "传媒": {"code": "512980", "name": "传媒ETF"}, "通信": {"code": "515880", "name": "通信ETF"},
-        "银行": {"code": "512800", "name": "银行ETF"}, "非银金融": {"code": "512070", "name": "非银ETF"},
-        "证券": {"code": "512070", "name": "非银ETF"}, "保险": {"code": "512070", "name": "非银ETF"},
-        "汽车": {"code": "516110", "name": "汽车ETF"}, "机械设备": {"code": "159883", "name": "机械ETF"},
-    }
-
     def _get_etf_code_by_name(self, sector_name: str) -> str | None:
-        etf = self._SECTOR_ETF_MAP.get(sector_name)
+        etf = default_etf(sector_name)
         return etf["code"] if etf else None
 
     def _get_etf_name_by_name(self, sector_name: str) -> str | None:
-        etf = self._SECTOR_ETF_MAP.get(sector_name)
+        etf = default_etf(sector_name)
         return etf["name"] if etf else None
 
     def _get_sector_name_code_map(self) -> dict[str, str]:
@@ -677,6 +673,84 @@ class DataCollector:
             logger.info(f"通过K线填充历史资金流: {len(merged)} 条, 失败: {len(failed)} 个板块")
 
         return all_data
+
+    @staticmethod
+    def _sina_etf_symbol(etf_code: str) -> str:
+        """新浪 ETF 日线的代码格式：沪市 sh 前缀、深市 sz 前缀"""
+        return ("sh" if etf_code.startswith("5") else "sz") + etf_code
+
+    def collect_etf_quotes(self, trade_date: str = None, codes: list = None) -> list[dict]:
+        """采集板块对应 ETF 的收盘价（measurement: etf_quote）
+
+        持仓盯市需要「可交易标的(ETF)」的价格，而不是板块指数点位。ETF 代码取自共享映射
+        services/shared/sector_etf_map.py —— 与 strategy 共用同一份，杜绝两边漂移。
+
+        数据源：新浪 ETF 日线（ak.fund_etf_hist_sina），按代码逐只拉取指定交易日的收盘价。
+        东方财富的 fund_etf_spot_em / fund_etf_hist_em 实测稳定返回 ConnectionError
+        （远端直接关闭连接）而不可用，故改用新浪日线；取不到价的 ETF 一律计入 missing
+        并告警，绝不回退到「用上一交易日价格顶替」。
+
+        Args:
+            trade_date: 交易日 YYYY-MM-DD 或 YYYYMMDD，默认今天；当日无数据即视为缺失
+            codes: 指定 ETF 代码列表（按持仓需求驱动采集）；为空则采集映射全集
+        Returns:
+            [{etf_code, etf_name, sector_name, date, close}, ...]
+        """
+        if trade_date is None:
+            trade_date = datetime.now().strftime("%Y-%m-%d")
+        if len(trade_date) == 8:
+            trade_date = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:8]}"
+
+        targets = [str(c).strip() for c in codes] if codes else sorted(all_etf_codes())
+
+        # 代码 → {etf_name, sector_name}，用于落库标注（取映射中首个匹配）
+        meta_of: dict[str, dict] = {}
+        for sector_name, cands in SECTOR_ETF_CANDIDATES.items():
+            for c in cands:
+                meta_of.setdefault(c["code"], {"etf_name": c["name"], "sector_name": sector_name})
+        for code, etf in SECTOR_ETF_MAP.items():
+            meta_of.setdefault(etf["code"],
+                               {"etf_name": etf["name"], "sector_name": SECTOR_MAP.get(code, "")})
+
+        def fetch(code: str):
+            try:
+                df = ak.fund_etf_hist_sina(symbol=self._sina_etf_symbol(code))
+                if df is None or df.empty:
+                    return code, None, "返回空数据"
+                # 兼容 date 列为 Timestamp 的情况，统一截取前 10 位比较
+                day = df[df["date"].astype(str).str.slice(0, 10) == trade_date]
+                if day.empty:
+                    return code, None, "当日无数据"
+                close = float(day.iloc[-1]["close"])
+                if close <= 0:
+                    return code, None, "价格非正"
+                return code, close, None
+            except Exception as e:
+                return code, None, f"{type(e).__name__}: {str(e)[:60]}"
+
+        results, missing = [], []
+        # 全集 76 只若串行约 20s，用线程池并发压到数秒
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for code, close, err in pool.map(fetch, targets):
+                if close is None:
+                    missing.append(code)
+                    logger.debug(f"ETF {code} 收盘价获取失败: {err}")
+                    continue
+                meta = meta_of.get(code, {"etf_name": "", "sector_name": ""})
+                results.append({
+                    "etf_code": code,
+                    "etf_name": meta["etf_name"],
+                    "sector_name": meta["sector_name"],
+                    "date": trade_date,
+                    "close": close,
+                })
+
+        if results:
+            influx_manager.write_etf_quotes(results)
+        if missing:
+            logger.warning(f"ETF 收盘价缺失 {len(missing)}/{len(targets)} 只: {missing}")
+        logger.info(f"采集 ETF 收盘价 {len(results)} 条（交易日 {trade_date}，目标 {len(targets)} 只）")
+        return results
 
     def collect_sector_kline(self, sector_name: str, start_date: str = None, end_date: str = None, period: str = "日k") -> list[dict]:
         """采集板块K线数据（同花顺源 - OHLC + 成交量）

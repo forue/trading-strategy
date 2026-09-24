@@ -138,6 +138,37 @@ class InfluxDBManager:
             self.write_api.write(bucket=self.bucket, org=self.org, record=points)
             logger.info(f"写入板块K线数据 {len(points)} 条")
 
+    def write_etf_quotes(self, data: list[dict]):
+        """写入 ETF 收盘价（measurement: etf_quote）
+
+        Args:
+            data: [{etf_code, etf_name, sector_name, date, close}, ...]
+        """
+        points = []
+        for item in data:
+            date_str = item.get("date", "")
+            try:
+                if len(date_str) == 8:
+                    dt = datetime.strptime(date_str, "%Y%m%d")
+                else:
+                    dt = datetime.strptime(date_str, "%Y-%m-%d")
+            except (ValueError, TypeError):
+                dt = datetime.now()
+
+            point = (
+                Point("etf_quote")
+                .tag("etf_code", str(item["etf_code"]))
+                .tag("etf_name", str(item.get("etf_name", "")))
+                .tag("sector_name", str(item.get("sector_name", "")))
+                .field("close", float(item["close"]))
+                .time(dt, WritePrecision.MS)
+            )
+            points.append(point)
+
+        if points:
+            self.write_api.write(bucket=self.bucket, org=self.org, record=points)
+            logger.info(f"写入 ETF 收盘价 {len(points)} 条")
+
     def write_market_kline(self, data: list[dict]):
         """写入大盘指数K线（measurement: market_kline）
 
@@ -249,6 +280,36 @@ class InfluxDBManager:
         '''
         tables = self.query_api.query_data_frame(query)
         return _clean_nan_records(tables)
+
+    def query_etf_prices(self, date: str) -> dict[str, float]:
+        """查询指定交易日的 ETF 收盘价，返回 {etf_code: close}
+
+        同一 etf_code 当日多次写入时取最后一条（覆盖语义）。
+        """
+        start = f"{date}T00:00:00Z"
+        stop = f"{date}T23:59:59Z"
+        query = f'''
+        from(bucket: "{self.bucket}")
+          |> range(start: {start}, stop: {stop})
+          |> filter(fn: (r) => r._measurement == "etf_quote")
+          |> filter(fn: (r) => r._field == "close")
+          |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+        '''
+        # 注意：pivot 之后不再有 _value 列，不能用 last()；
+        # records 已按 _time 升序，后者覆盖前者即取最新一条。异常向上抛出，避免静默返回空结果。
+        tables = self.query_api.query_data_frame(query)
+
+        prices: dict[str, float] = {}
+        for item in _clean_nan_records(tables):
+            code = item.get("etf_code")
+            close = item.get("close")
+            if code is None or close is None:
+                continue
+            try:
+                prices[str(code)] = float(close)
+            except (TypeError, ValueError):
+                continue
+        return prices
 
     def delete_by_date_range(self, measurement: str, start_date: str, end_date: str) -> int:
         """删除指定测量中某时间范围的数据

@@ -10,7 +10,7 @@ import sys
 import os
 import asyncio
 from datetime import datetime
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from loguru import logger
 
 # 添加共享库路径
@@ -208,6 +208,39 @@ async def collect_kline(sector_name: str = None, start_date: str = None, end_dat
         return success_response(data={"count": len(results)}, message="K线数据采集完成")
     except Exception as e:
         logger.error(f"K线数据采集失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/collect/etf-quotes")
+async def collect_etf_quotes(
+    trade_date: str = None, codes: list[str] = Query(None)
+):
+    """采集板块对应 ETF 的收盘价（供 fund-management 收盘盯市使用）
+
+    数据源（AkShare）由本服务统一收口并落库 InfluxDB，其他服务只通过
+    /query/etf-prices 获取，避免各自直连数据源造成口径漂移。
+
+    映射源为 services/shared/sector_etf_map.py（与 strategy 共用同一份）；
+    codes 为空则采集映射全集，传入则只采集指定代码（按持仓需求驱动）。
+    """
+    try:
+        results = await asyncio.to_thread(
+            data_collector.collect_etf_quotes, trade_date, codes
+        )
+        return success_response(data={"count": len(results)}, message="ETF 收盘价采集完成")
+    except Exception as e:
+        logger.error(f"ETF 收盘价采集失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/query/etf-prices")
+async def query_etf_prices(date: str):
+    """查询指定交易日的 ETF 收盘价，返回 {etf_code: close}"""
+    try:
+        prices = await asyncio.to_thread(influx_manager.query_etf_prices, date)
+        return success_response(data=prices)
+    except Exception as e:
+        logger.error(f"ETF 收盘价查询失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
