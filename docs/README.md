@@ -14,7 +14,7 @@
 | 04 | [数据采集服务设计文档](04-data-collector.md) | AkShare数据源、InfluxDB时序存储、板块资金流模型、容错降级 |
 | 05 | [策略引擎设计文档](05-strategy-engine.md) | 多因子+截面混合评分、三档轮动、调仓参数、信号与回测流程 |
 | 06 | [信号通知服务设计文档](06-signal-notification.md) | WebSocket通信协议、RabbitMQ消费、连接管理、多渠道推送扩展 |
-| 07 | [资金管理服务设计文档](07-fund-management.md) | 持仓管理、净值计算、收益归因、交易成本模型、实盘对接扩展 |
+| 07 | [资金管理服务文档](07-fund-management.md) | 持仓与成交、资金模型、净值计算、收益归因、接口契约、收盘盯市、实施记录（原 07 设计 + 14 实施方案合并） |
 | 08 | [任务调度中心设计文档](08-scheduler.md) | APScheduler配置、Cron任务、执行流程、手动触发、盘中模式扩展 |
 | 09 | [AI 决策服务设计文档](09-ai-decision.md) | LLM适配器、ReAct Agent、MCP工具调用、流式输出、提供商管理 |
 | 10 | [因子引擎设计文档](10-factor-engine.md) | FactorRegistry、置信度加权合成、截面上下文、API 与 `DEFAULT_WEIGHTS` |
