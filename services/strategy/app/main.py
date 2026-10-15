@@ -1176,7 +1176,7 @@ def _resolve_daily_prices(sector_data: list, last_close: dict) -> dict:
     return px
 
 
-def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_capital, return_full=False, sh_index_returns=None, history_cache=None):
+def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_capital, return_full=False, sh_index_returns=None, history_cache=None, initial_bench_capital=None):
     """回测核心逻辑（统一入口）
 
     成交模型（T+1 统一）：
@@ -1243,7 +1243,9 @@ def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_
     take_profit_base_shares = {}       # {sector_code: shares} 止盈开始时的原始份额
 
     rf_daily = (1 + _safe_num(params.risk_free_rate)) ** (1 / TRADING_DAYS_PER_YEAR) - 1
-    bench_nav = float(initial_capital)
+    # 基准净值起点：默认等于初始资金；样本外回测需显式传入训练集末的基准净值，
+    # 否则拼接后基准曲线会在切分点跳变（策略净值连续但基准不连续）
+    bench_nav = float(initial_bench_capital if initial_bench_capital is not None else initial_capital)
     raw_sectors = []
     px = {}                                       # 当日行情 {code: {open/close/chg/prev_close}}
     equity_open = float(initial_capital)          # 当日开盘前权益（按最近收盘价估值）
@@ -2781,9 +2783,13 @@ def _run_optimization(daily_data, sorted_dates, strategy_type, initial_capital, 
             # 样本外必须以「训练集结束时的权益」为初始资金：若同样按 100 万起算，
             # 与训练集拼接后收益曲线会在切分点处跳变（不连续）。
             oos_capital = final_result.get("final_capital") or initial_capital
-            logger.info(f"样本外初始资金取训练集末权益: {oos_capital:.2f}")
+            # 基准净值同样继承训练集末的值：否则策略曲线连续、基准曲线却在切分点跳变
+            train_nav = final_result.get("nav_curve") or []
+            oos_bench_start = train_nav[-1].get("benchmark") if train_nav else None
+            logger.info(f"样本外初始资金={oos_capital:.2f}, 基准起点={oos_bench_start}")
             oos_result = _run_backtest_core(daily_data, oos_sorted, strategy_type, best_params, oos_capital,
-                                            return_full=True, sh_index_returns=sh_index_returns, history_cache=oos_history)
+                                            return_full=True, sh_index_returns=sh_index_returns, history_cache=oos_history,
+                                            initial_bench_capital=oos_bench_start)
             with progress_lock:
                 _optimization_progress["completed"] += 1
             logger.info(f"样本外验证 {oos_sorted[0]}~{oos_sorted[-1]}: 收益={oos_result['total_return']*100:.2f}%, "
