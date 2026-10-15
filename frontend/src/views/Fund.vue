@@ -4,7 +4,7 @@
       <el-col :xs="12" :sm="12" :md="4" :lg="4" v-for="item in summaryItems" :key="item.label">
         <div class="summary-card">
           <div class="summary-label">{{ item.label }}</div>
-          <div class="summary-value" :style="{ color: item.color }">{{ item.value }}</div>
+          <div class="summary-value" :style="{ color: themeColors[item.colorKey] }">{{ item.value }}</div>
         </div>
       </el-col>
     </el-row>
@@ -84,7 +84,7 @@
         </el-table-column>
         <el-table-column label="金额" width="150">
           <template #default="{ row }">
-            <span :style="{ color: row.direction === 'DEPOSIT' ? '#67c23a' : '#f56c6c' }">
+            <span :style="{ color: row.direction === 'DEPOSIT' ? themeColors.loss : themeColors.profit }">
               {{ row.direction === 'DEPOSIT' ? '+' : '-' }}¥{{ row.amount.toLocaleString() }}
             </span>
           </template>
@@ -112,7 +112,7 @@
         <el-table-column prop="sector_name" label="板块" width="100" />
         <el-table-column prop="strategy_type" label="策略" width="80">
           <template #default="{ row }">
-            <el-tag size="small">{{ { AGGRESSIVE: '激进', MODERATE: '稳健', CONSERVATIVE: '保守' }[row.strategy_type] || row.strategy_type }}</el-tag>
+            <el-tag size="small">{{ STRATEGY_LABELS[row.strategy_type] ?? row.strategy_type }}</el-tag>
           </template>
         </el-table-column>
         <el-table-column prop="direction" label="方向" width="60">
@@ -129,7 +129,7 @@
         </el-table-column>
         <el-table-column label="盈亏" width="130">
           <template #default="{ row }">
-            <span v-if="row.current_price && row.avg_price" :style="{ color: row.current_price > row.avg_price ? '#f56c6c' : '#67c23a' }">
+            <span v-if="row.current_price && row.avg_price" :style="{ color: row.current_price > row.avg_price ? themeColors.profit : themeColors.loss }">
               {{ ((row.current_price - row.avg_price) / row.avg_price * 100).toFixed(2) }}%
               (¥{{ ((row.current_price - row.avg_price) * row.quantity).toFixed(2) }})
             </span>
@@ -178,11 +178,34 @@ import { LineChart, BarChart, PieChart, HeatmapChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent, LegendComponent, VisualMapComponent, CalendarComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import { fundApi } from '@/api/fund'
+import { useThemeStore } from '@/stores/theme'
 import type { Position, NavRecord, DailyPnl, BankTransfer, ProfitCurveData } from '@/api/fund'
 import dayjs from 'dayjs'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 use([LineChart, BarChart, PieChart, HeatmapChart, CalendarComponent, GridComponent, TooltipComponent, LegendComponent, VisualMapComponent, CanvasRenderer])
+
+const themeStore = useThemeStore()
+const isDark = computed(() => themeStore.mode === 'dark')
+
+// 语义色随主题切换：暗色下需提高明度、改用暗色网格/边框，
+// 否则深色文字（#303133）与浅灰边框（#dcdee0）在 --bg-secondary(#1a1d24) 上不可读或刺眼。
+const themeColors = computed(() => (isDark.value ? {
+  profit: '#ff6f61', loss: '#357a5c', text: '#e8eaef', textSub: '#9da1b0',
+  primary: '#7b93f5', warning: '#e6a23c', grid: '#2a2d38', axis: '#2a2d38',
+  tooltipBg: '#252832', tooltipBorder: '#2a2d38',
+} : {
+  profit: '#f56c6c', loss: '#67c23a', text: '#303133', textSub: '#5a5f6e',
+  primary: '#409eff', warning: '#e6a23c', grid: '#ebeef5', axis: '#e4e7ed',
+  tooltipBg: '#fff', tooltipBorder: '#ebeef5',
+}))
+
+// 策略类型中文名：集中定义为 Record，修复模板中用 any 索引对象字面量导致的 TS7053
+const STRATEGY_LABELS: Record<string, string> = {
+  AGGRESSIVE: '激进',
+  MODERATE: '稳健',
+  CONSERVATIVE: '保守',
+}
 
 const curveMonths = ref('3')
 const calendarMonth = ref(dayjs().format('YYYY-MM'))
@@ -203,57 +226,78 @@ const transferForm = reactive({
   remark: '',
 })
 
-const summaryItems = ref([
-  { label: '总资产', value: '--', color: '#303133' },
-  { label: '可用资金', value: '--', color: '#409eff' },
-  { label: '持仓市值', value: '--', color: '#e6a23c' },
-  { label: '今日盈亏', value: '--', color: '#f56c6c' },
-  { label: '累计收益率', value: '--', color: '#67c23a' },
+type ColorKey = 'text' | 'primary' | 'warning' | 'profit' | 'loss'
+const summaryItems = ref<{ label: string; value: string; colorKey: ColorKey }[]>([
+  { label: '总资产', value: '--', colorKey: 'text' },
+  { label: '可用资金', value: '--', colorKey: 'primary' },
+  { label: '持仓市值', value: '--', colorKey: 'warning' },
+  { label: '今日盈亏', value: '--', colorKey: 'profit' },
+  { label: '累计收益率', value: '--', colorKey: 'loss' },
 ])
 
 const profitStats = computed(() => {
   const s = profitCurveData.value?.stats
   if (!s) return []
   return [
-    { label: '累计收益', value: `${s.total_return_pct}%`, color: s.total_return_pct >= 0 ? '#f56c6c' : '#67c23a' },
-    { label: '最大回撤', value: `${s.max_drawdown_pct}%`, color: '#e6a23c' },
-    { label: '年化收益', value: `${s.annual_return_pct}%`, color: s.annual_return_pct >= 0 ? '#f56c6c' : '#67c23a' },
-    { label: '夏普比率', value: `${s.sharpe_ratio}`, color: '#409eff' },
+    { label: '累计收益', value: `${s.total_return_pct}%`, color: s.total_return_pct >= 0 ? themeColors.value.profit : themeColors.value.loss },
+    { label: '最大回撤', value: `${s.max_drawdown_pct}%`, color: themeColors.value.warning },
+    { label: '年化收益', value: `${s.annual_return_pct}%`, color: s.annual_return_pct >= 0 ? themeColors.value.profit : themeColors.value.loss },
+    { label: '夏普比率', value: `${s.sharpe_ratio}`, color: themeColors.value.primary },
   ]
 })
 
 const navChartOption = computed(() => {
   if (navData.value.length === 0) return {}
+  const c = themeColors.value
   return {
-    tooltip: { trigger: 'axis' },
-    legend: { data: ['账户净值', '累计收益率'],
-      selected: { '账户净值': true, '累计收益率': true } },
+    tooltip: {
+      trigger: 'axis',
+      backgroundColor: c.tooltipBg, borderColor: c.tooltipBorder, textStyle: { color: c.text },
+    },
+    legend: {
+      data: ['账户净值', '累计收益率'],
+      selected: { '账户净值': true, '累计收益率': true },
+      textStyle: { color: c.textSub },
+    },
     grid: { top: 40, bottom: 20 },
-    xAxis: { type: 'category', data: navData.value.map(d => d.nav_date), boundaryGap: false },
+    xAxis: {
+      type: 'category', data: navData.value.map(d => d.nav_date), boundaryGap: false,
+      axisLabel: { color: c.textSub }, axisLine: { lineStyle: { color: c.axis } },
+    },
     yAxis: [
-      { type: 'value', name: '净值', scale: true, splitLine: { lineStyle: { type: 'dashed' } } },
-      { type: 'value', name: '收益率 %', scale: true, splitLine: { show: false }, axisLabel: { formatter: '{value}%' } },
+      { type: 'value', name: '净值', scale: true, nameTextStyle: { color: c.textSub }, axisLabel: { color: c.textSub }, axisLine: { lineStyle: { color: c.axis } }, splitLine: { lineStyle: { type: 'dashed', color: c.grid } } },
+      { type: 'value', name: '收益率 %', scale: true, nameTextStyle: { color: c.textSub }, axisLabel: { formatter: '{value}%', color: c.textSub }, axisLine: { lineStyle: { color: c.axis } }, splitLine: { show: false } },
     ],
     series: [
-      { name: '账户净值', type: 'line', data: navData.value.map(d => d.total_assets), smooth: true, lineStyle: { width: 2 }, itemStyle: { color: '#409eff' }, areaStyle: { color: 'rgba(64,158,255,0.08)' } },
-      { name: '累计收益率', type: 'line', yAxisIndex: 1, data: navData.value.map(d => (d.cumulative_return * 100).toFixed(2)), smooth: true, lineStyle: { width: 2, type: 'dashed' }, itemStyle: { color: '#67c23a' } },
+      { name: '账户净值', type: 'line', data: navData.value.map(d => d.total_assets), smooth: true, lineStyle: { width: 2 }, itemStyle: { color: c.primary }, areaStyle: { color: isDark.value ? 'rgba(123,147,245,0.12)' : 'rgba(64,158,255,0.08)' } },
+      { name: '累计收益率', type: 'line', yAxisIndex: 1, data: navData.value.map(d => (d.cumulative_return * 100).toFixed(2)), smooth: true, lineStyle: { width: 2, type: 'dashed' }, itemStyle: { color: c.loss } },
     ],
   }
 })
 
 const monthlyBarOption = computed(() => {
   const monthly = profitCurveData.value?.monthly_returns || []
-  const colors = monthly.map(m => m.return_pct >= 0 ? '#f56c6c' : '#67c23a')
+  const c = themeColors.value
+  const colors = monthly.map(m => m.return_pct >= 0 ? c.profit : c.loss)
   return {
-    tooltip: { trigger: 'axis', formatter: (p: any) => `${p[0].name}: ${p[0].value}%` },
+    tooltip: {
+      trigger: 'axis', formatter: (p: any) => `${p[0].name}: ${p[0].value}%`,
+      backgroundColor: c.tooltipBg, borderColor: c.tooltipBorder, textStyle: { color: c.text },
+    },
     grid: { top: 10, bottom: 30, left: 50, right: 20 },
-    xAxis: { type: 'category', data: monthly.map(m => m.month.slice(5)) },
-    yAxis: { type: 'value', axisLabel: { formatter: '{value}%' } },
+    xAxis: {
+      type: 'category', data: monthly.map(m => m.month.slice(5)),
+      axisLabel: { color: c.textSub }, axisLine: { lineStyle: { color: c.axis } },
+    },
+    yAxis: {
+      type: 'value', axisLabel: { formatter: '{value}%', color: c.textSub },
+      axisLine: { lineStyle: { color: c.axis } }, splitLine: { lineStyle: { color: c.grid } },
+    },
     series: [{
       type: 'bar',
       data: monthly.map((m, i) => ({ value: m.return_pct, itemStyle: { color: colors[i] } })),
       barWidth: '60%',
-      label: { show: true, position: 'top', formatter: (p: any) => `${p.value}%`, fontSize: 10 },
+      label: { show: true, position: 'top', formatter: (p: any) => `${p.value}%`, fontSize: 10, color: c.textSub },
     }],
   }
 })
@@ -261,10 +305,42 @@ const monthlyBarOption = computed(() => {
 const pnlCalendarOption = computed(() => {
   const data = dailyPnlData.value.map(d => [d.date, d.daily_return])
   if (data.length === 0) return {}
+  // 暗色配色：中位色改用暗灰（不可用纯白，否则在暗背景上过亮且与盈利红混淆），
+  // 亏损绿/盈利红按暗背景调整明度，保证与卡片底色（--bg-secondary #1a1d24）的对比度。
+  // 暗色下刻意拉开红绿明度差：两者亮度接近（对比度仅 1.28）时难以区分，
+  // 故选「亮红 + 中绿」，互差提升至 1.88，色觉障碍用户也更易分辨。
+  const profitColor = isDark.value ? '#ff6f61' : '#f56c6c'
+  const lossColor = isDark.value ? '#357a5c' : '#67c23a'
+  const neutralColor = isDark.value ? '#4a4f5c' : '#fff'
+  const borderColor = isDark.value ? '#2a2d38' : '#dcdee0'
+  const labelColor = isDark.value ? '#9da1b0' : '#5a5f6e'
+  const monthLabelColor = isDark.value ? '#e8eaef' : '#303133'
+
   return {
-    tooltip: { formatter: (p: any) => `${p.data[0]}<br/>收益率: ${p.data[1]}%<br/>金额: ¥${pnlAmountMap.value[p.data[0]] || 0}` },
-    visualMap: { min: -5, max: 5, show: true, orient: 'horizontal', left: 'center', bottom: 0, inRange: { color: ['#67c23a', '#fff', '#f56c6c'] }, text: ['亏损', '盈利'] },
-    calendar: { top: 20, left: 30, right: 30, range: calendarMonth.value, cellSize: ['auto', 20], itemStyle: { borderWidth: 1, borderColor: '#dcdee0' }, dayLabel: { firstDay: 1, nameMap: 'cn' }, monthLabel: { nameMap: 'cn' } },
+    tooltip: {
+      formatter: (p: any) => `${p.data[0]}<br/>收益率: ${p.data[1]}%<br/>金额: ¥${pnlAmountMap.value[p.data[0]] || 0}`,
+      backgroundColor: isDark.value ? '#252832' : '#fff',
+      borderColor: isDark.value ? '#2a2d38' : '#ebeef5',
+      textStyle: { color: isDark.value ? '#e8eaef' : '#303133' },
+    },
+    visualMap: {
+      min: -5, max: 5, show: true, orient: 'horizontal', left: 'center', bottom: 0,
+      // visualMap.text 为 [高端, 低端]：高端是 +5%（盈利），低端是 -5%（亏损）
+      inRange: { color: [lossColor, neutralColor, profitColor] },
+      text: ['盈利', '亏损'],
+      textStyle: { color: labelColor },
+    },
+    calendar: {
+      top: 20, left: 30, right: 30, range: calendarMonth.value, cellSize: ['auto', 20],
+      itemStyle: {
+        borderWidth: 1,
+        borderColor,
+        // 无数据格子透明（露出卡片底色），与「0 收益」的中性灰区分开
+        color: isDark.value ? 'transparent' : '#fff',
+      },
+      dayLabel: { firstDay: 1, nameMap: 'cn', color: labelColor },
+      monthLabel: { nameMap: 'cn', color: monthLabelColor },
+    },
     series: [{ type: 'heatmap', coordinateSystem: 'calendar', data }],
   }
 })
@@ -275,18 +351,28 @@ const pnlAmountMap = computed(() => {
   return m
 })
 
-const attributionChartOption = computed(() => ({
-  tooltip: { trigger: 'item', formatter: '{b}: ¥{c} ({d}%)' },
-  legend: { orient: 'vertical', left: 'left', top: 'middle', type: 'scroll' },
-  series: [{
-    type: 'pie', radius: ['40%', '70%'], center: ['60%', '50%'],
-    data: attributionData.value.length > 0
-      ? attributionData.value.map((a: any) => ({ name: a.sector_name, value: +a.contribution }))
-      : [{ name: '暂无数据', value: 1 }],
-    emphasis: { itemStyle: { shadowBlur: 10 } },
-    label: { formatter: '{b}\n¥{c}' },
-  }],
-}))
+const attributionChartOption = computed(() => {
+  const c = themeColors.value
+  return {
+    tooltip: {
+      trigger: 'item', formatter: '{b}: ¥{c} ({d}%)',
+      backgroundColor: c.tooltipBg, borderColor: c.tooltipBorder, textStyle: { color: c.text },
+    },
+    legend: {
+      orient: 'vertical', left: 'left', top: 'middle', type: 'scroll',
+      textStyle: { color: c.textSub },
+    },
+    series: [{
+      type: 'pie', radius: ['40%', '70%'], center: ['60%', '50%'],
+      data: attributionData.value.length > 0
+        ? attributionData.value.map((a: any) => ({ name: a.sector_name, value: +a.contribution }))
+        : [{ name: '暂无数据', value: 1 }],
+      emphasis: { itemStyle: { shadowBlur: 10 } },
+      label: { formatter: '{b}\n¥{c}', color: c.textSub },
+      labelLine: { lineStyle: { color: c.axis } },
+    }],
+  }
+})
 
 function loadSummary() {
   fundApi.getAccountSummary().then(summary => {

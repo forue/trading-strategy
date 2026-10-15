@@ -47,10 +47,10 @@
         </div>
       </div>
       <div class="log-container">
-        <div v-if="logsLoading && logs.length === 0" style="color: #909399; text-align: center; padding: 20px">
+        <div v-if="logsLoading && logs.length === 0" :style="{ color: themeColors.textSub, textAlign: 'center', padding: '20px' }">
           加载日志中...
         </div>
-        <div v-else-if="logs.length === 0" style="color: #909399; text-align: center; padding: 20px">
+        <div v-else-if="logs.length === 0" :style="{ color: themeColors.textSub, textAlign: 'center', padding: '20px' }">
           暂无日志
         </div>
         <div v-for="(log, idx) in filteredLogs" :key="idx" class="log-line" :class="log.level">
@@ -66,6 +66,14 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue'
+import { useThemeStore } from '@/stores/theme'
+
+// 次要文字色随主题切换（日志终端区域刻意保持深色风格，不随主题变化）
+const themeStore = useThemeStore()
+const isDark = computed(() => themeStore.mode === 'dark')
+const themeColors = computed(() => (isDark.value
+  ? { textSub: '#9da1b0' }
+  : { textSub: '#909399' }))
 
 const refreshing = ref(false)
 const logsLoading = ref(false)

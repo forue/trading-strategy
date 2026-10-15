@@ -80,7 +80,7 @@
           <el-table-column prop="name" label="因子" width="160">
             <template #default="{ row }">
               <el-tooltip :content="getFactorDescription(row.name)" placement="top" :show-after="300">
-                <span style="font-weight: 500; cursor: help; border-bottom: 1px dashed #c0c4cc">{{ getFactorLabel(row.name) }}</span>
+                <span :style="{ fontWeight: 500, cursor: 'help', borderBottom: '1px dashed ' + themeColors.axis }">{{ getFactorLabel(row.name) }}</span>
               </el-tooltip>
             </template>
           </el-table-column>
@@ -100,7 +100,7 @@
           <el-table-column prop="confidence" label="置信度" width="120" align="center">
             <template #default="{ row }">
               <el-progress :percentage="Math.round(row.confidence * 100)" :stroke-width="6"
-                :color="row.confidence >= 0.7 ? '#67c23a' : row.confidence >= 0.4 ? '#e6a23c' : '#f56c6c'"
+                :color="row.confidence >= 0.7 ? themeColors.good : row.confidence >= 0.4 ? themeColors.warn : themeColors.bad"
                 style="width: 80px" />
             </template>
           </el-table-column>
@@ -109,7 +109,7 @@
           </el-table-column>
           <el-table-column label="计算详情">
             <template #default="{ row }">
-              <span style="font-size: 12px; color: #909399">{{ formatDetail(row) }}</span>
+              <span :style="{ fontSize: '12px', color: themeColors.textSub }">{{ formatDetail(row) }}</span>
             </template>
           </el-table-column>
         </el-table></div>
@@ -147,6 +147,14 @@ import {
   type StrategyWeightsPayload,
 } from '@/api/strategy'
 import { useStrategyStore } from '@/stores/strategy'
+import { useThemeStore } from '@/stores/theme'
+
+// 语义色随主题切换：暗色下提高明度，避免深色文字/浅色描边在暗背景上不可读
+const themeStore = useThemeStore()
+const isDark = computed(() => themeStore.mode === 'dark')
+const themeColors = computed(() => (isDark.value
+  ? { good: '#357a5c', warn: '#e6a23c', bad: '#ff6f61', textSub: '#9da1b0', axis: '#2a2d38' }
+  : { good: '#67c23a', warn: '#e6a23c', bad: '#f56c6c', textSub: '#909399', axis: '#c0c4cc' }))
 
 const strategyStore = useStrategyStore()
 
@@ -238,9 +246,10 @@ async function analyzeSector() {
 }
 
 function getScoreColor(score: number): string {
-  if (score >= 7) return '#67c23a'
-  if (score >= 4) return '#e6a23c'
-  return '#f56c6c'
+  const c = themeColors.value
+  if (score >= 7) return c.good
+  if (score >= 4) return c.warn
+  return c.bad
 }
 
 function getCategoryType(category: string): string {

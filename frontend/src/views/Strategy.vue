@@ -131,21 +131,21 @@
                 </el-table-column>
                 <el-table-column prop="day_change_pct" label="当日涨跌" width="90">
                   <template #default="{ row }">
-                    <span :style="{ color: row.day_change_pct >= 0 ? '#f56c6c' : '#67c23a' }">
+                    <span :style="{ color: row.day_change_pct >= 0 ? themeColors.profit : themeColors.loss }">
                       {{ row.day_change_pct >= 0 ? '+' : '' }}{{ row.day_change_pct.toFixed(2) }}%
                     </span>
                   </template>
                 </el-table-column>
                 <el-table-column prop="contribution_pct" label="贡献" width="80">
                   <template #default="{ row }">
-                    <span :style="{ color: row.contribution_pct >= 0 ? '#f56c6c' : '#67c23a' }">
+                    <span :style="{ color: row.contribution_pct >= 0 ? themeColors.profit : themeColors.loss }">
                       {{ row.contribution_pct >= 0 ? '+' : '' }}{{ row.contribution_pct.toFixed(2) }}%
                     </span>
                   </template>
                 </el-table-column>
               </el-table>
             </div>
-            <div v-else-if="group.snapshot && !group.snapshot.portfolio?.length" style="color:#909399;font-size:12px;margin:4px 0">空仓</div>
+            <div v-else-if="group.snapshot && !group.snapshot.portfolio?.length" :style="{ color: themeColors.textSub, fontSize: '12px', margin: '4px 0' }">空仓</div>
             <!-- 交易记录 -->
             <div class="rebalance-trades">
               <el-tag v-for="(t, idx) in group.trades" :key="idx" size="small"
@@ -155,7 +155,7 @@
                 <span v-if="t.cost > 0" style="opacity:0.7"> (费{{ t.cost.toFixed(1) }})</span>
               </el-tag>
             </div>
-            <div v-if="group.trades.length && group.trades[0].reason" class="rebalance-reason" style="color: #909399; font-size: 12px; margin-top: 4px">
+            <div v-if="group.trades.length && group.trades[0].reason" class="rebalance-reason" :style="{ color: themeColors.textSub, fontSize: '12px', marginTop: '4px' }">
               {{ group.trades[0].reason }}
             </div>
           </div>
@@ -186,14 +186,14 @@
         </el-table-column>
         <el-table-column label="总收益率" width="120">
           <template #default="{ row }">
-            <span :style="{ color: row.total_return >= 0 ? '#67c23a' : '#f56c6c' }">
+            <span :style="{ color: row.total_return >= 0 ? themeColors.profit : themeColors.loss }">
               {{ (row.total_return * 100).toFixed(2) }}%
             </span>
           </template>
         </el-table-column>
         <el-table-column label="年化收益" width="120">
           <template #default="{ row }">
-            <span :style="{ color: row.annual_return >= 0 ? '#67c23a' : '#f56c6c' }">
+            <span :style="{ color: row.annual_return >= 0 ? themeColors.profit : themeColors.loss }">
               {{ (row.annual_return * 100).toFixed(2) }}%
             </span>
           </template>
@@ -213,7 +213,7 @@
               <el-tag size="small" type="info">止{{ (row.params.stop_loss * 100).toFixed(1) }}%</el-tag>
               <el-tag v-if="row.params.valuation_pct_max" size="small" type="info">估值≤{{ row.params.valuation_pct_max }}%</el-tag>
             </div>
-            <span v-else style="color: #c0c4cc">默认参数</span>
+            <span v-else :style="{ color: themeColors.textSub }">默认参数</span>
           </template>
         </el-table-column>
         <el-table-column label="操作" width="80">
@@ -238,8 +238,23 @@ import { CanvasRenderer } from 'echarts/renderers'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { strategyApi } from '@/api/strategy'
 import dayjs from 'dayjs'
+import { useThemeStore } from '@/stores/theme'
 
 use([LineChart, GridComponent, TooltipComponent, LegendComponent, CanvasRenderer])
+
+// 语义色随主题切换：暗色下提高红绿明度、网格/边框改用暗色，
+// 避免深色文字与浅色网格在 --bg-secondary(#1a1d24) 上不可读或刺眼。
+const themeStore = useThemeStore()
+const isDark = computed(() => themeStore.mode === 'dark')
+const themeColors = computed(() => (isDark.value ? {
+  profit: '#ff6f61', loss: '#357a5c', text: '#e8eaef', textSub: '#9da1b0',
+  primary: '#7b93f5', neutral: '#909399', grid: '#2a2d38', axis: '#2a2d38',
+  tooltipBg: '#252832', tooltipBorder: '#2a2d38',
+} : {
+  profit: '#f56c6c', loss: '#67c23a', text: '#303133', textSub: '#909399',
+  primary: '#409eff', neutral: '#909399', grid: '#ebeef5', axis: '#e4e7ed',
+  tooltipBg: '#fff', tooltipBorder: '#ebeef5',
+}))
 
 interface StrategyState {
   type: string
@@ -575,14 +590,25 @@ loadBacktestHistory()
 const backtestChartOption = computed(() => {
   if (!backtestResult.value?.navCurve) return {}
   const data = backtestResult.value.navCurve
+  const c = themeColors.value
   return {
-    tooltip: { trigger: 'axis' },
-    legend: { data: ['策略净值', '基准净值'] },
-    xAxis: { type: 'category', data: data.map((d: any) => d.date) },
-    yAxis: { type: 'value', scale: true },
+    tooltip: {
+      trigger: 'axis',
+      backgroundColor: c.tooltipBg, borderColor: c.tooltipBorder, textStyle: { color: c.text },
+    },
+    legend: { data: ['策略净值', '基准净值'], textStyle: { color: c.textSub } },
+    xAxis: {
+      type: 'category', data: data.map((d: any) => d.date),
+      axisLabel: { color: c.textSub }, axisLine: { lineStyle: { color: c.axis } },
+    },
+    yAxis: {
+      type: 'value', scale: true,
+      axisLabel: { color: c.textSub }, axisLine: { lineStyle: { color: c.axis } },
+      splitLine: { lineStyle: { color: c.grid } },
+    },
     series: [
-      { name: '策略净值', type: 'line', data: data.map((d: any) => d.nav), smooth: true, lineStyle: { width: 2 }, itemStyle: { color: '#409eff' } },
-      { name: '基准净值', type: 'line', data: data.map((d: any) => d.benchmark), smooth: true, lineStyle: { width: 2, type: 'dashed' }, itemStyle: { color: '#909399' } },
+      { name: '策略净值', type: 'line', data: data.map((d: any) => d.nav), smooth: true, lineStyle: { width: 2 }, itemStyle: { color: c.primary } },
+      { name: '基准净值', type: 'line', data: data.map((d: any) => d.benchmark), smooth: true, lineStyle: { width: 2, type: 'dashed' }, itemStyle: { color: c.neutral } },
     ],
   }
 })
