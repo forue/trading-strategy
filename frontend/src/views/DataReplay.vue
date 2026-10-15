@@ -123,6 +123,13 @@
                 </div>
               </el-col>
             </el-row>
+            <div v-if="optimizeResult.combined_summary" class="best-params">
+              <span class="stat-label">指标口径：</span>
+              <el-tag size="small" type="success" style="margin-right: 6px">全区间（含样本外）</el-tag>
+              <span class="stat-label" style="margin-left: 8px">
+                {{ optimizeResult.combined_summary.trading_days }} 个交易日
+              </span>
+            </div>
             <div v-if="optimizeResult.out_of_sample" class="best-params">
               <span class="stat-label">区间切分：</span>
               <el-tag size="small" type="info" style="margin-right: 6px">
@@ -863,7 +870,9 @@ async function runAutoOptimization() {
       overlayData.value = {
         daily_signals: byDate(result.best_result.daily_signals, oos?.daily_signals),
         nav_curve: byDate(result.best_result.nav_curve, oos?.nav_curve),
-        summary: result.best_result,
+        // 全区间汇总优先：顶部指标与拼接后的完整曲线口径一致，
+        // 缺失时（无样本外）回退到训练集结果
+        summary: result.combined_summary || result.best_result,
         position_changes: byDate(result.best_result.position_changes, oos?.position_changes),
         portfolio_snapshots: byDate(result.best_result.portfolio_snapshots, oos?.portfolio_snapshots),
       }

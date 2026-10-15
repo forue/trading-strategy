@@ -1176,6 +1176,53 @@ def _resolve_daily_prices(sector_data: list, last_close: dict) -> dict:
     return px
 
 
+def _summarize_nav_curve(nav_list: list, risk_free_rate: float = 0.02) -> dict | None:
+    """对拼接后的完整净值曲线重算全区间指标（训练集 + 样本外）
+
+    指标口径与 _run_backtest_core 内部保持一致：
+    - 年化按 252 交易日；夏普按超额日收益 (mean * 252) / (std * sqrt(252))
+    - 最大回撤按净值峰值回算；日胜率为日收益 > 0 的占比
+    用于让寻优结果顶部指标与拼接后的完整曲线一致，而非仅反映训练集。
+    """
+    navs = [_safe_num(x.get("nav")) for x in (nav_list or [])]
+    navs = [v for v in navs if v > 0]
+    if len(navs) < 2:
+        return None
+
+    n = len(navs)
+    first, last = navs[0], navs[-1]
+    total_return = last / first - 1 if first > 0 else 0.0
+    annual_return = ((1 + total_return) ** (TRADING_DAYS_PER_YEAR / n) - 1
+                     if total_return > -1 else -1.0)
+
+    peak, max_dd = navs[0], 0.0
+    for v in navs:
+        if v > peak:
+            peak = v
+        dd = (peak - v) / peak if peak > 0 else 0.0
+        if dd > max_dd:
+            max_dd = dd
+
+    rets = np.diff(navs) / navs[:-1]
+    rf_daily = (1 + _safe_num(risk_free_rate)) ** (1 / TRADING_DAYS_PER_YEAR) - 1
+    std = float(np.std(rets))
+    sharpe = 0.0
+    if std > 0:
+        sharpe = float((np.mean(rets - rf_daily) * TRADING_DAYS_PER_YEAR)
+                       / (std * np.sqrt(TRADING_DAYS_PER_YEAR)))
+
+    return {
+        "initial_capital": round(first, 2),
+        "final_capital": round(last, 2),
+        "total_return": round(total_return, 6),
+        "annual_return": round(annual_return, 6),
+        "max_drawdown": round(max_dd, 6),
+        "sharpe_ratio": round(sharpe, 4),
+        "daily_win_rate": round(float(np.mean(rets > 0)), 4),
+        "trading_days": n,
+    }
+
+
 def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_capital, return_full=False, sh_index_returns=None, history_cache=None, initial_bench_capital=None):
     """回测核心逻辑（统一入口）
 
@@ -2798,7 +2845,25 @@ def _run_optimization(daily_data, sorted_dates, strategy_type, initial_capital, 
         logger.info(f"自动寻优完成: {len(all_results)} 次有效试验({n_jobs}线程并行), "
                     f"样本内收益={final_result['total_return']*100:.2f}%, 夏普={final_result['sharpe_ratio']}")
 
+        # 全区间汇总：训练集 + 样本外拼接后重算指标，使顶部指标与完整曲线口径一致。
+        # （此前顶部指标取自训练集 best_result，与拼接曲线末端的资金对不上）
+        combined_summary = None
+        if oos_result:
+            combined_nav = (final_result.get("nav_curve") or []) + (oos_result.get("nav_curve") or [])
+            combined_summary = _summarize_nav_curve(
+                combined_nav, getattr(best_params, "risk_free_rate", 0.02))
+            if combined_summary:
+                combined_summary["trade_count_actual"] = (
+                    final_result.get("trade_count_actual", 0)
+                    + oos_result.get("trade_count_actual", 0))
+                logger.info(
+                    f"全区间汇总: {len(combined_nav)} 日, "
+                    f"总收益={combined_summary['total_return'] * 100:.2f}%, "
+                    f"回撤={combined_summary['max_drawdown'] * 100:.2f}%, "
+                    f"夏普={combined_summary['sharpe_ratio']}")
+
         result_payload = {
+            "combined_summary": combined_summary,
             "created_at": datetime.now().isoformat(timespec="seconds"),
             "strategy_type": strategy_type.value if hasattr(strategy_type, "value") else str(strategy_type),
             "n_trials": n_trials,
