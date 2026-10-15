@@ -32,7 +32,14 @@ influxdb:
   org: ${INFLUXDB_ORG:rotation}
   bucket: ${INFLUXDB_BUCKET:market_data}
 
+app:
+  data-collector:
+    url: ${DATA_COLLECTOR_URL:http://localhost:8003}
+
 # 内部联调端点（POST /api/fund/execute 下单）开关，生产保持 false
 fund:
   internal:
     enabled: ${FUND_INTERNAL_ENABLED:false}
+  etf:
+    # true：ETF 未纳入映射时拒绝开仓（避免产生无法盯市的持仓）
+    strict-mapping: ${FUND_ETF_STRICT_MAPPING:true}

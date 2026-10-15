@@ -28,6 +28,7 @@ class PositionServiceTest {
     @Mock PositionRepository positionRepository;
     @Mock BankTransferRepository bankTransferRepository;
     @Mock TradeRepository tradeRepository;
+    @Mock EtfCodeValidator etfCodeValidator;
 
     @InjectMocks PositionService positionService;
 
@@ -43,6 +44,8 @@ class PositionServiceTest {
         when(bankTransferRepository.findByUserIdOrderByTransferDateDesc(1L))
                 .thenReturn(List.of(deposit("1000000")));
         when(tradeRepository.findByUserIdOrderByTradedAtDesc(1L)).thenReturn(List.of());
+        when(etfCodeValidator.validate(any(), any()))
+                .thenReturn(EtfCodeValidator.ValidationResult.ok("512800"));
         when(positionRepository.findByUserIdAndStatus(1L, "OPEN")).thenReturn(List.of());
         when(positionRepository.findFirstByUserIdAndStrategyTypeAndStatusAndSectorCode(
                 1L, "AGGRESSIVE", "OPEN", "SW801780")).thenReturn(Optional.empty());
@@ -71,6 +74,8 @@ class PositionServiceTest {
         when(bankTransferRepository.findByUserIdOrderByTransferDateDesc(1L))
                 .thenReturn(List.of(deposit("100000")));
         when(tradeRepository.findByUserIdOrderByTradedAtDesc(1L)).thenReturn(List.of());
+        when(etfCodeValidator.validate(any(), any()))
+                .thenReturn(EtfCodeValidator.ValidationResult.ok("512800"));
         when(positionRepository.findByUserIdAndStatus(1L, "OPEN")).thenReturn(List.of());
         when(positionRepository.findFirstByUserIdAndStrategyTypeAndStatusAndSectorCode(
                 1L, "AGGRESSIVE", "OPEN", "SW801780")).thenReturn(Optional.empty());
@@ -111,6 +116,8 @@ class PositionServiceTest {
 
     @Test
     void openPosition_rejectsDuplicateOpenPosition() {
+        when(etfCodeValidator.validate(any(), any()))
+                .thenReturn(EtfCodeValidator.ValidationResult.ok("512800"));
         when(positionRepository.findFirstByUserIdAndStrategyTypeAndStatusAndSectorCode(
                 1L, "AGGRESSIVE", "OPEN", "SW801780")).thenReturn(Optional.of(new Position()));
 
@@ -124,6 +131,17 @@ class PositionServiceTest {
         assertThrows(IllegalArgumentException.class,
                 () -> positionService.openPosition(1L, "AGGRESSIVE", "SW801780", "银行", "512800",
                         new BigDecimal("1.5"), new BigDecimal("10")));
+    }
+
+    @Test
+    void openPosition_rejectsUnmappedEtfCode() {
+        when(etfCodeValidator.validate(any(), any()))
+                .thenReturn(EtfCodeValidator.ValidationResult.reject("标的合法但未纳入映射"));
+
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+                () -> positionService.openPosition(1L, "AGGRESSIVE", "SW801780", "银行", "159999",
+                        new BigDecimal("0.5"), new BigDecimal("10")));
+        assertTrue(ex.getMessage().contains("未纳入映射"));
     }
 
     @Test

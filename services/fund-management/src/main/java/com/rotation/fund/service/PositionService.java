@@ -36,6 +36,7 @@ public class PositionService {
     private final PositionRepository positionRepository;
     private final BankTransferRepository bankTransferRepository;
     private final TradeRepository tradeRepository;
+    private final EtfCodeValidator etfCodeValidator;
 
     /** 净入金 = Σ入金 − Σ出金 */
     public BigDecimal getNetDeposit(Long userId) {
@@ -97,6 +98,14 @@ public class PositionService {
                 || positionRatio.compareTo(BigDecimal.ONE) > 0) {
             throw new IllegalArgumentException("仓位比例必须在 (0, 1] 之间");
         }
+
+        // 校验 ETF 代码（格式 → 映射 → 可交易性），缺失时按板块自动填充。
+        // 未纳入映射的标的无法采集收盘价，会导致该持仓永不盯市并拖停净值重算，故默认拒绝。
+        EtfCodeValidator.ValidationResult validated = etfCodeValidator.validate(etfCode, sectorName);
+        if (!validated.accepted()) {
+            throw new IllegalArgumentException(validated.reason());
+        }
+
         if (positionRepository.findFirstByUserIdAndStrategyTypeAndStatusAndSectorCode(
                 userId, strategyType, "OPEN", sectorCode).isPresent()) {
             throw new IllegalArgumentException("该板块已存在 OPEN 持仓，禁止重复开仓: " + sectorCode);
@@ -119,7 +128,7 @@ public class PositionService {
         pos.setStrategyType(strategyType);
         pos.setSectorCode(sectorCode);
         pos.setSectorName(sectorName);
-        pos.setEtfCode(etfCode);
+        pos.setEtfCode(validated.etfCode());
         pos.setDirection("BUY");
         pos.setQuantity(quantity);
         pos.setAvgPrice(currentPrice);

@@ -226,13 +226,23 @@ public class FundController {
         stats.put("start_date", firstNav.getNavDate().toString());
         stats.put("end_date", lastNav.getNavDate().toString());
 
+        // 峰值（peak）为 0 时必须跳过：空账户（未入金、无持仓）的净值记录 total_assets=0，
+        // 直接用 peak 做除数会抛 ArithmeticException(/ by zero) 导致接口 500。
         BigDecimal peak = BigDecimal.ZERO;
         BigDecimal maxDrawdown = BigDecimal.ZERO;
         for (AccountNav nav : navList) {
-            if (nav.getTotalAssets().compareTo(peak) > 0) peak = nav.getTotalAssets();
-            BigDecimal dd = peak.subtract(nav.getTotalAssets()).multiply(BigDecimal.valueOf(100))
+            BigDecimal assets = nav.getTotalAssets() != null ? nav.getTotalAssets() : BigDecimal.ZERO;
+            if (assets.compareTo(peak) > 0) {
+                peak = assets;
+            }
+            if (peak.compareTo(BigDecimal.ZERO) <= 0) {
+                continue;
+            }
+            BigDecimal dd = peak.subtract(assets).multiply(BigDecimal.valueOf(100))
                     .divide(peak, 2, RoundingMode.HALF_UP);
-            if (dd.compareTo(maxDrawdown) > 0) maxDrawdown = dd;
+            if (dd.compareTo(maxDrawdown) > 0) {
+                maxDrawdown = dd;
+            }
         }
         stats.put("max_drawdown_pct", maxDrawdown);
 

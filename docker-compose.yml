@@ -316,6 +316,7 @@ services:
       SPRING_RABBITMQ_PORT: 5672
       SPRING_RABBITMQ_USERNAME: ${RABBITMQ_USER:-guest}
       SPRING_RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+      DATA_COLLECTOR_URL: http://backend-data-collector:8003
     depends_on:
       postgres:
         condition: service_healthy
