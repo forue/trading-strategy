@@ -2778,7 +2778,11 @@ def _run_optimization(daily_data, sorted_dates, strategy_type, initial_capital, 
         if oos_set:
             oos_sorted = sorted(oos_set)
             oos_history = _load_sector_history_cache(oos_sorted)
-            oos_result = _run_backtest_core(daily_data, oos_sorted, strategy_type, best_params, initial_capital,
+            # 样本外必须以「训练集结束时的权益」为初始资金：若同样按 100 万起算，
+            # 与训练集拼接后收益曲线会在切分点处跳变（不连续）。
+            oos_capital = final_result.get("final_capital") or initial_capital
+            logger.info(f"样本外初始资金取训练集末权益: {oos_capital:.2f}")
+            oos_result = _run_backtest_core(daily_data, oos_sorted, strategy_type, best_params, oos_capital,
                                             return_full=True, sh_index_returns=sh_index_returns, history_cache=oos_history)
             with progress_lock:
                 _optimization_progress["completed"] += 1

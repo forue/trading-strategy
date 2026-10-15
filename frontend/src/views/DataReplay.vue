@@ -850,9 +850,16 @@ async function runAutoOptimization() {
       // 训练集 + 样本外拼接后展示，覆盖用户所选的完整区间。
       // 只展示 best_result（训练集）时，样本外整段没有数据，会被误认为「信号不再生成」。
       const oos = result.out_of_sample || null
-      const byDate = (a: any[], b: any[]) =>
-        [...(a || []), ...(b || [])].sort((x, y) =>
-          String(x.date || '').localeCompare(String(y.date || '')))
+      // 按日期合并：样本外继承训练集末权益后，切分点两侧连续；
+      // 用 Map 去重可防止切分点重合时出现重复点
+      const byDate = (a: any[], b: any[]) => {
+        const m = new Map<string, any>()
+        for (const x of [...(a || []), ...(b || [])]) {
+          if (x?.date) m.set(x.date, x)
+        }
+        return [...m.values()].sort((x, y) =>
+          String(x.date).localeCompare(String(y.date)))
+      }
       overlayData.value = {
         daily_signals: byDate(result.best_result.daily_signals, oos?.daily_signals),
         nav_curve: byDate(result.best_result.nav_curve, oos?.nav_curve),
