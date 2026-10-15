@@ -38,6 +38,9 @@ class DataCollector:
     # 缓存板块名称→代码映射
     _sector_name_code_map: dict[str, str] | None = None
 
+    # 可交易性判定：最近交易日距今超过该天数即视为退市/长期停牌
+    TRADABLE_MAX_STALE_DAYS = 10
+
     # 申万宏源「指数分析」接口（akshare index_analysis_daily_sw 的上游）
     # akshare 把 page_size 写死为 50：回填 1 年需 200+ 次请求（容器内约 4.5s/次，约 20 分钟），
     # 该接口实际支持自定义 page_size，改大后请求数降到个位数，故这里自行翻页。
@@ -673,6 +676,46 @@ class DataCollector:
             logger.info(f"通过K线填充历史资金流: {len(merged)} 条, 失败: {len(failed)} 个板块")
 
         return all_data
+
+    def check_etf_tradable(self, etf_code: str) -> dict:
+        """校验 ETF 是否可交易：能否取到最近交易日的收盘价
+
+        Returns:
+            {code, tradable, reason, last_date, close}
+        """
+        try:
+            df = ak.fund_etf_hist_sina(symbol=self._sina_etf_symbol(etf_code))
+        except Exception as e:
+            return {"code": etf_code, "tradable": False,
+                    "reason": f"{type(e).__name__}: {str(e)[:80]}"}
+        if df is None or df.empty or "date" not in df.columns:
+            return {"code": etf_code, "tradable": False, "reason": "行情接口无数据"}
+        last = df.iloc[-1]
+        try:
+            close = float(last["close"])
+        except (TypeError, ValueError):
+            return {"code": etf_code, "tradable": False, "reason": "收盘价解析失败"}
+
+        # 新鲜度：仅「能取到收盘价」不够——退市/长期停牌的标的会残留历史数据
+        # （实测 159999 最后交易日停留在 2023-03-10 却被判为可取价），
+        # 故要求最近交易日距今天数在阈值内。
+        last_date = str(last["date"])
+        try:
+            stale_days = (datetime.now().date()
+                          - datetime.strptime(last_date[:10], "%Y-%m-%d").date()).days
+        except (ValueError, TypeError):
+            stale_days = 0
+        fresh = stale_days <= self.TRADABLE_MAX_STALE_DAYS
+
+        return {
+            "code": etf_code,
+            "tradable": close > 0 and fresh,
+            "reason": None if (close > 0 and fresh)
+                      else f"最近交易日 {last_date} 距今 {stale_days} 天，疑似退市或长期停牌",
+            "last_date": last_date,
+            "close": close,
+            "stale_days": stale_days,
+        }
 
     @staticmethod
     def _sina_etf_symbol(etf_code: str) -> str:

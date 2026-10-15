@@ -20,6 +20,7 @@ from .config import settings
 from .collector import data_collector
 from .influx_client import influx_manager
 from shared import RabbitMQManager, success_response, error_response
+from shared.sector_etf_map import SECTOR_MAP, SECTOR_ETF_MAP, SECTOR_ETF_CANDIDATES
 
 # 配置日志
 logger.remove()
@@ -241,6 +242,42 @@ async def query_etf_prices(date: str):
         return success_response(data=prices)
     except Exception as e:
         logger.error(f"ETF 收盘价查询失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/sector-etf-map")
+async def get_sector_etf_map():
+    """板块→ETF 映射全集（静态共享映射），供 fund 校验 ETF 代码是否纳入
+
+    映射的唯一权威出口：fund 不持有映射副本，只查询本端点并缓存，
+    确保与采集、信号生成使用的是同一份映射。
+    """
+    try:
+        mapping: dict[str, dict] = {}
+        for sector_name, cands in SECTOR_ETF_CANDIDATES.items():
+            for c in cands:
+                mapping.setdefault(c["code"], {"etf_name": c["name"], "sector_name": sector_name})
+        for code, etf in SECTOR_ETF_MAP.items():
+            mapping.setdefault(
+                etf["code"], {"etf_name": etf["name"], "sector_name": SECTOR_MAP.get(code, "")}
+            )
+        return success_response(data=mapping)
+    except Exception as e:
+        logger.error(f"获取板块ETF映射失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/etf-tradable")
+async def check_etf_tradable(code: str):
+    """校验 ETF 代码是否真实可交易（能取到最近交易日收盘价）
+
+    用于区分「代码错误/已退市」与「标的合法但未纳入映射」两种失败原因。
+    """
+    try:
+        info = await asyncio.to_thread(data_collector.check_etf_tradable, code)
+        return success_response(data=info)
+    except Exception as e:
+        logger.error(f"ETF 可交易性校验失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
