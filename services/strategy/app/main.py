@@ -1924,6 +1924,9 @@ def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_
         daily_signals_out.append({
             "date": date,
             "signals": day_signals,
+            # 当日状态：区分「空仓 / 持有不动 / 调仓」。
+            # 无操作日 signals 为空，若前端不显示状态会误以为「信号不再生成」。
+            "status": "EMPTY" if not positions else ("REBALANCE" if day_signals else "HOLD"),
             "strategy_return": round(strategy_daily_return * 100, 4),
             "benchmark_return": round(benchmark_return * 100, 4),
             "positions": day_position_detail,
@@ -2752,6 +2755,7 @@ def _run_optimization(daily_data, sorted_dates, strategy_type, initial_capital, 
                 all_results.append({
                     "params": trial.user_attrs.get("params", {}),
                     "total_return": trial.user_attrs.get("total_return", 0),
+                    "trial": trial.number,
                     "annual_return": trial.user_attrs.get("annual_return", 0),
                     "max_drawdown": trial.user_attrs.get("max_drawdown", 0),
                     "sharpe_ratio": trial.user_attrs.get("sharpe_ratio", 0),
@@ -2785,6 +2789,9 @@ def _run_optimization(daily_data, sorted_dates, strategy_type, initial_capital, 
                     f"样本内收益={final_result['total_return']*100:.2f}%, 夏普={final_result['sharpe_ratio']}")
 
         result_payload = {
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "strategy_type": strategy_type.value if hasattr(strategy_type, "value") else str(strategy_type),
+            "n_trials": n_trials,
             "best_params": best_params_dict,
             "best_result": final_result,
             "all_results": all_results,
@@ -2793,10 +2800,32 @@ def _run_optimization(daily_data, sorted_dates, strategy_type, initial_capital, 
             "oos_range": [sorted(oos_set)[0], sorted(oos_set)[-1]] if oos_set else [],
         }
         _optimization_result = result_payload
+        # 追加历史摘要（最新在前），仅保留最近 20 次
+        _optimization_history.insert(0, {
+            "created_at": result_payload["created_at"],
+            "strategy_type": result_payload["strategy_type"],
+            "n_trials": n_trials,
+            "trial_count": len(all_results),
+            "sharpe_ratio": final_result.get("sharpe_ratio", 0),
+            "total_return": final_result.get("total_return", 0),
+            "max_drawdown": final_result.get("max_drawdown", 0),
+            "train_range": result_payload["train_range"],
+        })
+        del _optimization_history[20:]
         return {"code": 200, "data": result_payload}
     finally:
         # 任何异常都必须复位，否则后续寻优会被 active 标志永久阻塞
         _optimization_progress["active"] = False
+
+
+# 历史寻优记录摘要（最新在前，最多 20 条），供前端按时间倒序展示
+_optimization_history: list = []
+
+
+@app.get("/data/replay/strategy-optimize/history")
+async def get_optimize_history():
+    """获取历史寻优记录（最新在前，按完成时间倒序）"""
+    return {"code": 200, "data": list(_optimization_history)}
 
 
 @app.get("/data/replay/optimize-progress")
