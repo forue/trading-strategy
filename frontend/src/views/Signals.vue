@@ -101,12 +101,17 @@
             </span>
           </template>
         </el-table-column>
+        <el-table-column prop="current_price" label="信号价" width="100">
+          <template #default="{ row }">
+            <span>{{ row.current_price != null ? '¥' + Number(row.current_price).toFixed(4) : '--' }}</span>
+          </template>
+        </el-table-column>
         <el-table-column prop="position_ratio" label="建议仓位" width="90">
           <template #default="{ row }">{{ (row.position_ratio * 100).toFixed(1) }}%</template>
         </el-table-column>
         <el-table-column prop="score" label="评分" width="90">
           <template #default="{ row }">
-            <el-progress :percentage="Math.min(row.score * 10, 100)" :stroke-width="8" :color="row.score > 5 ? '#67c23a' : row.score > 3 ? '#e6a23c' : '#f56c6c'" />
+            <el-progress :percentage="Math.min(row.score * 10, 100)" :stroke-width="8" :color="row.score > 5 ? themeColors.good : row.score > 3 ? themeColors.warn : themeColors.bad" />
           </template>
         </el-table-column>
         <el-table-column prop="reason" label="信号原因" min-width="180" show-overflow-tooltip />
@@ -140,6 +145,14 @@ import { signalApi } from '@/api/signal'
 import { strategyApi } from '@/api/strategy'
 import { useSignalStore } from '@/stores/signal'
 import { useStrategyStore } from '@/stores/strategy'
+import { useThemeStore } from '@/stores/theme'
+
+// 语义色随主题切换：暗色下提高明度，保证与暗背景的对比度
+const themeStore = useThemeStore()
+const isDark = computed(() => themeStore.mode === 'dark')
+const themeColors = computed(() => (isDark.value
+  ? { good: '#357a5c', warn: '#e6a23c', bad: '#ff6f61' }
+  : { good: '#67c23a', warn: '#e6a23c', bad: '#f56c6c' }))
 import type { TradeSignal } from '@/api/signal'
 import { ElMessage } from 'element-plus'
 import dayjs from 'dayjs'
@@ -233,7 +246,13 @@ async function fetchSignals() {
       )
       // 合并并按日期倒序排列
       const merged = results.flat()
-      merged.sort((a, b) => (b.signal_date || '').localeCompare(a.signal_date || ''))
+      // 按时间倒序：最新记录置顶。优先用完整时间戳 created_at（同日内也能正确排序），
+      // 缺失时回退到 signal_date
+      merged.sort((a, b) => {
+        const ta = a.created_at || a.signal_date || ''
+        const tb = b.created_at || b.signal_date || ''
+        return tb.localeCompare(ta)
+      })
       signalList.value = merged
     } else {
       signalList.value = await signalApi.getSignalHistory({

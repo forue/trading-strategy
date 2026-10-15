@@ -101,8 +101,75 @@
               {{ autoOptimize ? '自动寻优' : '运行策略回放' }}
             </el-button>
             <el-tag v-if="overlayLoading && autoOptimize" size="small" type="warning">
-              寻优进度: {{ optimizationProgress }}/{{ totalCombinations }} ({{ totalCombinations > 0 ? Math.round(optimizationProgress / totalCombinations * 100) : 0 }}%)
+              寻优进度: {{ optimizationProgress }}/{{ totalCombinations }}
+              （{{ nTrials }} 次试验 + 1 次样本外验证）
+              ({{ totalCombinations > 0 ? Math.round(optimizationProgress / totalCombinations * 100) : 0 }}%)
             </el-tag>
+          </div>
+
+          <!-- 寻优结果：试验明细按试验序号倒序（最新试验置顶），分页应对大量试验 -->
+          <div v-if="optimizeResult" class="optimize-result">
+            <div class="card-header">
+              <span class="card-title">
+                寻优结果 · {{ optimizeResult.created_at }} · {{ optimizeResult.strategy_type }} ·
+                {{ optimizeResult.all_results?.length || 0 }}/{{ optimizeResult.n_trials }} 次有效试验
+              </span>
+            </div>
+            <el-row :gutter="12" class="stats-row">
+              <el-col :xs="12" :sm="6" v-for="s in optimizeSummary" :key="s.label">
+                <div class="stat-item">
+                  <span class="stat-label">{{ s.label }}</span>
+                  <span class="stat-val">{{ s.value }}</span>
+                </div>
+              </el-col>
+            </el-row>
+            <div v-if="optimizeResult.out_of_sample" class="best-params">
+              <span class="stat-label">区间切分：</span>
+              <el-tag size="small" type="info" style="margin-right: 6px">
+                训练集 {{ optimizeResult.train_range?.join(' ~ ') }}
+              </el-tag>
+              <el-tag size="small" type="warning">
+                样本外 {{ optimizeResult.oos_range?.join(' ~ ') }}（列表已拼接为完整区间）
+              </el-tag>
+            </div>
+            <div v-if="optimizeResult.best_params" class="best-params">
+              <span class="stat-label">最优参数：</span>
+              <el-tag v-for="(v, k) in optimizeResult.best_params" :key="k" size="small" style="margin: 2px 6px 2px 0">
+                {{ k }}: {{ v }}
+              </el-tag>
+            </div>
+          </div>
+
+          <!-- 历史寻优记录：后端按完成时间倒序返回，最新置顶 -->
+          <div v-if="optimizeHistory.length" class="optimize-history">
+            <div class="card-header">
+              <span class="card-title">历史寻优记录（最新在前）</span>
+            </div>
+            <div class="responsive-table">
+              <el-table :data="pagedHistory" stripe size="small" style="width: 100%">
+                <el-table-column prop="created_at" label="完成时间" width="170" />
+                <el-table-column prop="strategy_type" label="策略" width="100" />
+                <el-table-column prop="n_trials" label="试验次数" width="95" />
+                <el-table-column label="总收益" width="100">
+                  <template #default="{ row }">{{ (row.total_return * 100).toFixed(2) }}%</template>
+                </el-table-column>
+                <el-table-column label="最大回撤" width="100">
+                  <template #default="{ row }">{{ (row.max_drawdown * 100).toFixed(2) }}%</template>
+                </el-table-column>
+                <el-table-column prop="sharpe_ratio" label="夏普" width="90" />
+                <el-table-column label="训练区间" min-width="180">
+                  <template #default="{ row }">{{ row.train_range?.join(' ~ ') || '--' }}</template>
+                </el-table-column>
+              </el-table>
+              <el-pagination
+                v-model:current-page="histPage"
+                v-model:page-size="histSize"
+                :total="optimizeHistory.length"
+                :page-sizes="[10, 20]"
+                layout="total, sizes, prev, pager, next"
+                class="table-pagination"
+              />
+            </div>
           </div>
         </el-tab-pane>
       </el-tabs>
@@ -317,7 +384,9 @@
               <el-tag v-for="sig in row.buySignals" :key="sig.sector_code" size="small" type="danger" style="margin: 1px">
                 {{ sig.sector_name }}
               </el-tag>
-              <span v-if="!row.buySignals.length" style="color: var(--text-tertiary)">-</span>
+              <span v-if="!row.buySignals.length" style="color: var(--text-tertiary)">
+                {{ row.status === 'EMPTY' ? '空仓观望' : (row.status === 'HOLD' ? '持有不动' : '-') }}
+              </span>
             </template>
           </el-table-column>
           <el-table-column label="卖出" min-width="150">
@@ -330,7 +399,7 @@
           </el-table-column>
           <el-table-column prop="strategy_return" label="策略日收益" width="100" sortable>
             <template #default="{ row }">
-              <span :style="{ color: row.strategy_return >= 0 ? '#f56c6c' : '#67c23a' }">
+              <span :style="{ color: row.strategy_return >= 0 ? (isDark ? '#ff6f61' : '#f56c6c') : (isDark ? '#357a5c' : '#67c23a') }">
                 {{ row.strategy_return >= 0 ? '+' : '' }}{{ row.strategy_return.toFixed(2) }}%
               </span>
             </template>
@@ -413,7 +482,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch, onUnmounted } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onUnmounted } from 'vue'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
 import { BarChart, LineChart, ScatterChart, CandlestickChart } from 'echarts/charts'
@@ -433,6 +502,8 @@ const strategyStore = useStrategyStore()
 use([BarChart, LineChart, ScatterChart, CandlestickChart, GridComponent, TooltipComponent, LegendComponent, DataZoomComponent, MarkLineComponent, MarkPointComponent, CanvasRenderer])
 
 const themeStore = useThemeStore()
+// 供模板使用的暗色标志（各图表 option 内部另有局部同名变量，不影响）
+const isDark = computed(() => themeStore.mode === 'dark')
 
 // ============ 通用状态 ============
 const loading = ref(false)
@@ -464,6 +535,40 @@ const overlayStrategyType = ref(strategyStore.currentStrategy as string)
 const overlayCapital = ref(1000000)
 const nTrials = ref(50)
 const autoOptimize = ref(false)
+
+// ===== 寻优结果展示 =====
+const optimizeResult = ref<any>(null)
+const optimizeHistory = ref<any[]>([])
+const histPage = ref(1)
+const histSize = ref(10)
+
+// 历史记录：后端已按完成时间倒序（最新在前），此处仅分页
+const pagedHistory = computed(() => {
+  const start = (histPage.value - 1) * histSize.value
+  return optimizeHistory.value.slice(start, start + histSize.value)
+})
+
+// 最近一次寻优的关键指标摘要
+const optimizeSummary = computed(() => {
+  const r = optimizeResult.value
+  if (!r?.best_result) return []
+  const b = r.best_result
+  const oos = r.out_of_sample
+  return [
+    { label: '总收益', value: `${(b.total_return * 100).toFixed(2)}%` },
+    { label: '最大回撤', value: `${(b.max_drawdown * 100).toFixed(2)}%` },
+    { label: '夏普比率', value: `${b.sharpe_ratio}` },
+    { label: '样本外收益', value: oos ? `${(oos.total_return * 100).toFixed(2)}%` : '--' },
+  ]
+})
+
+async function loadOptimizeHistory() {
+  try {
+    optimizeHistory.value = await settingsApi.getOptimizeHistory() || []
+  } catch {
+    optimizeHistory.value = []
+  }
+}
 const optimizationProgress = ref(0)
 const totalCombinations = ref(0)
 const bestParams = ref<any>(null)
@@ -514,7 +619,10 @@ const overlayStrategyLabel = computed(() => {
 // 策略叠加 - 有信号的调仓日
 const overlaySignalDays = computed(() => {
   if (!overlayData.value?.daily_signals) return []
-  return overlayData.value.daily_signals.map(d => {
+  // 按日期倒序：最新交易日置顶
+  const days = [...overlayData.value.daily_signals]
+    .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')))
+  return days.map(d => {
     const positions = d.positions ? Object.entries(d.positions).map(([code, info]: [string, any]) => ({
       sector_code: code,
       sector_name: info.sector_name || code,
@@ -527,6 +635,9 @@ const overlaySignalDays = computed(() => {
     const cash = d.cash || 0
     return {
       date: d.date,
+      // 当日状态（EMPTY/HOLD/REBALANCE）：无信号日据此显示原因，
+      // 避免把「空仓观望/持有不动」误认为信号未生成
+      status: d.status || ((d.signals || []).length ? 'REBALANCE' : 'HOLD'),
       buySignals: (d.signals || []).filter((s: any) => s.direction === 'BUY'),
       sellSignals: (d.signals || []).filter((s: any) => s.direction === 'SELL'),
       strategy_return: d.strategy_return,
@@ -586,7 +697,9 @@ const overlayRebalanceGroups = computed(() => {
     }
     groupMap[d].trades.push(item)
   }
+  // 调仓日按日期倒序：最近的调仓显示在最前面
   return Object.values(groupMap)
+    .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')))
 })
 
 // ============ 日期禁用 ============
@@ -734,14 +847,23 @@ async function runAutoOptimization() {
     const res: any = await settingsApi.getOptimizeResult()
     const result = res?.result
     if (result && result.best_params && result.best_result) {
+      // 训练集 + 样本外拼接后展示，覆盖用户所选的完整区间。
+      // 只展示 best_result（训练集）时，样本外整段没有数据，会被误认为「信号不再生成」。
+      const oos = result.out_of_sample || null
+      const byDate = (a: any[], b: any[]) =>
+        [...(a || []), ...(b || [])].sort((x, y) =>
+          String(x.date || '').localeCompare(String(y.date || '')))
       overlayData.value = {
-        daily_signals: result.best_result.daily_signals || [],
-        nav_curve: result.best_result.nav_curve || [],
+        daily_signals: byDate(result.best_result.daily_signals, oos?.daily_signals),
+        nav_curve: byDate(result.best_result.nav_curve, oos?.nav_curve),
         summary: result.best_result,
-        position_changes: result.best_result.position_changes || [],
-        portfolio_snapshots: result.best_result.portfolio_snapshots || [],
+        position_changes: byDate(result.best_result.position_changes, oos?.position_changes),
+        portfolio_snapshots: byDate(result.best_result.portfolio_snapshots, oos?.portfolio_snapshots),
       }
       bestParams.value = result.best_params
+      // 保存完整结果用于结果面板展示，并刷新历史记录（最新置顶）
+      optimizeResult.value = result
+      await loadOptimizeHistory()
 
       const totalReturn = (result.best_result.total_return * 100).toFixed(2)
       const maxDrawdown = (result.best_result.max_drawdown * 100).toFixed(2)
@@ -1034,11 +1156,29 @@ watch(() => strategyStore.currentStrategy, (v) => {
   overlayStrategyType.value = v
 })
 
+// 进入页面即加载历史寻优记录（后端已按时间倒序，最新在前）
+onMounted(() => { loadOptimizeHistory() })
+
 onUnmounted(() => { abortOptimize.value = true; stopAutoPlay() })
 init()
 </script>
 
 <style lang="scss" scoped>
+/* 寻优结果面板 */
+.optimize-result,
+.optimize-history {
+  margin-top: 16px;
+}
+.best-params {
+  margin: 8px 0 12px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.table-pagination {
+  margin-top: 10px;
+  justify-content: flex-end;
+}
 .replay-controls {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 0;
 }

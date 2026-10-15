@@ -163,7 +163,47 @@ runStrategyOverlay(data: {
   getOptimizeProgress(): Promise<{ active: boolean; completed: number; total: number; best_return: number; best_sharpe: number }> {
     return request.get('/strategy/data/replay/optimize-progress')
   },
-  getOptimizeResult(): Promise<{ status: string; result: { best_params: any; best_result: any; all_results: any[] } | null }> {
+  getOptimizeResult(): Promise<{ status: string; result: OptimizeResult | null }> {
     return request.get('/strategy/data/replay/strategy-optimize/result')
   },
+  getOptimizeHistory(): Promise<OptimizeHistoryItem[]> {
+    return request.get('/strategy/data/replay/strategy-optimize/history')
+  },
+}
+
+/** 单次寻优的试验结果（每个 trial 一条） */
+export interface OptimizeTrial {
+  trial: number
+  params?: Record<string, any>
+  total_return: number
+  max_drawdown: number
+  sharpe_ratio: number
+  win_rate?: number
+  trade_count?: number
+  objective_score?: number
+}
+
+/** 最近一次寻优的完整结果 */
+export interface OptimizeResult {
+  created_at: string
+  strategy_type: string
+  n_trials: number
+  best_params: Record<string, any>
+  best_result: any
+  all_results: OptimizeTrial[]
+  out_of_sample: any | null
+  train_range: string[]
+  oos_range: string[]
+}
+
+/** 历史寻优记录摘要（后端按完成时间倒序返回） */
+export interface OptimizeHistoryItem {
+  created_at: string
+  strategy_type: string
+  n_trials: number
+  trial_count: number
+  sharpe_ratio: number
+  total_return: number
+  max_drawdown: number
+  train_range: string[]
 }
