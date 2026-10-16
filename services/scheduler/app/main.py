@@ -180,6 +180,7 @@ async def job_collect_data():
         return
 
     logger.info(">>> 定时任务触发: 数据采集")
+    _job_last_success["collect_data"] = datetime.now()
     try:
         for attempt in range(3):
             try:
@@ -295,6 +296,7 @@ async def job_calculate_strategy():
         logger.info(">>> 今日策略已计算，跳过备用触发")
         return
     logger.info(">>> 定时任务触发: 策略计算")
+    _job_last_success["calculate_strategy"] = datetime.now()
     try:
         async with httpx.AsyncClient(timeout=120) as client:
             calculated = await _trigger_strategy_calculation(client)
@@ -320,6 +322,7 @@ async def job_recalc_nav():
         logger.info(">>> 今日非交易日，跳过净值重算")
         return
     logger.info(">>> 定时任务触发: 收盘盯市 + 净值重算")
+    _job_last_success["recalc_nav"] = datetime.now()
     trade_date = datetime.now().strftime("%Y-%m-%d")
     try:
         async with httpx.AsyncClient(timeout=60) as client:
@@ -493,6 +496,26 @@ WATCHDOG_INTERVAL_SECONDS = 300
 _last_watchdog_tick: datetime | None = None
 
 
+# 各定时任务上次成功执行时间（job_id → 时间）
+# APScheduler 的 next_run 计算与任务执行相互独立：executor 卡死时 next_run 仍照常推进，
+# health 看起来完全正常，必须依靠此记录才能发现「任务从未执行」。
+_job_last_success: dict[str, datetime] = {}
+
+# 每日任务的计划时间，用于「今日应执行但未执行」检测
+_DAILY_JOB_SCHEDULE = {
+    "collect_data": (15, 30),
+    "calculate_strategy": (15, 35),
+    "recalc_nav": (15, 40),
+}
+
+_SERVICE_STARTED_AT = datetime.now()
+
+
+def _job_executed_listener(event):
+    """记录任务成功执行时间，供看门狗停滞检测与健康检查使用"""
+    _job_last_success[event.job_id] = datetime.now()
+
+
 async def _scheduler_watchdog():
     """定时器漂移看门狗：宿主休眠唤醒后容器单调时钟滞后于墙钟，
     会让 APScheduler 的等待时长被拉长、任务越过 misfire 窗口被丢弃。
@@ -500,6 +523,7 @@ async def _scheduler_watchdog():
     """
     global _last_watchdog_tick
     now = datetime.now()
+    _job_last_success["scheduler_watchdog"] = now
     if _last_watchdog_tick is not None:
         gap = (now - _last_watchdog_tick).total_seconds()
         if gap > WATCHDOG_INTERVAL_SECONDS * 3:
@@ -507,6 +531,19 @@ async def _scheduler_watchdog():
                 f"检测到调度器时钟漂移: 看门狗实际间隔 {gap:.0f}s，"
                 f"预期 {WATCHDOG_INTERVAL_SECONDS}s，宿主休眠导致定时器停滞"
             )
+    # 任务停滞检测：工作日已过计划时间但任务今日无执行记录时明确告警。
+    # 覆盖 executor 卡死/调度循环停滞——此类故障不会触发任何 APScheduler 事件
+    # （不报错也不错 misfire），仅表现为任务从不执行而 next_run 照常推进。
+    # 服务启动 30 分钟内不检测，避免重启后误报。
+    since_start = (now - _SERVICE_STARTED_AT).total_seconds()
+    if now.weekday() < 5 and (now.hour, now.minute) >= (16, 0) and since_start > 1800:
+        for jid, (h, m) in _DAILY_JOB_SCHEDULE.items():
+            last = _job_last_success.get(jid)
+            if last is None or last.date() < now.date():
+                logger.error(
+                    f"任务停滞告警: {jid} 今日未执行（上次执行: {last or '无记录'}），"
+                    f"调度可能已停滞，请检查 backend-scheduler 或执行 docker compose restart backend-scheduler"
+                )
     _last_watchdog_tick = now
 
 
@@ -584,6 +621,7 @@ def setup_scheduler():
         misfire_grace_time=86400, max_instances=1,
     )
 
+    scheduler.add_listener(_job_executed_listener, EVENT_JOB_EXECUTED)
     scheduler.add_listener(_job_error_listener, EVENT_JOB_ERROR)
     scheduler.add_listener(_job_missed_listener, EVENT_JOB_MISSED)
 
@@ -653,6 +691,7 @@ async def health_check():
             "id": job.id,
             "name": job.name,
             "next_run": str(job.next_run_time) if job.next_run_time else None,
+            "last_run": str(_job_last_success[job.id]) if job.id in _job_last_success else None,
         })
     status = "healthy" if is_running else "degraded"
     return {
