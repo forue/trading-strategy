@@ -56,6 +56,12 @@ _CACHE_TTL = {
     "bdi": 3600,              # 1小时
     "market_index": 60,       # 1分钟（大盘指数实时）
     "market_breadth": 120,    # 2分钟（涨跌统计）
+    "overseas": 120,          # 2分钟（外盘商品/汇率快照）
+    "futures": 180,           # 3分钟（期货日频，盘中变动慢）
+    "bond": 3600,             # 1小时（国债收益率日频）
+    "valuation": 3600,        # 1小时（估值日频）
+    "sentiment": 300,         # 5分钟（涨停/龙虎榜）
+    "fundflow": 300,          # 5分钟（资金结构）
 }
 
 
@@ -736,6 +742,486 @@ async def _fetch_market_breadth_from_legu() -> dict:
     except Exception as e:
         logger.warning(f"乐咕涨跌家数获取失败: {e}")
     return {}
+
+
+# ============================================================
+# 外盘商品与人民币汇率
+# ============================================================
+
+# 新浪外盘期货：0 最新价, 4 最高, 5 最低, 6 时间, 7 昨收, 8 开盘, 12 日期, 13 名称
+_SINA_HF_SYMBOLS = {
+    "hf_CL": "WTI原油", "hf_OIL": "布伦特原油", "hf_GC": "COMEX黄金",
+    "hf_SI": "COMEX白银", "hf_HG": "COMEX铜", "hf_NG": "美国天然气",
+    "hf_CHA50CFD": "富时A50期货",
+}
+
+
+def _safe_float(v, default: float = 0.0) -> float:
+    """安全转 float，NaN/None/非法值返回 default"""
+    try:
+        f = float(v)
+        return default if f != f else f
+    except (TypeError, ValueError):
+        return default
+
+
+async def _fetch_sina_hf() -> list[dict]:
+    """新浪外盘期货实时快照"""
+    import re
+
+    import httpx
+    url = f"https://hq.sinajs.cn/list={','.join(_SINA_HF_SYMBOLS)}"
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url, headers={
+                "Referer": "https://finance.sina.com.cn/", "User-Agent": "Mozilla/5.0",
+            })
+        if resp.status_code != 200:
+            return []
+        out = []
+        for line in resp.text.strip().split("\n"):
+            m = re.match(r'var hq_str_(\w+)="(.*)"', line.strip())
+            if not m:
+                continue
+            code, vals = m.group(1), m.group(2).split(",")
+            last, prev = _safe_float(vals[0]), _safe_float(vals[7]) if len(vals) > 7 else 0.0
+            if last <= 0 or prev <= 0:
+                continue
+            out.append({
+                "name": vals[13] if len(vals) > 13 and vals[13] else _SINA_HF_SYMBOLS.get(code, code),
+                "price": round(last, 3),
+                "change_pct": round((last - prev) / prev * 100, 2),
+                "date": vals[12] if len(vals) > 12 else "",
+            })
+        return out
+    except Exception as e:
+        logger.warning(f"新浪外盘期货获取失败: {e}")
+        return []
+
+
+async def _fetch_cny_midprice(days: int = 25) -> dict:
+    """人民币兑美元中间价趋势（避开外汇实时接口的字段歧义）"""
+    import akshare as ak
+    from datetime import datetime, timedelta
+
+    end = datetime.now().strftime("%Y%m%d")
+    start = (datetime.now() - timedelta(days=days * 2)).strftime("%Y%m%d")
+    try:
+        df = await _run_with_timeout(
+            ak.currency_boc_sina, symbol="美元", start_date=start, end_date=end, timeout=20
+        )
+    except Exception as e:
+        logger.warning(f"人民币中间价获取失败: {e}")
+        return {"error": str(e)}
+    rows = [r for r in _df_to_records(df) if _safe_float(r.get("央行中间价")) > 0]
+    if not rows:
+        return {"error": "人民币中间价为空"}
+
+    level = _safe_float(rows[-1].get("央行中间价")) / 100  # 源数据 671.80 → 6.718
+
+    def _chg(n: int):
+        if len(rows) <= n:
+            return None
+        base = _safe_float(rows[-1 - n].get("央行中间价")) / 100
+        return round((level - base) / base * 100, 2) if base > 0 else None
+
+    return {
+        "date": str(rows[-1].get("日期"))[:10],
+        "usd_cny_midprice": round(level, 4),
+        "change_pct_5d": _chg(5),
+        "change_pct_20d": _chg(20),
+        "note": "数值下降=人民币升值",
+    }
+
+
+async def get_overseas_commodity_fx() -> dict:
+    """外盘商品（原油/贵金属/铜/天然气/A50期货）与人民币中间价快照"""
+    cached = _get_cached("overseas_commodity_fx", "overseas")
+    if cached is not None:
+        return cached
+
+    commodities, cny = await asyncio.gather(_fetch_sina_hf(), _fetch_cny_midprice())
+    if not commodities:
+        expired = _get_expired_cache("overseas_commodity_fx")
+        if expired:
+            expired["_stale"] = True
+            return expired
+        return {"error": "外盘商品数据暂不可用", "cny": cny}
+
+    result = {"commodities": commodities, "cny": cny}
+    a50 = next((c for c in commodities if "A50" in c["name"]), None)
+    if a50:
+        result["foreign_sentiment_proxy"] = f"富时A50期货 {a50['change_pct']:+.2f}%（隔夜外盘对A股的开盘指引）"
+    _set_cached("overseas_commodity_fx", result)
+    return result
+
+
+# ============================================================
+# 股指期货基差
+# ============================================================
+
+_FUT_SPOT_MAP = [
+    ("IF0", "沪深300", "sh000300"),
+    ("IH0", "上证50", "sh000016"),
+    ("IC0", "中证500", "sh000905"),
+    ("IM0", "中证1000", "sh000852"),
+]
+
+
+async def _fetch_sina_index_quotes(codes: list[str]) -> dict:
+    """新浪宽基指数快照: 1 今开, 2 昨收, 3 最新"""
+    import re
+
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"https://hq.sinajs.cn/list={','.join(codes)}",
+                headers={"Referer": "https://finance.sina.com.cn/", "User-Agent": "Mozilla/5.0"},
+            )
+        out = {}
+        for line in resp.text.strip().split("\n"):
+            m = re.match(r'var hq_str_(\w+)="(.*)"', line.strip())
+            if not m:
+                continue
+            vals = m.group(2).split(",")
+            if len(vals) < 4:
+                continue
+            out[m.group(1)] = {"last": _safe_float(vals[3]), "prev_close": _safe_float(vals[2])}
+        return out
+    except Exception as e:
+        logger.warning(f"新浪宽基指数获取失败: {e}")
+        return {}
+
+
+async def get_index_futures_basis() -> dict:
+    """四大股指期货主力基差（期货-现货），贴水收窄/转升水反映机构预期改善"""
+    cached = _get_cached("index_futures_basis", "futures")
+    if cached is not None:
+        return cached
+
+    import akshare as ak
+    tasks = [_fetch_sina_index_quotes([c for _, _, c in _FUT_SPOT_MAP])]
+    tasks += [_run_with_timeout(ak.futures_main_sina, symbol=code, timeout=15) for code, _, _ in _FUT_SPOT_MAP]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    spot = results[0] if isinstance(results[0], dict) else {}
+
+    rows = []
+    for (code, name, spot_code), df in zip(_FUT_SPOT_MAP, results[1:]):
+        if isinstance(df, Exception) or df is None or len(df) < 2:
+            continue
+        last, prev = df.iloc[-1], df.iloc[-2]
+        fut, fut_prev = _safe_float(last["收盘价"]), _safe_float(prev["收盘价"])
+        oi, oi_prev = _safe_float(last["持仓量"]), _safe_float(prev["持仓量"])
+        s = spot.get(spot_code) or {}
+        if fut <= 0 or s.get("last", 0) <= 0:
+            continue
+        basis_pct = (fut - s["last"]) / s["last"] * 100
+        prev_basis = ((fut_prev - s["prev_close"]) / s["prev_close"] * 100
+                      if fut_prev > 0 and s.get("prev_close", 0) > 0 else None)
+        rows.append({
+            "contract": code,
+            "target": name,
+            "date": str(last["日期"])[:10],
+            "futures_close": round(fut, 2),
+            "spot_close": round(s["last"], 2),
+            "basis": round(fut - s["last"], 2),
+            "basis_pct": round(basis_pct, 2),
+            "basis_pct_prev": round(prev_basis, 2) if prev_basis is not None else None,
+            "basis_change": round(basis_pct - prev_basis, 2) if prev_basis is not None else None,
+            "state": "贴水" if basis_pct < 0 else "升水",
+            "oi_change_pct": round((oi - oi_prev) / oi_prev * 100, 2) if oi_prev > 0 else None,
+        })
+
+    if not rows:
+        return {"error": "股指期货基差数据暂不可用"}
+    result = {
+        "rows": rows,
+        "note": "基差=期货-现货，负为贴水；basis_change>0 表示贴水收窄（预期改善），<0 表示贴水加深（对冲/看空压力上升）",
+    }
+    _set_cached("index_futures_basis", result)
+    return result
+
+
+# ============================================================
+# 国债收益率曲线（期限利差 + 中美利差）
+# ============================================================
+
+async def get_bond_curve_summary(days: int = 40) -> dict:
+    """中债 2/5/10/30Y、10Y-2Y 期限利差、中美 10Y 利差及 20 日变化"""
+    cache_key = f"bond_curve_{days}"
+    cached = _get_cached(cache_key, "bond")
+    if cached is not None:
+        return cached
+
+    import akshare as ak
+    from datetime import datetime, timedelta
+
+    start = (datetime.now() - timedelta(days=days * 2)).strftime("%Y%m%d")
+    try:
+        df = await _run_with_timeout(ak.bond_zh_us_rate, start_date=start, timeout=25)
+    except Exception as e:
+        logger.error(f"获取国债收益率失败: {e}")
+        return {"error": str(e)}
+    rows = [r for r in _df_to_records(df) if _safe_float(r.get("中国国债收益率10年")) > 0]
+    if not rows:
+        return {"error": "国债收益率数据为空"}
+
+    latest = rows[-1]
+    # 中债变化用真正的 20 个交易日前做基准；中美利差需美债同时有值（美债序列早期缺失）
+    base_cn = rows[-21] if len(rows) > 21 else rows[0]
+    base_both = None
+    for r in reversed(rows[-26:-1] or rows[:-1]):
+        if _safe_float(r.get("中国国债收益率10年")) > 0 and _safe_float(r.get("美国国债收益率10年")) > 0:
+            base_both = r
+            break
+
+    def _bp(key: str, base: dict | None):
+        if not base:
+            return None
+        cur, old = _safe_float(latest.get(key)), _safe_float(base.get(key))
+        return round((cur - old) * 100, 1) if cur > 0 and old > 0 else None
+
+    cn10, us10 = _safe_float(latest.get("中国国债收益率10年")), _safe_float(latest.get("美国国债收益率10年"))
+    cn10_old = _safe_float((base_both or {}).get("中国国债收益率10年"))
+    us10_old = _safe_float((base_both or {}).get("美国国债收益率10年"))
+    spread_now = (cn10 - us10) if cn10 > 0 and us10 > 0 else None
+    spread_old = (cn10_old - us10_old) if cn10_old > 0 and us10_old > 0 else None
+
+    result = {
+        "as_of": str(latest.get("日期"))[:10],
+        "china": {
+            "2y": _safe_float(latest.get("中国国债收益率2年")),
+            "5y": _safe_float(latest.get("中国国债收益率5年")),
+            "10y": cn10,
+            "30y": _safe_float(latest.get("中国国债收益率30年")),
+            "curve_10y_2y": _safe_float(latest.get("中国国债收益率10年-2年")),
+            "10y_change_bp_20d": _bp("中国国债收益率10年", base_cn),
+        },
+        "us": {
+            "2y": _safe_float(latest.get("美国国债收益率2年")),
+            "10y": us10,
+            "30y": _safe_float(latest.get("美国国债收益率30年")),
+            "10y_change_bp_since": _bp("美国国债收益率10年", base_both),
+            "change_base_date": str(base_both.get("日期"))[:10] if base_both else None,
+        },
+        "cn_us_10y_spread": round(spread_now, 2) if spread_now is not None else None,
+        "cn_us_10y_spread_change_bp_since": (
+            round((spread_now - spread_old) * 100, 1)
+            if spread_now is not None and spread_old is not None else None
+        ),
+        "note": "收益率下行(bp为负)=债市走强/宽松预期；中美利差负值扩大通常对应人民币贬值压力与外资流出"
+                "；美债变化以 change_base_date 为基准（美债序列存在缺失，非固定20日）",
+    }
+    _set_cached(cache_key, result)
+    return result
+
+
+# ============================================================
+# 涨停/炸板/龙虎榜（情绪温度）
+# ============================================================
+
+async def get_limit_up_stats(date_str: str) -> dict:
+    """涨停家数、炸板率、连板梯队、行业分布与龙虎榜机构动向（date_str: YYYY-MM-DD）"""
+    cache_key = f"limit_up_{date_str}"
+    cached = _get_cached(cache_key, "sentiment")
+    if cached is not None:
+        return cached
+
+    import akshare as ak
+    from collections import Counter
+
+    compact = date_str.replace("-", "")
+    zt_df, zb_df, lhb_df = await asyncio.gather(
+        _run_with_timeout(ak.stock_zt_pool_em, date=compact, timeout=25),
+        _run_with_timeout(ak.stock_zt_pool_zbgc_em, date=compact, timeout=25),
+        _run_with_timeout(ak.stock_lhb_detail_em, start_date=compact, end_date=compact, timeout=25),
+        return_exceptions=True,
+    )
+
+    zt_rows = [] if isinstance(zt_df, Exception) or zt_df is None else _df_to_records(zt_df)
+    if not zt_rows:
+        return {"date": date_str, "unavailable": True,
+                "error": f"{date_str} 无涨停池数据（非交易日或数据尚未生成）"}
+
+    broken = 0 if isinstance(zb_df, Exception) or zb_df is None else len(zb_df)
+    boards = Counter(int(_safe_float(r.get("连板数"), 1)) for r in zt_rows)
+    industry = Counter(str(r.get("所属行业", "")).strip() for r in zt_rows if r.get("所属行业"))
+
+    result = {
+        "date": date_str,
+        "limit_up": len(zt_rows),
+        "broken": broken,
+        "broken_rate": round(broken / max(len(zt_rows) + broken, 1) * 100, 1),
+        "max_boards": max(boards) if boards else 0,
+        "board_distribution": {f"{k}板": v for k, v in sorted(boards.items(), reverse=True)},
+        "top_industries": [{"industry": k, "count": v} for k, v in industry.most_common(5)],
+    }
+    if not isinstance(lhb_df, Exception) and lhb_df is not None and len(lhb_df) > 0:
+        lhb_rows = _df_to_records(lhb_df)
+        inst = [r for r in lhb_rows if "机构" in str(r.get("解读", ""))]
+        # 同一只票在龙虎榜有多条解读行，按名称去重取最大净买额
+        best: dict[str, dict] = {}
+        for r in inst:
+            name = str(r.get("名称", ""))
+            net = _safe_float(r.get("龙虎榜净买额"))
+            if net > best.get(name, {}).get("net", -1e18):
+                best[name] = {"net": net, "change_pct": _safe_float(r.get("涨跌幅"))}
+        ranked = sorted(best.items(), key=lambda kv: kv[1]["net"], reverse=True)
+        result["lhb"] = {
+            "listed_count": len(lhb_rows),
+            "institution_count": len(inst),
+            "top_inst_net_buy_yi": [
+                {"name": name, "net_buy_yi": round(item["net"] / 1e8, 2),
+                 "change_pct": round(item["change_pct"], 2)}
+                for name, item in ranked[:3] if item["net"] > 0
+            ],
+        }
+    _set_cached(cache_key, result)
+    return result
+
+
+# ============================================================
+# 全市场资金结构（超大单/大单/中单/小单）
+# ============================================================
+
+async def get_market_fund_structure(days: int = 5) -> dict:
+    """按单笔金额拆分的全市场净流入，区分机构(超大单/大单)与散户(中单/小单)"""
+    cache_key = f"fund_structure_{days}"
+    cached = _get_cached(cache_key, "fundflow")
+    if cached is not None:
+        return cached
+
+    import akshare as ak
+    try:
+        df = await _run_with_timeout(ak.stock_market_fund_flow, timeout=20)
+    except Exception as e:
+        logger.error(f"获取全市场资金结构失败: {e}")
+        return {"error": str(e)}
+    rows = _df_to_records(df)
+    if not rows:
+        return {"error": "全市场资金流数据为空"}
+
+    daily = [{
+        "date": str(r.get("日期"))[:10],
+        "index_change_pct": round(_safe_float(r.get("上证-涨跌幅")), 2),
+        "main_yi": round(_safe_float(r.get("主力净流入-净额")) / 1e8, 1),
+        "xl_yi": round(_safe_float(r.get("超大单净流入-净额")) / 1e8, 1),
+        "l_yi": round(_safe_float(r.get("大单净流入-净额")) / 1e8, 1),
+        "m_yi": round(_safe_float(r.get("中单净流入-净额")) / 1e8, 1),
+        "s_yi": round(_safe_float(r.get("小单净流入-净额")) / 1e8, 1),
+    } for r in rows[-days:]]
+
+    today = daily[-1]
+    result = {
+        "daily": daily,
+        f"sum_{len(daily)}d": {k: round(sum(d[k] for d in daily), 1)
+                               for k in ("main_yi", "xl_yi", "l_yi", "m_yi", "s_yi")},
+        "today_structure": ("机构进场/散户离场" if today["xl_yi"] > 0 > today["s_yi"]
+                            else "散户接盘/机构离场" if today["s_yi"] > 0 > today["xl_yi"] else "同步"),
+        "note": "xl=超大单(机构)、s=小单(散户)；单位亿元",
+    }
+    _set_cached(cache_key, result)
+    return result
+
+
+# ============================================================
+# 全市场估值分位
+# ============================================================
+
+async def get_full_market_valuation() -> dict:
+    """全 A 估值分位（中位/平均 PE-TTM）+ 沪深300/中证500 市盈率"""
+    cached = _get_cached("full_market_valuation", "valuation")
+    if cached is not None:
+        return cached
+
+    import akshare as ak
+    ttm_df, pe300_df, pe500_df = await asyncio.gather(
+        _run_with_timeout(ak.stock_a_ttm_lyr, timeout=25),
+        _run_with_timeout(ak.stock_index_pe_lg, symbol="沪深300", timeout=25),
+        _run_with_timeout(ak.stock_index_pe_lg, symbol="中证500", timeout=25),
+        return_exceptions=True,
+    )
+
+    result: dict = {}
+    if not isinstance(ttm_df, Exception) and ttm_df is not None and len(ttm_df) > 0:
+        rows = _df_to_records(ttm_df)
+        latest, base = rows[-1], (rows[-21] if len(rows) > 21 else rows[0])
+        cur, old = _safe_float(latest.get("middlePETTM")), _safe_float(base.get("middlePETTM"))
+        result["all_a"] = {
+            "date": str(latest.get("date"))[:10],
+            "median_pe_ttm": round(cur, 2),
+            "average_pe_ttm": round(_safe_float(latest.get("averagePETTM")), 2),
+            "pe_change_pct_20d": round((cur - old) / old * 100, 1) if old > 0 else None,
+            "quantile_all_history": round(_safe_float(latest.get("quantileInAllHistoryMiddlePeTtm")) * 100, 1),
+            "quantile_10y": round(_safe_float(latest.get("quantileInRecent10YearsMiddlePeTtm")) * 100, 1),
+        }
+    for key, df in (("csi300", pe300_df), ("csi500", pe500_df)):
+        if isinstance(df, Exception) or df is None or len(df) == 0:
+            continue
+        last = _df_to_records(df)[-1]
+        result[key] = {
+            "date": str(last.get("日期"))[:10],
+            "index_close": round(_safe_float(last.get("指数")), 2),
+            "pe_ttm": round(_safe_float(last.get("滚动市盈率")), 2),
+            "pe_lyr": round(_safe_float(last.get("静态市盈率")), 2),
+        }
+    if not result:
+        return {"error": "全市场估值数据暂不可用"}
+    result["note"] = "quantile 为历史分位(%)，越低越便宜；仅反映相对自身历史的位置"
+    _set_cached("full_market_valuation", result)
+    return result
+
+
+# ============================================================
+# 国内商品期货主力趋势
+# ============================================================
+
+_CN_FUTURES = {"SC0": "原油", "RB0": "螺纹钢", "I0": "铁矿石", "CU0": "沪铜"}
+
+
+async def get_commodity_futures_trend(days: int = 20) -> dict:
+    """国内商品期货主力连续涨跌与持仓变化，用于周期板块（石化/钢铁/有色）景气跟踪"""
+    cache_key = f"commodity_trend_{days}"
+    cached = _get_cached(cache_key, "futures")
+    if cached is not None:
+        return cached
+
+    import akshare as ak
+    results = await asyncio.gather(
+        *[_run_with_timeout(ak.futures_main_sina, symbol=code, timeout=15) for code in _CN_FUTURES],
+        return_exceptions=True,
+    )
+
+    rows = []
+    for (code, name), df in zip(_CN_FUTURES.items(), results):
+        if isinstance(df, Exception) or df is None or len(df) < 2:
+            continue
+        closes = [_safe_float(v) for v in df["收盘价"].tolist() if _safe_float(v) > 0]
+        ois = [_safe_float(v) for v in df["持仓量"].tolist()]
+        if len(closes) < 2:
+            continue
+
+        def _pct(n: int):
+            return round((closes[-1] - closes[-1 - n]) / closes[-1 - n] * 100, 2) if len(closes) > n else None
+
+        oi_now = ois[-1] if ois else 0
+        oi_5 = ois[-6] if len(ois) > 5 else 0
+        rows.append({
+            "symbol": code,
+            "name": name,
+            "date": str(df.iloc[-1]["日期"])[:10],
+            "close": round(closes[-1], 2),
+            "chg_1d": _pct(1),
+            "chg_5d": _pct(5),
+            "chg_20d": _pct(min(days, 20)),
+            "oi_change_pct_5d": round((oi_now - oi_5) / oi_5 * 100, 2) if oi_5 > 0 else None,
+        })
+    if not rows:
+        return {"error": "商品期货数据暂不可用"}
+    result = {"rows": rows, "note": "主力连续合约；持仓量放大+价格上涨通常表示趋势获得增量资金确认"}
+    _set_cached(cache_key, result)
+    return result
 
 
 # ============================================================

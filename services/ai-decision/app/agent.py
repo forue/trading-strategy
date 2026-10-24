@@ -45,8 +45,69 @@ def _get_context_budget(model: str) -> int:
     return 4000
 
 
+def _message_tokens(msg: dict) -> int:
+    """估算单条消息的 token 数（含 tool_calls 定义）"""
+    tokens = _estimate_tokens(msg.get("content", ""))
+    if "tool_calls" in msg:
+        tokens += _estimate_tokens(json.dumps(msg.get("tool_calls", [])))
+    return tokens
+
+
+def _group_middle_messages(middle: list[dict]) -> list[list[dict]]:
+    """把中间消息分组：assistant(tool_calls) 与它的 tool 结果同组，其余消息各成一组
+
+    截断必须整组进行。只丢掉 assistant 会让它的所有 tool 结果变成孤儿被清理掉，
+    模型会彻底失去数据，进而重复调用工具直到超时。
+    """
+    groups: list[list[dict]] = []
+    current: list[dict] = []
+    in_tool_group = False
+    for msg in middle:
+        if "tool_calls" in msg:
+            if current:
+                groups.append(current)
+            current = [msg]
+            in_tool_group = True
+        elif msg.get("role") == "tool" and in_tool_group:
+            current.append(msg)
+        else:
+            if current:
+                groups.append(current)
+                current = []
+            in_tool_group = False
+            groups.append([msg])
+    if current:
+        groups.append(current)
+    return groups
+
+
+def _fit_tool_group(group: list[dict], budget: int) -> list[dict]:
+    """单组放不下时：保留 assistant 与尽量新的 tool 结果，并同步裁剪 assistant 的 tool_calls
+
+    只丢 tool 结果会让 API 因"tool_call 缺少响应"报 400，所以必须同步裁剪 tool_calls 列表。
+    """
+    head = group[0]
+    kept_tools: list[dict] = []
+    used = _message_tokens(head)
+    for msg in reversed(group[1:]):
+        tokens = _message_tokens(msg)
+        if used + tokens > budget:
+            break
+        kept_tools.insert(0, msg)
+        used += tokens
+    if not kept_tools:
+        return []
+
+    kept_ids = {m.get("tool_call_id", "") for m in kept_tools}
+    new_head = dict(head)
+    new_head["tool_calls"] = [tc for tc in head.get("tool_calls", []) if tc.get("id", "") in kept_ids]
+    if not new_head["tool_calls"]:
+        return []
+    return [new_head] + kept_tools
+
+
 def _truncate_messages(messages: list[dict], max_tokens: int = 4000) -> list[dict]:
-    """按 token 数截断消息历史，保留 system 和最后一条 user 消息"""
+    """按 token 数截断消息历史，保留 system 和最后一条消息"""
     if len(messages) <= 2:
         return messages
 
@@ -58,32 +119,31 @@ def _truncate_messages(messages: list[dict], max_tokens: int = 4000) -> list[dic
     user_tokens = _estimate_tokens(last_user_msg.get("content", ""))
     budget = max_tokens - system_tokens - user_tokens - 500
 
-    kept = []
+    kept: list[dict] = []
     current_tokens = 0
-    for msg in reversed(middle):
-        msg_tokens = _estimate_tokens(msg.get("content", ""))
-        if "tool_calls" in msg:
-            msg_tokens += _estimate_tokens(json.dumps(msg.get("tool_calls", [])))
-        if current_tokens + msg_tokens > budget:
+    for group in reversed(_group_middle_messages(middle)):
+        group_tokens = sum(_message_tokens(m) for m in group)
+        if group_tokens > budget:
+            # 单组就超预算：只保留该组内放得下的部分数据，好过整组数据全丢
+            trimmed = _fit_tool_group(group, budget) if "tool_calls" in group[0] else []
+            if not trimmed:
+                break
+            group = trimmed
+            group_tokens = sum(_message_tokens(m) for m in group)
+        if current_tokens + group_tokens > budget:
             break
-        kept.insert(0, msg)
-        current_tokens += msg_tokens
+        kept = group + kept
+        current_tokens += group_tokens
+        if current_tokens >= budget:
+            break
 
-    # 清理孤零零的 tool 横向：如果 tool 消息对应的 assistant(tool_calls) 被截掉了，必须删掉 tool
-    valid_tc_ids = set()
-    for msg in kept:
-        if "tool_calls" in msg:
-            for tc in msg["tool_calls"]:
-                valid_tc_ids.add(tc.get("id", ""))
-    cleaned = []
-    for msg in kept:
-        if msg.get("role") == "tool":
-            tc_id = msg.get("tool_call_id", "")
-            if tc_id and tc_id not in valid_tc_ids:
-                continue  # 孤立 tool 消息，丢弃
-        cleaned.append(msg)
+    # 兜底：清理没有对应 assistant(tool_calls) 的孤立 tool 消息
+    return [system_msg] + _remove_orphaned_tool_messages(kept) + [last_user_msg]
 
-    return [system_msg] + cleaned + [last_user_msg]
+
+def _tool_call_key(tc) -> str:
+    """工具调用去重键（工具名 + 参数）"""
+    return f"{tc.name}:{json.dumps(tc.arguments, sort_keys=True)}"
 
 
 def _remove_orphaned_tool_messages(messages: list[dict]) -> list[dict]:
@@ -168,13 +228,6 @@ def _summarize_tool_result(tool_name: str, result: dict, max_chars: int = 2000) 
         summary["total_records"] = len(records)
         return json.dumps(summary, ensure_ascii=False, default=str)
 
-    if tool_name in ("get_bond_spread",) and "records" in result:
-        records = result["records"]
-        summary = {k: v for k, v in result.items() if k != "records"}
-        summary["records"] = records[-10:]
-        summary["total_records"] = len(records)
-        return json.dumps(summary, ensure_ascii=False, default=str)
-
     if tool_name in ("get_margin_data",):
         # 融资融券每市只保留最近5天
         summary = {}
@@ -230,42 +283,66 @@ AGENT_SYSTEM_PROMPT = """你是一个专业的A股量化投资分析师，擅长
 - get_us_macro: 美国宏观指标（CPI/PMI/非农/失业率/美联储利率）
 - get_market_news: 市场新闻资讯（东方财富/同花顺/新浪/财联社）
 - get_bdi: BDI波罗的海干散货指数（大宗商品/航运领先指标）
-- get_bond_spread: 中美国债收益率对比（中美利差）
+- get_bond_spread: 国债收益率曲线摘要（中债期限利差、中美10Y利差及20日变化）
 - get_margin_data: 融资融券数据（杠杆资金动向）
 
-## 工作流程
-1. **数据收集**：根据问题类型调用工具获取数据
-   - 市场分析 → get_market_overview + get_market_breadth + get_global_market（并行）
-   - 板块分析 → 先 list_sectors 查代码（支持逗号分隔多关键词），再用 analyze_sector(sector_codes: [...]) 批量分析
-   - 信号分析 → get_today_signals → get_signal_history
-   - 板块对比 → compare_sectors + get_factor_analysis
-   - 轮动分析 → get_sector_rotation + get_fund_flow_distribution
-   - 宏观分析 → get_china_macro + get_us_macro + get_bond_spread + get_bdi
-   - 情绪分析 → get_market_news + get_margin_data + get_global_market
-2. **深度分析**：结合资金流向、技术指标、估值水平、市场情绪、宏观环境综合判断
-3. **结论输出**：给出明确结论、信心度(0-10)、风险因素、可操作建议
+跨市场同步指标:
+- get_overseas_commodity_fx: 外盘商品（WTI/布伦特原油、COMEX金银铜、天然气、富时A50期货）与人民币中间价
+- get_commodity_futures_trend: 国内商品期货主力（原油/螺纹钢/铁矿石/沪铜）1/5/20日涨跌与持仓变化
+- get_index_futures_basis: IF/IH/IC/IM股指期货主力基差与升贴水变化
+
+情绪与结构:
+- get_limit_up_stats: 涨停家数、炸板率、连板梯队、涨停行业分布、龙虎榜机构净买
+- get_market_fund_structure: 超大单/大单/中单/小单逐日净流入（区分机构与散户）
+- get_full_market_valuation: 全A中位PE及历史分位、沪深300/中证500市盈率
+
+## 工作流程（工具调用最多 4 轮）
+工具结果会整段回传，每多一轮都要重发全部历史，**轮次是成本的主要来源**，因此：
+
+1. **第 1 轮：一次并行取全**。在**同一条消息**里并行调用本题需要的全部核心工具（4-6 个），
+   禁止"一次只调 1 个、分多轮慢慢问"。
+2. **第 2-4 轮：只补关键缺口**。每轮补 1-3 个工具，只补与结论直接相关的维度
+   （例如缺"外资情绪"就补 get_overseas_commodity_fx，缺"情绪温度"就补 get_limit_up_stats），
+   不重复调用已成功返回过的工具或同类工具。
+3. 补充数据够用就**直接作答**，不要为凑满轮次继续取数；取不到的数据在"数据说明"里一句话声明。
+   （系统对取数轮次有硬上限，超出后工具不会再执行，只会要求你立即作答）
+
+### 各问题类型的取数清单（核心必取 + 按需补 1-3 项）
+| 问题类型 | 核心（必取） | 常用补充（按需选 1-3 个，用不上就不要调） |
+|---|---|---|
+| 市场整体/大盘 | get_market_overview + get_market_breadth + get_fund_flow_distribution | get_market_fund_structure、get_limit_up_stats、get_full_market_valuation、get_index_futures_basis |
+| 板块分析 | list_sectors → analyze_sector（批量） | get_technical_indicators、get_sector_valuation、get_factor_analysis、get_commodity_futures_trend |
+| 板块对比 | compare_sectors + get_factor_analysis | get_capital_flow_trend |
+| 信号/持仓 | get_today_signals + get_current_positions | check_portfolio_risk、get_signal_history |
+| 轮动/资金 | get_sector_rotation + get_fund_flow_distribution | get_market_heatmap、get_market_fund_structure |
+| 情绪/宏观 | get_market_news + get_margin_data | get_limit_up_stats、get_bond_spread、get_china_macro、get_us_macro |
+| 外围冲击/外资 | get_global_market + get_overseas_commodity_fx | get_index_futures_basis、get_bond_spread |
+
+同一维度的多个工具（如 heatmap 与 sector_ranking、资金分布与资金结构）按需二选一，不要都调。
 
 ## 示例
-用户: 分析一下半导体板块
-正确步骤:
-  1. list_sectors(keyword: "半导体") → 获取代码
-  2. analyze_sector(sector_codes: [返回的code]) → 获取基础数据
-  3. get_technical_indicators(sector_code: 返回的code) → 技术面
-  4. get_sector_valuation(sector_code: 返回的code) → 估值
-  5. 综合以上数据给出分析结论
-
 用户: 今天市场怎么样
-正确步骤:
-  1. 同时调用 get_market_overview + get_market_breadth + get_global_market（并行）
-  2. 综合三个数据源给出市场概览
+正确做法（一轮取全 + 一轮作答）：
+  1. 同一条消息并行调用：get_market_overview + get_market_breadth + get_fund_flow_distribution
+     + get_market_heatmap + get_margin_data
+  2. 拿到结果后按"回答格式"直接输出，不再追加工具调用
+
+错误做法：先调 1 个 → 看结果 → 再调 1 个，分 4、5 轮凑数据。
+
+用户: 分析一下半导体板块
+正确做法：
+  1. list_sectors(keyword: "半导体") → 获取代码
+  2. 拿到代码后并行调用：analyze_sector + get_technical_indicators + get_sector_valuation
 
 ## 回答格式
-每个分析回答必须包含以下结构：
+正文控制在 **1200-2000 字**，数据用表格承载，不要把工具返回的原文数字整段重抄。必须包含：
 1. **摘要**：一句话结论 + 信心度(0-10)
-2. **数据**：引用工具返回的具体数字（板块名、涨跌幅、资金流、评分）
-3. **分析**：多维度分析（技术面、资金面、估值、情绪）
-4. **风险**：当前主要风险因素
-5. **建议**：可操作的具体建议
+2. **数据**：按维度汇总关键数字（板块名、涨跌幅、资金流、评分），标注来源工具与数据日期
+3. **分析**：**至少 2 条"交叉验证/背离"结论**（如 涨但主力净流出、放量滞涨、资金集中度低=无主线、
+   两融变化与指数背离），不能只是数据平铺
+4. **风险**：3-5 条，按影响程度排序
+5. **建议**：可操作，必须写明**具体触发条件**（如"主力净流出转净流入且 top5 集中度回到 15% 以上再考虑加仓"）
+6. **数据说明**（仅在有缺失时）：一句话说明未取到或不可用的维度及其对结论的影响
 
 ## 规则
 
@@ -279,6 +356,8 @@ AGENT_SYSTEM_PROMPT = """你是一个专业的A股量化投资分析师，擅长
 - 工具返回 `_partial_failures` 时，在分析中明确说明哪些数据源不可用
 
 ### 分析规则
+- **成本控制**：单轮并行取数，总工具调用不超过 12 个、轮次不超过 4 轮；取不到的维度用"数据说明"声明，
+  不要为凑数据反复重试或重复调用同类工具
 - 引用数据时必须标注来源工具名（如"根据 get_sector_ranking 返回的数据"）
 - 数据不足时明确说"当前数据不足以判断"，不要编造
 - 不确定的结论标注"（低置信度）"
@@ -301,9 +380,10 @@ class ReActAgent:
     """ReAct Agent - 实现工具调用循环"""
 
     MAX_ITERATIONS = 10
-    MAX_TOOL_CALLS = 30  # 总工具调用次数上限
+    MAX_TOOL_CALLS = 30    # 总工具调用次数上限（真正控成本的是下面的轮次上限与工具参数收敛）
+    MAX_TOOL_ROUNDS = 4    # 带工具调用的轮次上限：每轮都要重发全部历史，是 token 成本的主要来源
     TOOL_TIMEOUT = 30    # 单个工具超时(秒)
-    TOTAL_TIMEOUT = 240  # 总超时(秒)
+    TOTAL_TIMEOUT = 360  # 总超时(秒)，随轮次上限同步放宽
 
     def __init__(self, llm_client: BaseLLMClient, tool_executor: MCPToolExecutor):
         self.llm = llm_client
@@ -364,9 +444,18 @@ class ReActAgent:
         messages.append({"role": "user", "content": user_message})
 
         total_tool_calls = 0
+        tool_rounds = 0
+        force_final = False  # 取数轮次用完后置 True：不再给工具定义，强制模型收口
         total_tokens = 0
-        seen_tool_calls = set()  # 全局去重：跟踪所有唯一调用
+        # 本次回答内去重：call_key -> 首次真实结果，重复调用直接复用
+        tool_call_results: dict[str, str] = {}
+        used_tools: set[str] = set()
         start_time = _time.monotonic()
+
+        # 是否发送原生工具定义：Ollama 走实际探测结果，云端模型走模型名推断
+        self._supports_tools = await self.llm.supports_native_tools()
+        # 上下文截断预算：Ollama 用实际 num_ctx，云端模型按模型名推断
+        ctx_budget = await self.llm.context_budget() or _get_context_budget(self.llm.model)
 
         for iteration in range(self.MAX_ITERATIONS):
             # 超时检查
@@ -379,13 +468,17 @@ class ReActAgent:
             # 注入迭代感知：帮助 agent 知道剩余预算
             if iteration > 0:
                 remaining_tools = self.MAX_TOOL_CALLS - total_tool_calls
-                iteration_msg = f"[系统: 当前第 {iteration + 1}/{self.MAX_ITERATIONS} 轮，剩余工具调用 {remaining_tools} 次]"
+                iteration_msg = f"[系统: 当前第 {iteration + 1}/{self.MAX_ITERATIONS} 轮，剩余工具调用 {remaining_tools} 次"
+                if used_tools:
+                    # 换参数重复调用同一工具同样会把结果再塞一遍上下文，明确告知模型别重复取
+                    iteration_msg += f"；已取数: {', '.join(sorted(used_tools))}，不要重复调用这些工具（换参数也一样重复占用上下文）"
+                iteration_msg += "]"
                 messages.append({"role": "system", "content": iteration_msg})
 
-            # 支持原生 function calling 的模型每轮都发送工具定义
-            tools_to_use = MCP_TOOLS if self._supports_tools else None
+            # 支持原生 function calling 的模型每轮都发送工具定义；强制收口时不再给工具
+            tools_to_use = MCP_TOOLS if (self._supports_tools and not force_final) else None
 
-            messages = _truncate_messages(messages, max_tokens=_get_context_budget(self.llm.model))
+            messages = _truncate_messages(messages, max_tokens=ctx_budget)
             logger.info(f"发送消息数量: {len(messages)}, 工具: {tools_to_use is not None}")
 
             # LLM 调用，指数退避重试最多 3 次
@@ -410,7 +503,17 @@ class ReActAgent:
                         yield {"type": "content", "data": f"AI 服务暂时不可用: {str(e)}"}
                         return
 
+            if response.tool_calls and force_final:
+                # 已强制收口却仍要调工具：有正文就当结论输出，否则提示收敛问题
+                if response.content:
+                    yield {"type": "content", "data": response.content}
+                    return
+                yield {"type": "content", "data": "取数轮次已达上限，请缩小问题范围后重试。"}
+                return
+
             if response.tool_calls:
+                tool_rounds += 1
+
                 # 构建 assistant 消息，包含 reasoning_content（DeepSeek API 要求）
                 assistant_msg = {
                     "role": "assistant",
@@ -424,6 +527,17 @@ class ReActAgent:
                 assistant_msg["reasoning_content"] = response.thinking or ""
                 messages.append(assistant_msg)
 
+                if tool_rounds > self.MAX_TOOL_ROUNDS:
+                    # 轮次是成本大头（每轮重发全量历史）：超限时不再执行工具，下一轮不带工具定义强制收口
+                    logger.warning(f"已达取数轮次上限 {self.MAX_TOOL_ROUNDS}，本轮 {len(response.tool_calls)} 个工具不再执行")
+                    for tc in response.tool_calls:
+                        messages.append({"role": "tool", "tool_call_id": tc.id,
+                                         "content": '{"info": "取数轮次已用完，请基于已有数据作答"}'})
+                    messages.append({"role": "system",
+                                     "content": "[系统: 取数轮次已用完，禁止再调用工具，请立即按回答格式给出完整分析]"})
+                    force_final = True
+                    continue
+
                 tool_feedbacks = []  # 收集反馈，所有 tool 消息之后再注入
 
                 # 分离需要执行的和需要跳过的调用
@@ -436,20 +550,21 @@ class ReActAgent:
                         yield {"type": "content", "data": "已达到工具调用次数上限，请简化问题。"}
                         return
 
-                    call_key = f"{tc.name}:{json.dumps(tc.arguments, sort_keys=True)}"
-                    if call_key in seen_tool_calls:
+                    call_key = _tool_call_key(tc)
+                    cached = tool_call_results.get(call_key)
+                    if cached is not None:
+                        # 复用首次结果：只回填"已跳过"占位文案，会让模型在上下文被截断后拿不到数据
                         skipped += 1
-                        yield {"type": "tool_result", "data": {"name": tc.name, "result": '{"info": "相同调用已跳过，使用之前的查询结果"}'}}
-                        messages.append({"role": "tool", "tool_call_id": tc.id, "content": '{"info": "相同调用已跳过，使用之前结果"}'})
+                        yield {"type": "tool_result", "data": {"name": tc.name, "result": cached}}
+                        messages.append({"role": "tool", "tool_call_id": tc.id, "content": cached})
                         continue
-                    seen_tool_calls.add(call_key)
-                    exec_tasks.append(tc)
+                    exec_tasks.append((tc, call_key))
 
                 logger.info(f"迭代 {iteration + 1}: LLM 请求 {len(response.tool_calls)} 个工具，执行 {len(exec_tasks)} 个，跳过 {skipped} 个重复，累计 {total_tool_calls}/{self.MAX_TOOL_CALLS}")
 
                 # 并行执行所有工具调用
                 if exec_tasks:
-                    for tc in exec_tasks:
+                    for tc, _ in exec_tasks:
                         logger.info(f"  → {tc.name}({json.dumps(tc.arguments, ensure_ascii=False)[:120]})")
                         yield {"type": "tool_call", "data": {"name": tc.name, "arguments": tc.arguments}}
 
@@ -465,10 +580,12 @@ class ReActAgent:
                             result = {"error": str(e)}
                         return tc, result
 
-                    results = await asyncio.gather(*[_run_one(tc) for tc in exec_tasks])
+                    results = await asyncio.gather(*[_run_one(tc) for tc, _ in exec_tasks])
 
                     for tc, result in results:
                         result_str = _summarize_tool_result(tc.name, result)
+                        tool_call_results[_tool_call_key(tc)] = result_str
+                        used_tools.add(tc.name)
                         has_error = isinstance(result, dict) and "error" in result
                         logger.info(f"  ← {tc.name} → {'ERROR: ' + str(result.get('error',''))[:80] if has_error else f'{len(result_str)} chars'}")
                         yield {"type": "tool_result", "data": {"name": tc.name, "result": result_str}}

@@ -97,6 +97,23 @@ def _model_supports_function_calling(model: str) -> bool:
 _ollama_capability_cache: dict[str, dict] = {}
 
 
+def _ollama_error(resp) -> str:
+    """提取 Ollama 错误详情：HTTP 状态码 + 响应体 error 字段
+
+    Ollama 把真实原因放在响应体里（如模型参数非法），只报状态码无法定位问题。
+    """
+    try:
+        detail = resp.json().get("error", "")
+    except Exception:
+        detail = ""
+    if not detail:
+        detail = resp.text[:300]
+    msg = f"Ollama HTTP {resp.status_code}: {detail}"
+    if "Value must be between" in detail:
+        msg += "（模型 Modelfile 中存在非法 PARAMETER，用 `ollama show <model> --modelfile` 检查并重建模型）"
+    return msg
+
+
 def _parse_think_tags(text: str) -> tuple[str, str]:
     """从文本中解析 <think>...</think> 标签，返回 (thinking, content)"""
     match = re.search(r'<think>(.*?)</think>', text, re.DOTALL)
@@ -182,6 +199,14 @@ class BaseLLMClient(ABC):
     @abstractmethod
     async def health_check(self, **kwargs) -> bool:
         pass
+
+    async def supports_native_tools(self) -> bool:
+        """是否支持原生 function calling（云端模型按模型名推断，Ollama 覆盖为实际探测结果）"""
+        return _model_supports_function_calling(self.model)
+
+    async def context_budget(self) -> int:
+        """历史消息可用的 token 预算，0 表示未知（Agent 回退到模型名推断）"""
+        return 0
 
 
 class OpenAIClient(BaseLLMClient):
@@ -348,11 +373,42 @@ class OllamaClient(BaseLLMClient):
         # 模型能力标记，-1 表示未探测
         self._native_tools: int = -1   # -1=未知, 0=不支持, 1=支持
         self._native_think: int = -1   # -1=未知, 0=不支持, 1=支持
+        self._context_length: int = 0  # 运行时上下文长度(num_ctx)，0=未知
+
+    async def _fetch_model_info(self) -> dict | None:
+        """通过 /api/show 读取模型信息（capabilities / num_ctx）
+
+        比发送探测请求更快，且不受模型加载耗时和生成超时影响；失败返回 None，由调用方回退到请求探测。
+        """
+        try:
+            resp = await self._client.post(
+                f"{self.base_url}/api/show",
+                json={"model": self.model},
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            logger.warning(f"获取模型 {self.model} 信息失败 (HTTP {resp.status_code}): {resp.text[:200]}")
+        except Exception as e:
+            logger.warning(f"获取模型 {self.model} 信息失败: {e}")
+        return None
+
+    @staticmethod
+    def _parse_context_length(info: dict) -> int:
+        """从 /api/show 响应解析运行时上下文长度 num_ctx"""
+        params = info.get("parameters")
+        if isinstance(params, str):
+            match = re.search(r"num_ctx\s+(\d+)", params)
+            if match:
+                return int(match.group(1))
+        elif isinstance(params, dict) and str(params.get("num_ctx", "")).isdigit():
+            return int(params["num_ctx"])
+        return 0
 
     async def _probe_capabilities(self) -> None:
         """探测模型是否支持原生 tools 和 think 参数
 
-        通过向 Ollama 发送最小请求来检测:
+        优先使用 /api/show 返回的 capabilities；接口不可用时回退到最小请求探测:
         1. 先测试 think 参数
         2. 再测试 tools 参数
         结果缓存到 _ollama_capability_cache
@@ -362,9 +418,26 @@ class OllamaClient(BaseLLMClient):
             caps = _ollama_capability_cache[cache_key]
             self._native_tools = 1 if caps["native_tools"] else 0
             self._native_think = 1 if caps["native_think"] else 0
+            self._context_length = caps.get("context_length", 0)
             return
 
         logger.info(f"探测 Ollama 模型能力: {self.model}")
+
+        # 优先使用 /api/show 声明的能力
+        info = await self._fetch_model_info()
+        if info is not None:
+            self._context_length = self._parse_context_length(info)
+            caps = info.get("capabilities")
+            if caps is not None:
+                self._native_tools = 1 if "tools" in caps else 0
+                self._native_think = 1 if "thinking" in caps else 0
+                logger.info(f"模型 {self.model} 能力: {caps}, num_ctx: {self._context_length}")
+                _ollama_capability_cache[cache_key] = {
+                    "native_tools": self._native_tools == 1,
+                    "native_think": self._native_think == 1,
+                    "context_length": self._context_length,
+                }
+                return
 
         # 测试 think 参数
         try:
@@ -384,7 +457,7 @@ class OllamaClient(BaseLLMClient):
                 logger.info(f"模型 {self.model} 支持原生 think")
             else:
                 self._native_think = 0
-                logger.info(f"模型 {self.model} 不支持原生 think (HTTP {resp.status_code})")
+                logger.info(f"模型 {self.model} 不支持原生 think (HTTP {resp.status_code}): {resp.text[:200]}")
         except Exception as e:
             self._native_think = 0
             logger.warning(f"模型 {self.model} think 探测失败: {e}")
@@ -414,7 +487,7 @@ class OllamaClient(BaseLLMClient):
                 logger.info(f"模型 {self.model} 支持原生 tools")
             else:
                 self._native_tools = 0
-                logger.info(f"模型 {self.model} 不支持原生 tools (HTTP {resp.status_code})")
+                logger.info(f"模型 {self.model} 不支持原生 tools (HTTP {resp.status_code}): {resp.text[:200]}")
         except Exception as e:
             self._native_tools = 0
             logger.warning(f"模型 {self.model} tools 探测失败: {e}")
@@ -429,12 +502,48 @@ class OllamaClient(BaseLLMClient):
         if self._native_tools == -1:
             await self._probe_capabilities()
 
+    async def supports_native_tools(self) -> bool:
+        """是否支持原生 function calling（以探测结果为准）"""
+        await self._ensure_probed()
+        return self._native_tools == 1
+
+    async def context_budget(self) -> int:
+        """历史消息可用的 token 预算：取实际 num_ctx 的一半，留出工具定义与输出空间"""
+        await self._ensure_probed()
+        return int(self._context_length * 0.5) if self._context_length else 0
+
+    @staticmethod
+    def _normalize_messages(messages: list[dict]) -> list[dict]:
+        """把 OpenAI 格式的消息转换成 Ollama 格式
+
+        Ollama 要求 tool_calls.function.arguments 是对象，OpenAI 格式是 JSON 字符串，
+        直接透传字符串会被 Ollama 以 400 拒绝（Value looks like object...）。
+        """
+        normalized = []
+        for msg in messages:
+            raw_calls = msg.get("tool_calls")
+            if not raw_calls:
+                normalized.append(msg)
+                continue
+            calls = []
+            for tc in raw_calls:
+                func = dict(tc.get("function", {}))
+                args = func.get("arguments")
+                if isinstance(args, str):
+                    try:
+                        func["arguments"] = json.loads(args) if args.strip() else {}
+                    except json.JSONDecodeError:
+                        func["arguments"] = {}
+                calls.append({**tc, "function": func})
+            normalized.append({**msg, "tool_calls": calls})
+        return normalized
+
     def _build_payload(self, messages: list[dict], temperature: float, max_tokens: int,
                        stream: bool, tools: list = None) -> dict:
         """根据模型能力构建请求 payload"""
         payload = {
             "model": self.model,
-            "messages": messages,
+            "messages": self._normalize_messages(messages),
             "stream": stream,
             "options": {"temperature": temperature, "num_predict": max_tokens},
         }
@@ -452,14 +561,14 @@ class OllamaClient(BaseLLMClient):
         try:
             payload = self._build_payload(messages, temperature, max_tokens, stream=False, tools=tools)
             resp = await self._client.post(f"{self.base_url}/api/chat", json=payload)
-            if resp.status_code == 500:
-                raise Exception(f"Ollama 服务错误: {resp.text[:200]}")
-            resp.raise_for_status()
+            if resp.status_code >= 400:
+                raise Exception(_ollama_error(resp))
             data = resp.json()
 
             msg = data.get("message", {})
             raw_content = msg.get("content", "")
-            if not raw_content:
+            # 思考型模型只输出 thinking / tool_calls 时 content 为空，属于正常响应
+            if not raw_content and not msg.get("thinking") and not msg.get("tool_calls"):
                 raise Exception("Ollama 返回空内容")
 
             # 提取 thinking: 优先用原生字段，否则从 content 中解析 <think> 标签
@@ -504,7 +613,9 @@ class OllamaClient(BaseLLMClient):
                 f"{self.base_url}/api/chat",
                 json=payload,
             ) as resp:
-                resp.raise_for_status()
+                if resp.status_code >= 400:
+                    yield {"type": "error", "data": _ollama_error(resp)}
+                    return
                 # 用于累积 content 以便解析 <think> 标签（非原生 think 模式）
                 content_buffer = ""
                 in_think = False

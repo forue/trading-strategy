@@ -53,6 +53,7 @@ def _clamp_days(val, default=10, maximum=60) -> int:
 # 交易日历缓存（模块级，跨请求复用）
 _trade_dates_cache: list[str] = []
 _trade_dates_cache_date: str = ""  # 缓存日期 YYYY-MM-DD
+_trade_dates_lock = asyncio.Lock()  # 串行化交易日历刷新，避免并发重复请求
 
 
 def _get_latest_trading_day() -> str:
@@ -78,22 +79,35 @@ def _get_latest_trading_day() -> str:
     return target.strftime("%Y-%m-%d")
 
 
+def _prev_trade_date(date_str: str) -> str:
+    """返回给定日期的前一个交易日（依赖交易日历缓存），不可用时返回空串"""
+    compact = (date_str or "").replace("-", "")
+    past = [d for d in _trade_dates_cache if d < compact]
+    if not past:
+        return ""
+    return f"{past[-1][:4]}-{past[-1][4:6]}-{past[-1][6:]}"
+
+
 async def _refresh_trade_dates_cache(client: httpx.AsyncClient, data_collector_url: str):
     """异步刷新交易日历缓存"""
     global _trade_dates_cache, _trade_dates_cache_date
     today_str = datetime.now().strftime("%Y-%m-%d")
     if _trade_dates_cache_date == today_str and _trade_dates_cache:
         return
-    try:
-        resp = await client.get(f"{data_collector_url}/trade-dates?days=365", timeout=10)
-        if resp.status_code == 200:
-            dates = resp.json().get("data", [])
-            if dates and len(dates) > 10:
-                _trade_dates_cache = dates
-                _trade_dates_cache_date = today_str
-                logger.info(f"交易日历缓存已刷新: {len(dates)} 个交易日")
-    except Exception as e:
-        logger.warning(f"刷新交易日历缓存失败: {e}")
+    # 并发调用（首轮多个工具并行）时会重复拉取，这里串行化并二次校验
+    async with _trade_dates_lock:
+        if _trade_dates_cache_date == today_str and _trade_dates_cache:
+            return
+        try:
+            resp = await client.get(f"{data_collector_url}/trade-dates?days=365", timeout=10)
+            if resp.status_code == 200:
+                dates = resp.json().get("data", [])
+                if dates and len(dates) > 10:
+                    _trade_dates_cache = dates
+                    _trade_dates_cache_date = today_str
+                    logger.info(f"交易日历缓存已刷新: {len(dates)} 个交易日")
+        except Exception as e:
+            logger.warning(f"刷新交易日历缓存失败: {e}")
 
 
 # 工具定义（OpenAI function calling 格式）
@@ -122,7 +136,7 @@ MCP_TOOLS = [
                 "properties": {
                     "date": {"type": "string", "description": "日期 YYYY-MM-DD，默认今天"},
                     "metric": {"type": "string", "enum": ["change", "inflow"], "description": "排序指标：change=涨跌幅，inflow=资金流入"},
-                    "limit": {"type": "integer", "description": "返回数量，默认10"}
+                    "limit": {"type": "integer", "description": "返回条数，默认10，上限15；条数越大占用上下文越多，够用即可"}
                 },
                 "required": []
             }
@@ -278,7 +292,7 @@ MCP_TOOLS = [
                         "items": {"type": "string"},
                         "description": "板块代码列表，如 ['SW801780', 'SW801730']"
                     },
-                    "days": {"type": "integer", "description": "对比天数，默认5"}
+                    "days": {"type": "integer", "description": "对比天数，默认5；超过10天返回会明显变大，一般不需要"}
                 },
                 "required": ["sector_codes"]
             }
@@ -293,7 +307,7 @@ MCP_TOOLS = [
                 "type": "object",
                 "properties": {
                     "sector_code": {"type": "string", "description": "板块代码，不传则分析全部板块"},
-                    "days": {"type": "integer", "description": "分析天数，默认10"}
+                    "days": {"type": "integer", "description": "分析天数，默认10；不要超过10，返回随天数线性增大"}
                 },
                 "required": []
             }
@@ -372,7 +386,7 @@ MCP_TOOLS = [
                 "type": "object",
                 "properties": {
                     "date": {"type": "string", "description": "日期 YYYY-MM-DD，默认今天"},
-                    "top_n": {"type": "integer", "description": "返回资金流入/流出最多的前N个板块，默认10"}
+                    "top_n": {"type": "integer", "description": "返回资金流入/流出最多的前N个板块，默认10，上限10"}
                 },
                 "required": []
             }
@@ -474,14 +488,8 @@ MCP_TOOLS = [
         "type": "function",
         "function": {
             "name": "get_bond_spread",
-            "description": "获取中美国债收益率对比数据，分析中美利差变化对资金流动的影响",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "days": {"type": "integer", "description": "查询天数，默认30"}
-                },
-                "required": []
-            }
+            "description": "获取国债收益率曲线摘要：中债2/5/10/30年、10Y-2Y期限利差、中美10年利差及其近20日变化（bp）。用于判断宽松预期、人民币贬值压力与外资流向",
+            "parameters": {"type": "object", "properties": {}, "required": []}
         }
     },
     {
@@ -507,6 +515,73 @@ MCP_TOOLS = [
                 "type": "object",
                 "properties": {
                     "strategy_type": {"type": "string", "description": "策略类型: AGGRESSIVE/MODERATE/CONSERVATIVE，默认 MODERATE"}
+                },
+                "required": []
+            }
+        }
+    },
+    # --- 跨市场与情绪补充工具 ---
+    {
+        "type": "function",
+        "function": {
+            "name": "get_overseas_commodity_fx",
+            "description": "获取外盘商品与汇率快照：WTI原油、布伦特原油、COMEX黄金/白银/铜、美国天然气、富时A50期货涨跌幅，以及人民币兑美元中间价近5/20日变化。用于判断输入型通胀、大宗商品对周期板块的成本冲击，以及外资情绪（A50期货+汇率）",
+            "parameters": {"type": "object", "properties": {}, "required": []}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_index_futures_basis",
+            "description": "获取IF/IH/IC/IM四大股指期货主力基差（期货-现货）、基差率及其日变化、持仓量变化。贴水收窄或转升水反映机构预期改善，贴水加深反映对冲/看空压力上升",
+            "parameters": {"type": "object", "properties": {}, "required": []}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_limit_up_stats",
+            "description": "获取涨停家数、炸板数与炸板率、连板梯队分布、涨停行业集中度、龙虎榜机构净买入榜，用于判断市场情绪温度与题材集中度",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "date": {"type": "string", "description": "日期 YYYY-MM-DD，默认最近交易日"}
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_market_fund_structure",
+            "description": "获取全市场资金结构：主力/超大单/大单/中单/小单逐日净流入（亿元），区分机构与散户方向，可识别机构承接或散户接盘",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "days": {"type": "integer", "description": "返回天数，默认5，最多10"}
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_full_market_valuation",
+            "description": "获取全A股中位/平均PE-TTM及其历史分位（全历史、近10年）、20日变化，以及沪深300/中证500的PE，用于判断市场整体估值位置",
+            "parameters": {"type": "object", "properties": {}, "required": []}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_commodity_futures_trend",
+            "description": "获取国内商品期货主力连续（原油、螺纹钢、铁矿石、沪铜）最新价、1/5/20日涨跌幅与持仓变化，用于石化/钢铁/有色等周期板块的景气与成本跟踪",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "days": {"type": "integer", "description": "趋势窗口天数，默认20"}
                 },
                 "required": []
             }
@@ -638,6 +713,10 @@ def _calc_boll(closes: list[float], period: int = 20, num_std: float = 2.0) -> d
 class MCPToolExecutor:
     """MCP 工具执行器"""
 
+    # 体积型参数上限：工具结果会整段进上下文，限制返回条数以控制 token。
+    # 只钳制"条数"类参数，days 等时间窗口参数不动（会改变分析语义）
+    _PARAM_MAX = {"limit": 15, "top_n": 10}
+
     def __init__(self, strategy_url: str, data_collector_url: str, signal_url: str):
         self.strategy_url = strategy_url.rstrip("/")
         self.data_collector_url = data_collector_url.rstrip("/")
@@ -713,9 +792,23 @@ class MCPToolExecutor:
             return {"error": data["error"]}
         return {"error": default}
 
+    @classmethod
+    def _clamp_arguments(cls, tool_name: str, arguments: dict) -> dict:
+        """钳制体积型参数，避免工具返回过大结果撑爆上下文"""
+        for key, max_value in cls._PARAM_MAX.items():
+            value = arguments.get(key)
+            if isinstance(value, int) and value > max_value:
+                logger.info(f"{tool_name} 参数 {key}={value} 超过上限 {max_value}，已收敛")
+                arguments[key] = max_value
+        return arguments
+
     async def execute(self, tool_name: str, arguments: dict) -> dict:
         """执行工具调用"""
         try:
+            arguments = self._clamp_arguments(tool_name, dict(arguments))
+            # 必须在解析日期之前刷新交易日历：_sanitize_date/_get_latest_trading_day
+            # 依赖缓存，跨交易日后缓存仍停留在上一次刷新日，会把"最近交易日"解析成前一天
+            await self._ensure_trade_dates()
             # 先尝试带 _ 前缀（旧工具），再尝试不带前缀（新工具）
             handler = getattr(self, f"_{tool_name}", None) or getattr(self, tool_name, None)
             if handler and callable(handler):
@@ -804,7 +897,6 @@ class MCPToolExecutor:
                 result["note"] = f"{date} 无数据，已回退到最近交易日 {actual_date}"
         else:
             partial_failures.append("板块数据")
-            partial_failures.append("板块数据")
 
         if partial_failures:
             result["_partial_failures"] = partial_failures
@@ -833,7 +925,10 @@ class MCPToolExecutor:
                             "sector_name": s.get("sector_name", ""),
                             "change_pct": round(s.get("index_change_pct", 0), 2),
                             "main_inflow_yi": round(s.get("main_net_inflow", 0) / 1e8, 2),
-                            "north_inflow_yi": round(s.get("north_net_inflow", 0) / 1e8, 2),
+                            # 北向净买额自 2024-08-19 起停止披露，采集侧已不再写入该字段。
+                            # 缺失时直接省略，避免模型把占位 0 当成真实的"零流入"
+                            **({"north_inflow_yi": round(s["north_net_inflow"] / 1e8, 2)}
+                               if s.get("north_net_inflow") else {}),
                         }
                         for i, s in enumerate(sectors[:limit])
                     ]
@@ -870,7 +965,8 @@ class MCPToolExecutor:
                         "date": actual_date,
                         "change_pct": round(_safe_float(s.get("index_change_pct")), 2),
                         "main_inflow_yi": round(_safe_float(s.get("main_net_inflow")) / 1e8, 2),
-                        "north_inflow_yi": round(_safe_float(s.get("north_net_inflow")) / 1e8, 2),
+                        **({"north_inflow_yi": round(_safe_float(s["north_net_inflow"]) / 1e8, 2)}
+                           if s.get("north_net_inflow") else {}),
                         "turnover_yi": round(_safe_float(s.get("turnover")) / 1e8, 2),
                         "high": _safe_float(s.get("index_high")),
                         "low": _safe_float(s.get("index_low")),
@@ -928,6 +1024,15 @@ class MCPToolExecutor:
             )
             if data and data.get("data"):
                 sectors = data["data"]
+                # 沪深港通自 2024-08-19 起停止披露北向成交净买额，采集任务已停用，
+                # north_net_inflow 恒缺失。这里必须显式报不可用，不能聚合出 0 供模型当真实数据用
+                if not any(s.get("north_net_inflow") for s in sectors):
+                    return {
+                        "date": actual_date,
+                        "unavailable": True,
+                        "error": "北向资金数据不可用：沪深港通自 2024-08-19 起停止披露北向成交净买额，"
+                                 "采集任务已停用，分析中不要使用外资维度",
+                    }
                 total = sum(s.get("north_net_inflow", 0) for s in sectors) / 1e8
                 top_in = sorted(sectors, key=lambda x: x.get("north_net_inflow", 0), reverse=True)[:5]
                 top_out = sorted(sectors, key=lambda x: x.get("north_net_inflow", 0))[:5]
@@ -1237,7 +1342,8 @@ class MCPToolExecutor:
             result = {
                 "sector_code": sector_code,
                 "sector_name": records[-1].get("sector_name", sector_code) if records else "",
-                "latest_date": records[-1].get("date", "") if records else "",
+                # sector-data 只返回 _time，没有 date 字段，直接取 date 会得到空串
+                "latest_date": ((records[-1].get("date") or records[-1].get("_time", ""))[:10] if records else ""),
                 "latest_close": closes[-1],
             }
 
@@ -1688,16 +1794,57 @@ class MCPToolExecutor:
         return await get_bdi_index()
 
     async def get_bond_spread(self, args: dict) -> dict:
-        """中美国债收益率对比"""
-        from .external_data import get_china_us_bond_spread
-        days = _clamp_days(args.get("days"), default=30, maximum=90)
-        return await get_china_us_bond_spread(days=days)
+        """国债收益率曲线摘要（期限利差 + 中美利差）"""
+        from .external_data import get_bond_curve_summary
+        return await get_bond_curve_summary(days=40)
 
     async def get_margin_data(self, args: dict) -> dict:
         """融资融券数据"""
         from .external_data import get_margin_trading_data
         days = _clamp_days(args.get("days"), default=10, maximum=60)
         return await get_margin_trading_data(days=days)
+
+    async def get_overseas_commodity_fx(self, args: dict) -> dict:
+        """外盘商品与人民币汇率快照"""
+        from .external_data import get_overseas_commodity_fx
+        return await get_overseas_commodity_fx()
+
+    async def get_index_futures_basis(self, args: dict) -> dict:
+        """股指期货主力基差"""
+        from .external_data import get_index_futures_basis
+        return await get_index_futures_basis()
+
+    async def get_limit_up_stats(self, args: dict) -> dict:
+        """涨停/炸板/连板梯队与龙虎榜机构动向"""
+        from .external_data import get_limit_up_stats as _limit_up_stats
+        date = _sanitize_date(args.get("date"))
+        result = await _limit_up_stats(date)
+        if result.get("unavailable"):
+            # 当日数据未生成（如盘后较早时段）时回退到上一交易日
+            prev = _prev_trade_date(date)
+            if prev:
+                retry = await _limit_up_stats(prev)
+                if not retry.get("unavailable"):
+                    retry["note"] = f"{date} 无涨停数据，已回退到最近交易日 {prev}"
+                    return retry
+        return result
+
+    async def get_market_fund_structure(self, args: dict) -> dict:
+        """全市场资金结构（超大单/大单/中单/小单）"""
+        from .external_data import get_market_fund_structure
+        days = _clamp_days(args.get("days"), default=5, maximum=10)
+        return await get_market_fund_structure(days=days)
+
+    async def get_full_market_valuation(self, args: dict) -> dict:
+        """全市场估值分位"""
+        from .external_data import get_full_market_valuation
+        return await get_full_market_valuation()
+
+    async def get_commodity_futures_trend(self, args: dict) -> dict:
+        """国内商品期货主力趋势"""
+        from .external_data import get_commodity_futures_trend
+        days = _clamp_days(args.get("days"), default=20, maximum=60)
+        return await get_commodity_futures_trend(days=days)
 
 
 # ============================================================

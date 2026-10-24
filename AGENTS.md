@@ -85,8 +85,8 @@ pytest tests/
 ## AI Decision Service
 
 Key files in `services/ai-decision/app/`:
-- `agent.py` — ReAct Agent with tool calling loop (max 5 iterations, 10 tool calls, 120s timeout)
-- `tools.py` — MCPToolExecutor with 7 financial tools, auto-fallback for non-trading days
+- `agent.py` — ReAct Agent with tool calling loop (4 tool rounds / 30 tool calls / 360s total timeout)
+- `tools.py` — MCPToolExecutor with 34 market/sector/fund/overseas/macro tools, auto-fallback for non-trading days
 - `model_adapter.py` — LLM adapter (OpenAI/Ollama), Ollama capability probing, `<think>` tag parsing
 - `chat_manager.py` — Conversation persistence with thinking field
 - `provider_manager.py` — Dynamic provider CRUD
