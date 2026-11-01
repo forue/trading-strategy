@@ -4,8 +4,10 @@
 """
 import time
 import asyncio
+import random
 from typing import Any
 from functools import lru_cache
+from contextlib import asynccontextmanager
 from loguru import logger
 
 
@@ -20,10 +22,74 @@ async def _run_with_timeout(func, *args, timeout: int = 20, **kwargs):
         raise TimeoutError(f"AkShare 调用超时({timeout}s)")
 
 
-# 东方财富 push2 行情集群在部分网络环境会被整体重置连接（RemoteDisconnected），
-# 失败一次要耗费数秒且短期内不会自愈，因此记录熔断窗口，窗口内直接使用备用数据源
+# ============================================================
+# 东方财富 push2 集群访问控制：串行 + 限流 + 递增熔断
+#
+# push2 集群按 IP 封禁（表现为 RemoteDisconnected），一旦触发至少数分钟不恢复，
+# 且在封禁期内反复重试会把时长从几分钟拉长到数小时。因此所有走 push2/push2his
+# 的请求统一经过 _push2_guard()：
+#   1. 全局串行——同一时刻只有一个在途请求，等价于并发 1；
+#   2. 相邻请求间隔 ≥ _PUSH2_MIN_INTERVAL + 随机抖动，避免节奏规律；
+#   3. 判定为限流（连接被重置/超时）时不再重试，直接熔断走备用源；
+#   4. 熔断时长按连续失败次数递增 300 → 900 → 1800 秒，成功一次清零。
+#
+# 单次问询只需要 4-6 次 push2 请求，串行带来的 1-2 秒延迟远小于被封禁的代价。
+# ============================================================
 _PUSH2_BLOCKED_UNTIL = 0.0
-_PUSH2_COOLDOWN_SECONDS = 300
+_PUSH2_COOLDOWN_STEPS = (300, 900, 1800)  # 连续失败递增：5 → 15 → 30 分钟
+_PUSH2_FAIL_STREAK = 0
+_PUSH2_MIN_INTERVAL = 1.0   # 相邻两次 push2 请求的最小间隔(秒)
+_PUSH2_JITTER = (0.1, 0.5)  # 随机抖动区间(秒)
+_PUSH2_QUEUE_TIMEOUT = 15   # 排队等待上限(秒)，超时视同被限流
+_PUSH2_FAIL_RESET_SECONDS = 1800  # 距上次失败超过该时长则失败计数归零
+_PUSH2_LAST_CALL = 0.0
+_PUSH2_LAST_FAIL_AT = 0.0
+_PUSH2_LOCK: asyncio.Lock | None = None
+
+# 限流特征：akshare 1.20+ 把 push2 断连包装成 RateLimitError（附中文说明），
+# 旧版本直接抛 ConnectionError/RemoteDisconnected，两种都要认
+_PUSH2_RATE_LIMIT_TYPES = ("RateLimitError", "Push2RateLimitError")
+_PUSH2_RATE_LIMIT_HINTS = (
+    "RemoteDisconnected", "Remote end closed", "Connection aborted",
+    "ConnectionReset", "Max retries exceeded", "Too Many Requests", "429",
+    "临时限流", "请求过多",
+)
+
+
+class _Push2Busy(Exception):
+    """push2 请求排队超时：视同被限流，调用方应改用备用源"""
+
+
+def _push2_lock() -> asyncio.Lock:
+    """惰性创建全局锁（避免在 import 阶段绑定事件循环）"""
+    global _PUSH2_LOCK
+    if _PUSH2_LOCK is None:
+        _PUSH2_LOCK = asyncio.Lock()
+    return _PUSH2_LOCK
+
+
+def _is_rate_limited(exc: BaseException) -> bool:
+    """判断是否被东财限流/封禁（连接被重置或超时），而非普通解析错误
+
+    akshare 1.20+ 会把 push2 的断连包装成 RateLimitError 并附中文提示，旧版本
+    则直接抛 ConnectionError，因此既看异常链上的类名，也看文本特征。
+    """
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+        return True
+
+    stack, seen = [exc], set()
+    while stack:
+        e = stack.pop()
+        if id(e) in seen:
+            continue
+        seen.add(id(e))
+        if type(e).__name__ in _PUSH2_RATE_LIMIT_TYPES:
+            return True
+        stack.extend(a for a in e.args if isinstance(a, BaseException))
+        stack.extend(x for x in (e.__cause__, e.__context__) if x is not None)
+
+    text = f"{type(exc).__name__}: {exc}"
+    return any(hint in text for hint in _PUSH2_RATE_LIMIT_HINTS)
 
 
 def _push2_available() -> bool:
@@ -31,17 +97,59 @@ def _push2_available() -> bool:
     return time.monotonic() >= _PUSH2_BLOCKED_UNTIL
 
 
-def _mark_push2_unavailable():
-    """标记 push2 集群不可用，冷却期内不再尝试"""
-    global _PUSH2_BLOCKED_UNTIL
-    _PUSH2_BLOCKED_UNTIL = time.monotonic() + _PUSH2_COOLDOWN_SECONDS
-    logger.warning(f"东方财富 push2 行情不可用，{_PUSH2_COOLDOWN_SECONDS}s 内改用备用数据源")
+def _mark_push2_unavailable(reason: str = ""):
+    """标记 push2 集群不可用，熔断时长随连续失败次数递增"""
+    global _PUSH2_BLOCKED_UNTIL, _PUSH2_FAIL_STREAK, _PUSH2_LAST_FAIL_AT
+    now = time.monotonic()
+    # 距上次失败已很久，说明中间恢复过，计数重新开始，避免历史失败把熔断永久拉到 30 分钟
+    if _PUSH2_LAST_FAIL_AT and now - _PUSH2_LAST_FAIL_AT > _PUSH2_FAIL_RESET_SECONDS:
+        _PUSH2_FAIL_STREAK = 0
+    _PUSH2_LAST_FAIL_AT = now
+    cooldown = _PUSH2_COOLDOWN_STEPS[min(_PUSH2_FAIL_STREAK, len(_PUSH2_COOLDOWN_STEPS) - 1)]
+    _PUSH2_FAIL_STREAK += 1
+    _PUSH2_BLOCKED_UNTIL = now + cooldown
+    detail = f"：{reason}" if reason else ""
+    logger.warning(
+        f"东方财富 push2 不可用{detail}，熔断 {cooldown}s（连续第 {_PUSH2_FAIL_STREAK} 次），"
+        f"期内改用备用数据源"
+    )
 
 
 def _clear_push2_unavailable():
-    """push2 集群恢复可用"""
-    global _PUSH2_BLOCKED_UNTIL
+    """push2 集群恢复可用：清零熔断与失败计数"""
+    global _PUSH2_BLOCKED_UNTIL, _PUSH2_FAIL_STREAK, _PUSH2_LAST_FAIL_AT
+    if _PUSH2_FAIL_STREAK:
+        logger.info(f"东方财富 push2 恢复正常（此前连续失败 {_PUSH2_FAIL_STREAK} 次）")
+    _PUSH2_FAIL_STREAK = 0
+    _PUSH2_LAST_FAIL_AT = 0.0
     _PUSH2_BLOCKED_UNTIL = 0.0
+
+
+@asynccontextmanager
+async def _push2_guard(what: str):
+    """push2 请求入口：串行 + 最小间隔 + 抖动；排队超时视同被限流"""
+    global _PUSH2_LAST_CALL
+    lock = _push2_lock()
+    try:
+        await asyncio.wait_for(lock.acquire(), timeout=_PUSH2_QUEUE_TIMEOUT)
+    except asyncio.TimeoutError:
+        _mark_push2_unavailable(f"{what} 排队超时")
+        raise _Push2Busy(f"{what}：push2 请求排队超时")
+
+    try:
+        # 排队期间熔断可能已被其他请求打开：此时不再发请求，直接让调用方走备用源，
+        # 否则并发的一轮工具会各自撞一次限流，把熔断从 5 分钟叠加到 30 分钟
+        if not _push2_available():
+            raise _Push2Busy(f"{what}：push2 熔断中")
+
+        elapsed = time.monotonic() - _PUSH2_LAST_CALL
+        wait = _PUSH2_MIN_INTERVAL + random.uniform(*_PUSH2_JITTER) - elapsed
+        if wait > 0:
+            await asyncio.sleep(wait)
+        yield
+    finally:
+        _PUSH2_LAST_CALL = time.monotonic()
+        lock.release()
 
 
 # 缓存: {key: (data, timestamp)}
@@ -49,13 +157,13 @@ _cache: dict[str, tuple[Any, float]] = {}
 _MAX_CACHE_ENTRIES = 200
 # 默认 TTL（秒）
 _CACHE_TTL = {
-    "global_market": 300,     # 5分钟（全球市场实时行情）
+    "global_market": 600,     # 10分钟（全球市场实时行情；push2 易被限流，靠缓存摊薄请求）
     "macro": 3600,            # 1小时（宏观数据变化慢）
     "margin": 600,            # 10分钟
     "news": 300,              # 5分钟
     "bdi": 3600,              # 1小时
     "market_index": 60,       # 1分钟（大盘指数实时）
-    "market_breadth": 120,    # 2分钟（涨跌统计）
+    "market_breadth": 300,    # 5分钟（涨跌统计；全A快照是重请求，缓存摊薄 push2 压力）
     "overseas": 120,          # 2分钟（外盘商品/汇率快照）
     "futures": 180,           # 3分钟（期货日频，盘中变动慢）
     "bond": 3600,             # 1小时（国债收益率日频）
@@ -141,11 +249,12 @@ async def get_global_market_overview() -> dict:
 
 
 async def _fetch_global_market_from_em() -> dict:
-    """从东方财富获取全球指数（重试3次，失败后打开 push2 熔断）"""
+    """从东方财富获取全球指数（串行限流；限流不重试，非限流错误才退避重试）"""
     import akshare as ak
     for attempt in range(3):
         try:
-            df = await _run_with_timeout(ak.index_global_spot_em, timeout=15)
+            async with _push2_guard("全球指数"):
+                df = await _run_with_timeout(ak.index_global_spot_em, timeout=15)
             if df is None or df.empty:
                 continue
 
@@ -176,12 +285,18 @@ async def _fetch_global_market_from_em() -> dict:
                 } for r in filtered[:15]],
                 "timestamp": str(df.columns[0]) if len(df.columns) > 0 else "",
             }
+        except _Push2Busy:
+            break
         except Exception as e:
+            if _is_rate_limited(e):
+                # 限流后继续重试会把封禁从几分钟拉长到数小时，直接熔断走备用源
+                logger.error(f"全球市场行情被限流，停止重试: {e}")
+                _mark_push2_unavailable("全球指数被限流")
+                break
             if attempt < 2:
-                await asyncio.sleep(1 * (attempt + 1))
-            else:
-                logger.error(f"获取全球市场行情失败(重试3次): {e}")
-                _mark_push2_unavailable()
+                await asyncio.sleep(2 ** attempt)  # 1s → 2s
+                continue
+            logger.error(f"获取全球市场行情失败(非限流，已重试3次): {e}")
     return {}
 
 
@@ -235,11 +350,13 @@ async def get_global_index_history(symbol: str, days: int = 30) -> dict:
     if cached is not None:
         return cached
 
+    if not _push2_available():
+        return {"error": f"{symbol} 历史数据暂不可用（push2 熔断中）", "unavailable": True}
+
     try:
         import akshare as ak
-        df = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: ak.index_global_hist_em(symbol=symbol)
-        )
+        async with _push2_guard(f"全球指数历史 {symbol}"):
+            df = await _run_with_timeout(ak.index_global_hist_em, symbol=symbol, timeout=20)
         if df is None or df.empty:
             return {"error": f"无 {symbol} 历史数据"}
 
@@ -252,7 +369,11 @@ async def get_global_index_history(symbol: str, days: int = 30) -> dict:
         }
         _set_cached(cache_key, result)
         return result
+    except _Push2Busy as e:
+        return {"error": str(e), "unavailable": True}
     except Exception as e:
+        if _is_rate_limited(e):
+            _mark_push2_unavailable("全球指数历史被限流")
         logger.error(f"获取全球指数 {symbol} 历史失败: {e}")
         return {"error": str(e)}
 
@@ -604,7 +725,8 @@ async def _fetch_market_indices_from_em() -> list:
     import akshare as ak
     for attempt in range(2):
         try:
-            df = await _run_with_timeout(ak.stock_zh_index_spot_em, timeout=15)
+            async with _push2_guard("大盘指数"):
+                df = await _run_with_timeout(ak.stock_zh_index_spot_em, timeout=15)
             if df is None or df.empty:
                 continue
 
@@ -629,12 +751,17 @@ async def _fetch_market_indices_from_em() -> list:
                     })
             _clear_push2_unavailable()
             return indices
+        except _Push2Busy:
+            break
         except Exception as e:
+            if _is_rate_limited(e):
+                logger.warning(f"东方财富大盘指数被限流，停止重试: {e}")
+                _mark_push2_unavailable("大盘指数被限流")
+                break
             if attempt < 1:
                 await asyncio.sleep(1)
-            else:
-                logger.warning(f"东方财富大盘指数获取失败: {e}")
-                _mark_push2_unavailable()
+                continue
+            logger.warning(f"东方财富大盘指数获取失败(非限流): {e}")
     return []
 
 
@@ -659,11 +786,12 @@ async def get_market_breadth_real() -> dict:
 
 
 async def _fetch_market_breadth_from_em() -> dict:
-    """从东方财富全A行情统计涨跌家数与涨跌幅分布（重试2次，失败后打开 push2 熔断）"""
+    """从东方财富全A行情统计涨跌家数与涨跌幅分布（串行限流；限流不重试）"""
     import akshare as ak
     for attempt in range(2):
         try:
-            df = await _run_with_timeout(ak.stock_zh_a_spot_em, timeout=20)
+            async with _push2_guard("全A行情"):
+                df = await _run_with_timeout(ak.stock_zh_a_spot_em, timeout=20)
             if df is None or df.empty:
                 continue
 
@@ -703,12 +831,17 @@ async def _fetch_market_breadth_from_em() -> dict:
                 "median_change_pct": round(float(changes.median()), 2),
                 "source": "eastmoney",
             }
+        except _Push2Busy:
+            break
         except Exception as e:
+            if _is_rate_limited(e):
+                logger.error(f"获取市场涨跌统计被限流，停止重试: {e}")
+                _mark_push2_unavailable("全A行情被限流")
+                break
             if attempt < 1:
                 await asyncio.sleep(1)
-            else:
-                logger.error(f"获取市场涨跌统计失败(重试2次): {e}")
-                _mark_push2_unavailable()
+                continue
+            logger.error(f"获取市场涨跌统计失败(非限流): {e}")
     return {}
 
 
@@ -1092,10 +1225,18 @@ async def get_market_fund_structure(days: int = 5) -> dict:
     if cached is not None:
         return cached
 
+    if not _push2_available():
+        return {"error": "东方财富 push2 暂不可用（熔断中）", "unavailable": True}
+
     import akshare as ak
     try:
-        df = await _run_with_timeout(ak.stock_market_fund_flow, timeout=20)
+        async with _push2_guard("全市场资金流"):
+            df = await _run_with_timeout(ak.stock_market_fund_flow, timeout=20)
+    except _Push2Busy as e:
+        return {"error": str(e), "unavailable": True}
     except Exception as e:
+        if _is_rate_limited(e):
+            _mark_push2_unavailable("全市场资金流被限流")
         logger.error(f"获取全市场资金结构失败: {e}")
         return {"error": str(e)}
     rows = _df_to_records(df)
@@ -1235,9 +1376,17 @@ def clear_external_cache():
 
 
 def get_cache_stats() -> dict:
-    """获取缓存统计"""
+    """获取缓存统计与 push2 熔断状态"""
     now = time.time()
     stats = {}
     for key, (_, ts) in _cache.items():
         stats[key] = f"{now - ts:.0f}s ago"
-    return {"cache_entries": len(_cache), "entries": stats}
+    return {
+        "cache_entries": len(_cache),
+        "entries": stats,
+        "push2": {
+            "available": _push2_available(),
+            "blocked_for_s": max(0, round(_PUSH2_BLOCKED_UNTIL - time.monotonic())),
+            "fail_streak": _PUSH2_FAIL_STREAK,
+        },
+    }

@@ -29,6 +29,7 @@ class LLMResponse(BaseModel):
     tokens_used: int = 0
     latency_ms: int = 0
     tool_calls: list[ToolCall] = []
+    finish_reason: str = ""  # length 表示输出被 max_tokens / num_predict 截断
 
 
 # 支持 thinking 的模型列表
@@ -60,6 +61,10 @@ FUNCTION_CALLING_MODELS = {
     "gpt-4",
     "gpt-3.5-turbo",
 }
+
+
+# 本地模型单次生成的 token 上限（在线模型不下发 max_tokens，不受此限制）
+_OLLAMA_OUTPUT_CAP = 4000
 
 
 def _model_supports_thinking(model: str) -> bool:
@@ -208,6 +213,10 @@ class BaseLLMClient(ABC):
         """历史消息可用的 token 预算，0 表示未知（Agent 回退到模型名推断）"""
         return 0
 
+    async def output_budget(self) -> int:
+        """单次生成的最大 token 数：在线模型返回 0（不限制，由服务端决定），本地模型按上下文收敛"""
+        return 0
+
 
 class OpenAIClient(BaseLLMClient):
     """OpenAI API 客户端 (兼容所有 OpenAI 格式 API)"""
@@ -229,9 +238,12 @@ class OpenAIClient(BaseLLMClient):
             "model": self.model,
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": max_tokens,
             "stream": stream,
         }
+        # max_tokens <= 0 表示不限制：不下发该字段，由服务端按模型上限决定
+        # （在线模型写死较小值会把长回答从中间截断）
+        if max_tokens and max_tokens > 0:
+            payload["max_tokens"] = max_tokens
         if _needs_explicit_thinking(self.model):
             payload["enable_thinking"] = True
         if tools:
@@ -279,7 +291,8 @@ class OpenAIClient(BaseLLMClient):
             resp.raise_for_status()
             data = resp.json()
 
-            msg = data["choices"][0]["message"]
+            choice = data["choices"][0]
+            msg = choice["message"]
             content = msg.get("content", "") or ""
             thinking = self._extract_thinking(msg)
             tool_calls = self._extract_tool_calls(msg)
@@ -288,7 +301,8 @@ class OpenAIClient(BaseLLMClient):
 
             return LLMResponse(
                 content=content, thinking=thinking, model=self.model,
-                tokens_used=tokens_used, latency_ms=latency_ms, tool_calls=tool_calls
+                tokens_used=tokens_used, latency_ms=latency_ms, tool_calls=tool_calls,
+                finish_reason=choice.get("finish_reason", "") or "",
             )
         except Exception as e:
             logger.error(f"OpenAI API 调用失败: {e}")
@@ -512,6 +526,17 @@ class OllamaClient(BaseLLMClient):
         await self._ensure_probed()
         return int(self._context_length * 0.5) if self._context_length else 0
 
+    async def output_budget(self) -> int:
+        """单次生成的 token 上限：本地模型按 num_ctx 收敛，避免输出被上下文窗口截断
+
+        输入已占用 num_ctx 的一半，输出再取 40%（封顶 _OLLAMA_OUTPUT_CAP）；
+        num_ctx 未知时回退到封顶值，与放宽前的 4000 一致。
+        """
+        await self._ensure_probed()
+        if not self._context_length:
+            return _OLLAMA_OUTPUT_CAP
+        return max(512, min(_OLLAMA_OUTPUT_CAP, int(self._context_length * 0.4)))
+
     @staticmethod
     def _normalize_messages(messages: list[dict]) -> list[dict]:
         """把 OpenAI 格式的消息转换成 Ollama 格式
@@ -541,11 +566,15 @@ class OllamaClient(BaseLLMClient):
     def _build_payload(self, messages: list[dict], temperature: float, max_tokens: int,
                        stream: bool, tools: list = None) -> dict:
         """根据模型能力构建请求 payload"""
+        options = {"temperature": temperature}
+        # num_predict <= 0 时不下发，交给 Ollama 默认值（本地模型由 output_budget 给出上限）
+        if max_tokens and max_tokens > 0:
+            options["num_predict"] = max_tokens
         payload = {
             "model": self.model,
             "messages": self._normalize_messages(messages),
             "stream": stream,
-            "options": {"temperature": temperature, "num_predict": max_tokens},
+            "options": options,
         }
         # 只在模型支持原生 tools 时才发送
         if tools and self._native_tools == 1:
@@ -593,10 +622,13 @@ class OllamaClient(BaseLLMClient):
 
             tokens_used = data.get("eval_count", 0) + data.get("prompt_eval_count", 0)
             latency_ms = int((time.monotonic() - start_time) * 1000)
+            # Ollama 用 done_reason 标记结束原因：length 表示撞到 num_predict
+            done_reason = data.get("done_reason", "") or ""
 
             return LLMResponse(
                 content=content, thinking=thinking, model=self.model,
-                tokens_used=tokens_used, latency_ms=latency_ms, tool_calls=tool_calls
+                tokens_used=tokens_used, latency_ms=latency_ms, tool_calls=tool_calls,
+                finish_reason="length" if done_reason == "length" else done_reason,
             )
         except httpx.TimeoutException:
             raise Exception(f"Ollama 请求超时（模型: {self.model}）")

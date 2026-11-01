@@ -456,6 +456,8 @@ class ReActAgent:
         self._supports_tools = await self.llm.supports_native_tools()
         # 上下文截断预算：Ollama 用实际 num_ctx，云端模型按模型名推断
         ctx_budget = await self.llm.context_budget() or _get_context_budget(self.llm.model)
+        # 单次生成上限：本地模型按 num_ctx 收敛，在线模型返回 0（不下发 max_tokens，不限制）
+        output_budget = await self.llm.output_budget()
 
         for iteration in range(self.MAX_ITERATIONS):
             # 超时检查
@@ -488,10 +490,15 @@ class ReActAgent:
                     response = await self.llm.chat(
                         messages=messages,
                         temperature=0.3,
-                        max_tokens=4000,
+                        max_tokens=output_budget,
                         tools=tools_to_use,
                     )
                     total_tokens += getattr(response, 'tokens_used', 0) or 0
+                    if getattr(response, 'finish_reason', '') == "length":
+                        logger.warning(
+                            f"LLM 输出被长度限制截断（budget={output_budget or '不限制'}），"
+                            f"本轮内容 {len(response.content or '')} 字符"
+                        )
                     break
                 except Exception as e:
                     if _attempt < 2:
