@@ -44,9 +44,11 @@ request.interceptors.response.use(
     } else if (!silent) {
       // 区分「服务端错误」与「真正的网络失败」：
       // Spring 默认 500 响应体只有 {timestamp,status,error,path}，没有 message，
+      // FastAPI 的 HTTPException 则把说明放在 detail；
       // 若直接兜底成「网络错误」会把后端异常误报成网络问题。
       const data = error.response?.data
-      const serverMsg = data?.message || data?.error
+      const rawMsg = data?.message || data?.error || data?.detail
+      const serverMsg = typeof rawMsg === 'string' ? rawMsg : undefined
       if (serverMsg) {
         ElMessage.error(serverMsg)
       } else if (error.response) {

@@ -212,6 +212,41 @@ async def collect_kline(sector_name: str = None, start_date: str = None, end_dat
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/stocks/pool")
+async def get_stock_pool():
+    """A 股股票池（剔除 ST/退市/北交所），供盘感训练随机抽题"""
+    try:
+        pool = await asyncio.to_thread(data_collector.get_stock_pool)
+        return success_response(data=pool)
+    except Exception as e:
+        logger.error(f"获取股票池失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/collect/stock-kline")
+async def collect_stock_kline(code: str, start_date: str = None, end_date: str = None):
+    """采集单只个股前复权日线并落库 stock_kline
+
+    Args:
+        code: 6 位股票代码
+        start_date: 开始日期 YYYYMMDD，默认 5 年前
+        end_date: 结束日期 YYYYMMDD，默认今天
+    """
+    try:
+        results = await asyncio.to_thread(
+            data_collector.collect_stock_kline, code, start_date, end_date
+        )
+        return success_response(
+            data={"code": code, "count": len(results),
+                  "start_date": results[0]["date"] if results else None,
+                  "end_date": results[-1]["date"] if results else None},
+            message="个股K线数据采集完成",
+        )
+    except Exception as e:
+        logger.error(f"个股K线采集失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/collect/etf-quotes")
 async def collect_etf_quotes(
     trade_date: str = None, codes: list[str] = Query(None)

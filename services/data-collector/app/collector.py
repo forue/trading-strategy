@@ -37,6 +37,10 @@ class DataCollector:
     _trade_dates_cache_ts: datetime | None = None
     # 缓存板块名称→代码映射
     _sector_name_code_map: dict[str, str] | None = None
+    # 缓存 A 股股票池（盘感训练随机抽题用）
+    _stock_pool_cache: list[dict] | None = None
+    _stock_pool_cache_ts: datetime | None = None
+    STOCK_POOL_TTL_SECONDS = 86400
 
     # 可交易性判定：最近交易日距今超过该天数即视为退市/长期停牌
     TRADABLE_MAX_STALE_DAYS = 10
@@ -857,6 +861,199 @@ class DataCollector:
         except Exception as e:
             logger.warning(f"采集 {sector_name} K线数据失败: {e}")
         return results
+
+    def get_stock_pool(self) -> list[dict]:
+        """获取 A 股股票池（供盘感训练随机抽题）
+
+        剔除 ST/退市股与北交所标的，只保留沪深主板、创业板、科创板。
+        列表接口成本较高，缓存 1 天。
+        """
+        now = datetime.now()
+        if (
+            self._stock_pool_cache is not None
+            and self._stock_pool_cache_ts is not None
+            and (now - self._stock_pool_cache_ts).total_seconds() < self.STOCK_POOL_TTL_SECONDS
+        ):
+            return self._stock_pool_cache
+        try:
+            df = ak.stock_info_a_code_name()
+            if df is None or df.empty:
+                logger.warning("股票列表为空")
+                return self._stock_pool_cache or []
+            code_col = "code" if "code" in df.columns else df.columns[0]
+            name_col = "name" if "name" in df.columns else df.columns[1]
+            pool = []
+            for _, row in df.iterrows():
+                code = str(row[code_col]).strip().zfill(6)
+                name = str(row[name_col]).strip()
+                if not code.isdigit() or len(code) != 6:
+                    continue
+                # 只保留 60x/00x/30x/688：北交所（4/8 开头）与 B 股（900/200）不参与训练
+                if not (code.startswith("60") or code.startswith("00")
+                        or code.startswith("30") or code.startswith("688")):
+                    continue
+                if "ST" in name.upper() or "退" in name:
+                    continue
+                pool.append({"code": code, "name": name})
+            if pool:
+                self._stock_pool_cache = pool
+                self._stock_pool_cache_ts = now
+                logger.info(f"获取股票池: {len(pool)} 只")
+            return pool
+        except Exception as e:
+            logger.warning(f"获取股票列表失败: {e}")
+            return self._stock_pool_cache or []
+
+    def collect_stock_kline(
+        self, code: str, start_date: str = None, end_date: str = None
+    ) -> list[dict]:
+        """采集单只个股前复权日线并写入 InfluxDB stock_kline
+
+        Args:
+            code: 6 位股票代码，如 600519
+            start_date: YYYYMMDD 或 YYYY-MM-DD，默认 5 年前
+            end_date: YYYYMMDD 或 YYYY-MM-DD，默认今天
+        """
+        if start_date is None:
+            start_date = (datetime.now() - timedelta(days=365 * 5)).strftime("%Y%m%d")
+        if end_date is None:
+            end_date = datetime.now().strftime("%Y%m%d")
+        start_norm = start_date.replace("-", "")[:8]
+        end_norm = end_date.replace("-", "")[:8]
+        code = str(code).strip().zfill(6)
+        stock_name = next((s["name"] for s in self.get_stock_pool() if s["code"] == code), code)
+
+        rows = self._fetch_stock_daily(code, start_norm, end_norm)
+        if not rows:
+            logger.warning(f"个股 {code} 日线获取失败或为空（区间 {start_norm}~{end_norm}）")
+            return []
+
+        results = [{**r, "stock_code": code, "stock_name": stock_name} for r in rows]
+        try:
+            influx_manager.write_stock_kline(results)
+            logger.info(f"采集个股 {code}({stock_name}) K线: {len(results)} 条")
+        except Exception as e:
+            logger.warning(f"写入个股 {code} K线失败: {e}")
+        return results
+
+    def _fetch_stock_daily(self, code: str, start_norm: str, end_norm: str) -> list[dict]:
+        """按 东财 → 新浪 → 腾讯 顺序抓取前复权日线，返回统一结构的行数据
+
+        东财 push2his 在部分网络环境会被阻断（连接被重置），新浪/腾讯作为备源保证可用性。
+        """
+        prefix = "sh" if code.startswith("6") else "sz"
+
+        try:
+            df = ak.stock_zh_a_hist(
+                symbol=code, period="daily",
+                start_date=start_norm, end_date=end_norm, adjust="qfq",
+            )
+            rows = self._parse_em_daily(df)
+            if rows:
+                return rows
+        except Exception as e:
+            logger.warning(f"东财个股 {code} 日线不可用: {e}")
+
+        try:
+            df = ak.stock_zh_a_daily(
+                symbol=f"{prefix}{code}",
+                start_date=start_norm, end_date=end_norm, adjust="qfq",
+            )
+            rows = self._parse_sina_daily(df)
+            if rows:
+                logger.info(f"个股 {code} 日线改用新浪数据源")
+                return rows
+        except Exception as e:
+            logger.warning(f"新浪个股 {code} 日线不可用: {e}")
+
+        try:
+            df = ak.stock_zh_a_hist_tx(
+                symbol=f"{prefix}{code}",
+                start_date=start_norm, end_date=end_norm, adjust="qfq",
+            )
+            rows = self._parse_tx_daily(df)
+            if rows:
+                logger.info(f"个股 {code} 日线改用腾讯数据源")
+            return rows
+        except Exception as e:
+            logger.warning(f"腾讯个股 {code} 日线不可用: {e}")
+            return []
+
+    def _parse_em_daily(self, df) -> list[dict]:
+        """东财日线（日期/开盘/收盘/最高/最低/成交量(手)/成交额/涨跌幅/换手率）"""
+        if df is None or getattr(df, "empty", True):
+            return []
+        rows = []
+        for _, r in df.iterrows():
+            d8 = str(r.get("日期", "")).replace("-", "")[:8]
+            close = self._safe_float(r.get("收盘", 0))
+            if len(d8) != 8 or close <= 0:
+                continue
+            rows.append({
+                "date": f"{d8[:4]}-{d8[4:6]}-{d8[6:8]}",
+                "open": self._safe_float(r.get("开盘", close)),
+                "close": close,
+                "high": self._safe_float(r.get("最高", close)),
+                "low": self._safe_float(r.get("最低", close)),
+                "volume": self._safe_float(r.get("成交量", 0)),
+                "amount": self._safe_float(r.get("成交额", 0)),
+                "change_pct": self._safe_float(r.get("涨跌幅", 0)),
+                "turnover": self._safe_float(r.get("换手率", 0)),
+            })
+        return rows
+
+    def _parse_sina_daily(self, df) -> list[dict]:
+        """新浪日线：成交量为股、换手率为小数，统一折算为手与百分比"""
+        if df is None or getattr(df, "empty", True):
+            return []
+        rows = []
+        prev_close = None
+        for _, r in df.iterrows():
+            d = str(r.get("date", ""))[:10]
+            close = self._safe_float(r.get("close", 0))
+            if len(d) != 10 or close <= 0:
+                continue
+            change_pct = round((close / prev_close - 1) * 100, 2) if prev_close else 0.0
+            rows.append({
+                "date": d,
+                "open": self._safe_float(r.get("open", close)),
+                "close": close,
+                "high": self._safe_float(r.get("high", close)),
+                "low": self._safe_float(r.get("low", close)),
+                "volume": round(self._safe_float(r.get("volume", 0)) / 100, 2),
+                "amount": self._safe_float(r.get("amount", 0)),
+                "change_pct": change_pct,
+                "turnover": round(self._safe_float(r.get("turnover", 0)) * 100, 2),
+            })
+            prev_close = close
+        return rows
+
+    def _parse_tx_daily(self, df) -> list[dict]:
+        """腾讯日线：amount 字段实为成交量(手)，无成交额/换手率，按收盘价估算成交额"""
+        if df is None or getattr(df, "empty", True):
+            return []
+        rows = []
+        prev_close = None
+        for _, r in df.iterrows():
+            d = str(r.get("date", ""))[:10]
+            close = self._safe_float(r.get("close", 0))
+            if len(d) != 10 or close <= 0:
+                continue
+            volume = self._safe_float(r.get("amount", 0))
+            change_pct = round((close / prev_close - 1) * 100, 2) if prev_close else 0.0
+            rows.append({
+                "date": d,
+                "open": self._safe_float(r.get("open", close)),
+                "close": close,
+                "high": self._safe_float(r.get("high", close)),
+                "low": self._safe_float(r.get("low", close)),
+                "volume": volume,
+                "amount": round(volume * 100 * close, 2),
+                "change_pct": change_pct,
+                "turnover": 0.0,
+            })
+            prev_close = close
+        return rows
 
     def collect_all_sectors_kline(self, start_date: str = None, end_date: str = None) -> list[dict]:
         """采集所有板块K线数据"""

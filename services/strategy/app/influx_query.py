@@ -458,6 +458,64 @@ class InfluxDBQuery:
 
         return result
 
+    def query_stock_kline(self, stock_code: str, start_date: str, end_date: str) -> list[dict]:
+        """查询单只个股日线（stock_kline，前复权），按日期升序
+
+        Returns:
+            [{date, stock_code, stock_name, open, close, high, low,
+              volume, amount, change_pct, turnover}, ...]
+        """
+        self._ensure_connected()
+        flux_start, flux_stop = self._date_to_flux_range(start_date, end_date)
+
+        query = f'''
+        from(bucket: "{self.bucket}")
+          |> range(start: {flux_start}, stop: {flux_stop})
+          |> filter(fn: (r) => r._measurement == "stock_kline")
+          |> filter(fn: (r) => r.stock_code == "{stock_code}")
+          |> pivot(rowKey: ["_time", "stock_code"], columnKey: ["_field"], valueColumn: "_value")
+          |> keep(columns: ["_time", "stock_code", "stock_name",
+                            "open", "close", "high", "low",
+                            "volume", "amount", "change_pct", "turnover"])
+        '''
+        try:
+            tables = self.query_api.query_data_frame(query)
+        except Exception as e:
+            logger.debug(f"个股K线查询失败(可能无数据): {e}")
+            return []
+
+        if isinstance(tables, list) and len(tables) == 0:
+            return []
+        if hasattr(tables, "empty") and tables.empty:
+            return []
+
+        result = []
+        for row in self._to_records(tables):
+            time_str = str(row.get("_time", ""))
+            try:
+                dt = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
+                date_key = dt.strftime("%Y-%m-%d")
+            except (ValueError, TypeError):
+                continue
+            close = self._safe_float(row.get("close", 0))
+            if close <= 0:
+                continue
+            result.append({
+                "date": date_key,
+                "stock_code": str(row.get("stock_code", "")),
+                "stock_name": str(row.get("stock_name", "")),
+                "open": self._safe_float(row.get("open", close)),
+                "close": close,
+                "high": self._safe_float(row.get("high", close)),
+                "low": self._safe_float(row.get("low", close)),
+                "volume": self._safe_float(row.get("volume", 0)),
+                "amount": self._safe_float(row.get("amount", 0)),
+                "change_pct": self._safe_float(row.get("change_pct", 0)),
+                "turnover": self._safe_float(row.get("turnover", 0)),
+            })
+        result.sort(key=lambda r: r["date"])
+        return result
+
     def query_all_sector_kline(self, start_date: str, end_date: str) -> dict[str, list[dict]]:
         """批量查询所有板块K线数据（用于回测预加载，单次查询）"""
         self._ensure_connected()

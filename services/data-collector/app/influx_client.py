@@ -205,6 +205,42 @@ class InfluxDBManager:
             self.write_api.write(bucket=self.bucket, org=self.org, record=points)
             logger.info(f"写入大盘K线数据 {len(points)} 条")
 
+    def write_stock_kline(self, data: list[dict]):
+        """写入个股日线K线（measurement: stock_kline，前复权）
+
+        Args:
+            data: [{stock_code, stock_name, date, open, close, high, low,
+                    volume, amount, change_pct, turnover}, ...]
+        """
+        points = []
+        for item in data:
+            date_str = item.get("date", "")
+            try:
+                if len(date_str) == 8:
+                    dt = datetime.strptime(date_str, "%Y%m%d")
+                else:
+                    dt = datetime.strptime(date_str, "%Y-%m-%d")
+            except (ValueError, TypeError):
+                dt = datetime.now()
+
+            close = item.get("close")
+            if close is None:
+                continue
+            point = (
+                Point("stock_kline")
+                .tag("stock_code", str(item["stock_code"]))
+                .tag("stock_name", str(item.get("stock_name", "")))
+            )
+            for k in ("open", "close", "high", "low", "volume", "amount", "change_pct", "turnover"):
+                if item.get(k) is not None:
+                    point = point.field(k, float(item[k]))
+            point = point.time(dt, WritePrecision.MS)
+            points.append(point)
+
+        if points:
+            self.write_api.write(bucket=self.bucket, org=self.org, record=points)
+            logger.info(f"写入个股K线数据 {len(points)} 条")
+
     def write_north_bound_flow(self, data: list[dict]):
         """写入北向资金数据
 

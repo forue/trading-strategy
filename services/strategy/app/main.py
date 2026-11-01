@@ -28,6 +28,7 @@ from .models import (
 )
 from .scoring import scoring_model
 from .influx_query import influx_query
+from .stock_sense import router as stock_sense_router
 from . import signal_tracker
 from shared import RabbitMQManager, RedisManager
 
@@ -80,6 +81,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="策略引擎服务", version="1.1.0", lifespan=lifespan)
+
+# 盘感训练（个股K线盲盒回放），路由见 app/stock_sense.py
+app.include_router(stock_sense_router)
 
 # 默认策略配置 - 均衡参数
 DEFAULT_CONFIGS = {

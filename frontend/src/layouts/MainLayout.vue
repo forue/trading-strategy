@@ -140,6 +140,7 @@ const navItems = [
   { path: '/fund', label: '资金管理', icon: 'Wallet' },
   { path: '/monitor', label: '系统监控', icon: 'Monitor' },
   { path: '/data-replay', label: '数据回放', icon: 'VideoPlay' },
+  { path: '/stock-sense', label: '盘感训练', icon: 'TrendCharts' },
   { path: '/factor-analysis', label: '因子分析', icon: 'Histogram' },
   { path: '/factor-ranking', label: '板块因子排名', icon: 'Histogram' },
   { path: '/settings', label: '系统设置', icon: 'Tools' },

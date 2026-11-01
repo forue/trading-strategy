@@ -56,6 +56,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '数据回放', icon: 'VideoPlay' },
       },
       {
+        path: 'stock-sense',
+        name: 'StockSense',
+        component: () => import('@/views/StockSense.vue'),
+        meta: { title: '盘感训练', icon: 'TrendCharts' },
+      },
+      {
         path: 'factor-analysis',
         name: 'FactorAnalysis',
         component: () => import('@/views/FactorAnalysis.vue'),

@@ -45,6 +45,7 @@ Thumbs.db
 # Build outputs
 frontend/dist/
 frontend/node_modules/
+target/
 
 # Test
 .pytest_cache/
@@ -59,6 +60,9 @@ deployment_report.md
 
 # Claude Code
 .claude/
+
+# 无头浏览器测试用的 Edge 配置目录
+__edge_profile*/
 
 # One-off diagnostic scripts
 tests/verify_api*.py

@@ -459,6 +459,52 @@ GET  /api/strategy/data/availability                      - 数据可用范围
 - `position_changes[]` — 仓位调整明细（action: ADD/REDUCE/CLEAR/STOP_LOSS/EMERGENCY_EXIT/BEAR_EXIT）
 - 基准数据优先使用 InfluxDB `market_kline` 大盘K线，回退 AkShare 上证指数
 
+### 盘感训练
+
+随机抽取一只A股、隐藏其后市的连续一年K线做盲盒回放；用户按天/周推进，判断买卖点，结束后公开标的与区间并计入统计。
+
+```
+POST /api/strategy/stock-sense/start?user=admin                    - 开始一轮训练（随机标的 + 随机一年区间）
+GET  /api/strategy/stock-sense/{sid}/chart?view=day|week|month      - 当前可见K线（切换视图，不推进）
+POST /api/strategy/stock-sense/{sid}/step?unit=day|week&view=day    - 推进下一日/下一周
+POST /api/strategy/stock-sense/{sid}/trade?action=buy|sell&ratio=0.25&view=day - 按仓位比例买入/卖出（收盘价成交）
+POST /api/strategy/stock-sense/{sid}/lines                          - 保存训练中的划线（body `{lines:[...]}`，整体覆盖）
+POST /api/strategy/stock-sense/{sid}/finish                         - 主动结束并结算
+GET  /api/strategy/stock-sense/stats/{user}                         - 训练统计与历史记录
+GET  /api/strategy/stock-sense/replay/{sid}?user=&view=day|week|month - 复盘：按记录重查K线 + 买卖点
+```
+
+要点：
+- 完整K线只存在于服务端 Redis 会话（4 小时过期），接口按 cursor 切片返回，前端拿不到未来数据；
+- 训练区间随机截取自库中近 5 年日线（缺失时自动调用 data-collector 采集），另取区间前 90 根做指标预热，保证首根可见K线的 MA60/MACD 已收敛；
+- 抽题优先在已落库标的中随机，并排除该用户最近 10 轮抽过的代码（`stock_sense:recent:{user}`），避免连续几轮都是同一只；
+  每轮开始后后台补采 12 只新标的扩大样本池（`stock_sense:ready_codes`，上限 120 只），已落库且没做过的不足 8 只时先用全市场抽样补齐
+  （会等首次采集），最近做过的代码只作最后兜底——早期版本在样本池很小时会把它排到首位，导致同一只标的连着出现几轮；
+- 初始只展示训练区间前两个月，`unit=day` 推进一日，`unit=week` 推进到下一自然周最后交易日；
+  前端切「按周」会同步把K线视图切成周线（买卖点归到所属周期那根K线）；
+- 训练中隐藏真实日期：K线、当前进度、成交与持仓日期统一返回训练区间序号（`D0038`），前端显示为「第38根」，
+  避免日期暗示大盘所处周期（牛熊阶段、政策窗口）；结算后的 summary、`session.current_date` 与复盘接口才返回真实日期；
+- 成交价含滑点，费用含佣金（万三、最低 5 元）与卖出印花税（千一），T+1 限制（买入当日不可卖出）；
+- 仓位分批：`ratio` 为本次投入比例（0<ratio≤1，前端预设 1/4、1/3、1/2、全部），买入按「现金×ratio」计算可买整手数，
+  已持仓时继续买入按数量加权成本（`cost_price`/`cost_amount` 累加，`buy_index` 取最后一次）；
+  卖出按「持仓×ratio」向下取整到 100 股（`ratio=1` 即清仓），未卖出部分按数量比例折减成本；
+- 配对盈亏按 FIFO 数量配对（`lots` → `matches`）：卖出时从最早买入批次依次消耗，费用按消耗数量比例分摊到批次，
+  保证单笔卖出的配对盈亏之和等于该笔卖出对账户的实际影响；结算 summary 里的 `pairs` 即全部配对明细，`trade_count` 为配对数；
+  旧记录没有 `pairs` 字段，复盘前端退回「全仓单笔、买卖交替」的本地配对；
+- 划线：`no` 字段是每根K线在训练区间内的序号（1-based，1/3/5 视图下均单调），划线锚点存 `{type, points:[{x:no, price}], color}`，
+  `type` 支持 `hline`(1点) / `trend`(2点) / `channel`(3点：两点定基准线 + 一点定平行偏移) / `rect`(2点) / `fib`(2点：0 与 100% 价位)，
+  单轮最多 40 条；划线随会话存 Redis，推进K线、切日/周/月视图、刷新页面重新进入同一轮训练都会恢复（前端按 `no` 映射回当前视图的索引）；
+  结算时划线随记录落库（`record.lines`），复盘按同一套 `no` 还原，`replay` 返回的 bars 也带 `no` 供前端对齐；
+- 回放到区间末尾自动按最后收盘价强制平仓；统计按用户存 Redis（最近 200 条），含胜率、平均收益、平均超额、累计收益；
+- 复盘：会话结算后会删除，`replay` 用记录里的标的与区间从 InfluxDB `stock_kline` 重查（再取前置 90 根预热），
+  返回完整区间K线 + 买卖点；记录里的 `window_end` 是原定区间末尾，提前结束的轮次也能看到「结束后行情怎么走」，
+  前端用竖线标出结束日并列出买卖配对盈亏。因不保存 cursor 轨迹，复盘是整段回看而非逐日重放；
+  旧记录没有 `lines` 字段，复盘只有行情与买卖点，没有当时的划线；
+- 前端布局：仓位、买卖、按天/按周、下一根集中在图表下方的操作条；划线工具条在图表上方（水平/趋势/通道/矩形/斐波、撤销、清除），
+  选中工具后在主图任意位置取点（zrender 点击，空白天区也可取点），取满锚点数自动提交并落库。
+- 复盘入口：页面头部「历史复盘」按钮始终可用（未开始训练也能打开），抽屉里按区间列出最近记录，点任一条即回放；
+  训练结算弹窗另有「复盘完整行情」按钮，直接回放本轮。
+
 ### 因子分析
 
 ```
@@ -478,6 +524,8 @@ POST /api/data/collect/north-bound     - 采集北向资金（调度已下线，
 GET  /api/data/query/all-sectors       - 查询所有板块数据
 GET  /api/data/trade-dates             - 交易日历
 GET  /api/data/sectors                 - 板块列表
+GET  /api/data/stocks/pool             - A股股票池（剔除 ST/退市/北交所），供盘感训练抽样
+POST /api/data/collect/stock-kline?code=600519&start_date=20210101&end_date=20261231 - 采集个股前复权日线落库 stock_kline
 ```
 
 ### 策略复盘
