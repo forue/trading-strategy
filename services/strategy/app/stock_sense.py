@@ -22,6 +22,7 @@ from loguru import logger
 
 from .config import settings
 from .influx_query import influx_query
+from .sense_review import build_review
 from shared import RedisManager, success_response
 
 router = APIRouter(prefix="/stock-sense", tags=["盘感训练"])
@@ -41,6 +42,8 @@ MIN_WINDOW_BARS = 230       # 一年内至少需要的交易日数（A股约 243
 MAX_GAP_DAYS = 30           # 区间内允许的最大单次缺口（更长视为长期停牌）
 INITIAL_VIEW_MONTHS = 2     # 初始只展示前两个月的K线
 MAX_PICK_ATTEMPTS = 8       # 随机抽题最多尝试次数（采集失败/数据不足时换标的）
+FUTURE_BARS = 60            # 结束后展示的后续走势交易日数
+FUTURE_DAYS = 150           # 后续走势的查询跨度（自然日，约 100 个交易日）
 
 SESSION_TTL = 4 * 3600      # 会话过期（秒）
 RECORD_KEY_PREFIX = "stock_sense:records:"
@@ -105,10 +108,12 @@ def _macd(closes: list[float]) -> dict:
     return {"dif": r(dif), "dea": r(dea), "macd": r(bar)}
 
 
-def _aggregate(bars: list[dict], view: str) -> list[dict]:
+def _aggregate(bars: list[dict], view: str, phase_key: str | None = None) -> list[dict]:
     """按周/月聚合日线；view=day 原样返回
 
     周按 ISO 自然周分组，月按自然月分组，日期取该分组最后一根K线的日期。
+    phase_key 给定时按该字段再分组（复盘用：训练段与后市段即使同一周也不合并，
+    否则分界那根K线会混入后市数据）。
     """
     if view == "day" or len(bars) <= 1:
         return bars
@@ -121,6 +126,8 @@ def _aggregate(bars: list[dict], view: str) -> list[dict]:
             key = f"{iso[0]}-W{iso[1]:02d}"
         else:
             key = f"{d.year}-{d.month:02d}"
+        if phase_key:
+            key = f"{key}|{b.get(phase_key, '')}"
         if key not in groups:
             groups[key] = []
             order.append(key)
@@ -139,19 +146,21 @@ def _aggregate(bars: list[dict], view: str) -> list[dict]:
             "amount": sum(x["amount"] for x in g),
             "change_pct": round((g[-1]["close"] / g[0]["open"] - 1) * 100, 2) if g[0]["open"] else 0.0,
             "turnover": round(sum(x["turnover"] for x in g), 2),
+            **({phase_key: g[-1].get(phase_key)} if phase_key else {}),
         })
     return out
 
 
-def _build_chart(seg: list[dict], train_start: int, view: str) -> dict:
+def _build_chart(seg: list[dict], train_start: int, view: str,
+                 phase_key: str | None = None) -> dict:
     """可见K线 → 视图聚合 + 指标
 
     seg 含指标预热段，训练区间从 train_start 开始：
     - 指标在「含预热」的聚合序列上计算，保证首根可见K线的 MA/MACD 已收敛；
     - 返回的K线只从训练区间起点开始聚合，避免混入训练前数据。
     """
-    agg_full = _aggregate(seg, view)
-    agg_train = _aggregate(seg[train_start:], view)
+    agg_full = _aggregate(seg, view, phase_key)
+    agg_train = _aggregate(seg[train_start:], view, phase_key)
     if not agg_full or not agg_train:
         return {"bars": [], "ma": {}, "macd": {}, "vol_ma": {}}
 
@@ -194,6 +203,36 @@ def _query_bars(code: str, years: int = 5) -> list[dict]:
     end = date.today()
     start = end - timedelta(days=365 * years)
     return influx_query.query_stock_kline(code, start.isoformat(), end.isoformat())
+
+
+def _future_bars(code: str, window_end: str) -> list[dict]:
+    """训练区间末尾之后的真实行情（只在结算/复盘后才允许展示）"""
+    w_end = _parse_date(window_end)
+    stop = min(w_end + timedelta(days=FUTURE_DAYS), date.today())
+    if stop <= w_end:
+        return []
+    try:
+        rows = influx_query.query_stock_kline(code, window_end, stop.isoformat())
+    except Exception as e:
+        logger.warning(f"个股 {code} 后续走势查询失败: {e}")
+        return []
+    return [b for b in rows if b["date"] > window_end][:FUTURE_BARS]
+
+
+def _future_payload(code: str, window_end: str, base_close: float) -> dict:
+    """结算弹窗用的后市摘要（含收盘价序列，供迷你走势图直接画）"""
+    rows = _future_bars(code, window_end)
+    dates = [window_end] + [b["date"] for b in rows]
+    closes = [round(base_close, 3)] + [round(b["close"], 3) for b in rows]
+    last = closes[-1]
+    return {
+        "bars": len(rows),
+        "start_date": window_end,
+        "end_date": dates[-1],
+        "dates": dates,
+        "closes": closes,
+        "change_pct": round((last / base_close - 1) * 100, 2) if base_close else 0.0,
+    }
 
 
 def _ensure_bars(code: str) -> list[dict]:
@@ -444,6 +483,16 @@ def _date_no_map(sess: dict) -> dict[str, int]:
     return {b["date"]: i + 1 for i, b in enumerate(sess["bars"][sess["train_start"]:])}
 
 
+def _trades_out(sess: dict, ended: bool) -> list[dict]:
+    """对外交易列表：始终带训练区间序号 no，结算前日期脱敏、结算后还原"""
+    order = _date_no_map(sess)
+    return [
+        {**t, "no": order.get(t["date"], 1),
+         "date": t["date"] if ended else _mask_date(order.get(t["date"], 1))}
+        for t in sess["trades"]
+    ]
+
+
 def _chart(sess: dict, view: str) -> dict:
     """会话 → 当前可见图表数据（只暴露 cursor 及之前的数据）
 
@@ -636,6 +685,7 @@ def _settle(sess: dict, forced_exit: bool) -> dict:
     if buys and sells:
         hold_days = (_parse_date(sells[-1]["date"]) - _parse_date(buys[0]["date"])).days
 
+    window_end = bars[-1]["date"]
     record = {
         "session_id": sess["session_id"],
         "user": sess["user"],
@@ -643,7 +693,7 @@ def _settle(sess: dict, forced_exit: bool) -> dict:
         "name": sess["name"],
         "start_date": start_bar["date"],
         "end_date": end_bar["date"],
-        "window_end": bars[-1]["date"],   # 原定训练区间末尾（复盘可看到结束后市）
+        "window_end": window_end,         # 原定训练区间末尾（复盘可看到结束后市）
         "initial_capital": INITIAL_CAPITAL,
         "final_equity": final_equity,
         "return_pct": return_pct,
@@ -652,9 +702,11 @@ def _settle(sess: dict, forced_exit: bool) -> dict:
         "trade_count": len(pairs),        # 一笔买入配一笔卖出的完成次数（分批交易按 FIFO 配对）
         "hold_days": hold_days,
         "forced_exit": forced_exit,
-        "trades": sess["trades"],
+        "trades": _trades_out(sess, True),
         "pairs": pairs,
         "lines": sess.get("lines", []),   # 训练中画的线，复盘按同一套序号还原
+        "review": build_review(bars, start_bar["date"], window_end),  # 盘后总结（结算后公开整段区间）
+        "future": _future_payload(sess["code"], window_end, bars[-1]["close"]),
         "created_at": datetime.now().isoformat(timespec="seconds"),
     }
 
@@ -685,11 +737,7 @@ def _state(sess: dict) -> dict:
         pos_out = dict(pos)
         if not ended:
             pos_out["buy_date"] = _mask_date(order.get(pos["buy_date"], 1))
-    trades_out = sess["trades"]
-    if not ended:
-        trades_out = [
-            {**t, "date": _mask_date(order.get(t["date"], 1))} for t in sess["trades"]
-        ]
+    trades_out = _trades_out(sess, ended)
 
     return {
         "session_id": sess["session_id"],
@@ -928,8 +976,13 @@ async def save_lines(sid: str, payload: dict):
 
 
 @router.post("/{sid}/finish")
-async def finish(sid: str):
-    """主动结束训练并按当前K线收盘价平仓结算"""
+async def finish(sid: str, view: str = "day"):
+    """主动结束训练并按当前K线收盘价平仓结算
+
+    结算后日期从脱敏序号还原成真实日期，必须同步返回当前视图的图表，
+    否则主图仍是脱敏日期，买卖点会按真实日期找不到位置而挤到首根。
+    """
+    _check_view(view)
     sess = _load(sid)
     if sess["ended"]:
         raise HTTPException(status_code=400, detail="训练已结束")
@@ -938,7 +991,7 @@ async def finish(sid: str):
     summary = _settle(sess, forced_exit=False)
     _delete(sid)
     return success_response(
-        data={"summary": summary, "session": _state(sess)},
+        data={"summary": summary, "session": _state(sess), "chart": _chart(sess, view)},
         message="训练结束",
     )
 
@@ -959,12 +1012,13 @@ def _find_record(user: str, session_id: str) -> dict | None:
     return None
 
 
-def _replay_chart(record: dict, view: str) -> dict:
-    """按历史记录重新回放训练区间K线
+def _replay_chart(record: dict, view: str) -> tuple[dict, dict]:
+    """按历史记录回放完整训练区间 + 后续走势
 
     会话结算后已删除，这里用记录里的标的与区间从 InfluxDB 重查（含前置预热段，
-    保证 MA60/MACD 在区间首根已收敛）。因为记录不保存 cursor 轨迹，
-    复盘展示的是完整训练区间，而非当时的逐步视野。
+    保证 MA60/MACD 在区间首根已收敛）。训练区间末尾之后另取 FUTURE_BARS 根真实行情，
+    用 _phase 把两段分开：周/月视图下同一周/月也不会合并成分界不清的一根K线。
+    返回值 (chart, review)，review 现场回算，旧记录同样有盘后总结。
     """
     code = record.get("code")
     start_date = record.get("start_date")
@@ -972,13 +1026,13 @@ def _replay_chart(record: dict, view: str) -> dict:
     if not (code and start_date and end_date):
         raise HTTPException(status_code=404, detail="训练记录缺少标的或区间信息")
 
-    # 截止到原定区间末尾，提前结束的轮次也能看到「结束后行情怎么走」；
     # 旧记录没有 window_end，退回实际结束日。
     window_end = record.get("window_end") or end_date
-    # 预热段：90 个交易日约 130 自然日，预留 180 天冗余
     warm_start = _parse_date(start_date) - timedelta(days=WARMUP_BARS * 2)
-    bars = influx_query.query_stock_kline(code, warm_start.isoformat(), window_end)
-    bars = [b for b in bars if b["date"] <= window_end]
+    query_stop = min(_parse_date(window_end) + timedelta(days=FUTURE_DAYS), date.today())
+    rows = influx_query.query_stock_kline(code, warm_start.isoformat(), query_stop.isoformat())
+    bars = [b for b in rows if b["date"] <= window_end]
+    future = [b for b in rows if b["date"] > window_end][:FUTURE_BARS]
     if not bars:
         raise HTTPException(status_code=404, detail="该标的历史日线已不可用，无法回放")
 
@@ -987,11 +1041,32 @@ def _replay_chart(record: dict, view: str) -> dict:
         raise HTTPException(status_code=404, detail="训练区间内无K线数据，无法回放")
 
     warm = max(0, start_idx - WARMUP_BARS)
-    chart = _build_chart(bars[warm:], start_idx - warm, view)
-    # 与训练时同一套序号（训练区间第几根），复盘的划线才能落在原来的位置
-    order = {b["date"]: i + 1 for i, b in enumerate(bars[start_idx:])}
-    chart["bars"] = [{**b, "no": order.get(b["date"], 1)} for b in chart["bars"]]
-    return chart
+    seg = ([{**b, "_phase": "train"} for b in bars[warm:]]
+           + [{**b, "_phase": "future"} for b in future])
+    chart = _build_chart(seg, start_idx - warm, view, phase_key="_phase")
+
+    # 与训练时同一套序号（训练区间第几根），复盘的划线才能落在原来的位置；
+    # 后市段继续递增，不参与划线锚定。
+    train_daily = [b for b in bars if b["date"] >= start_date]
+    order = {b["date"]: i + 1 for i, b in enumerate(train_daily)}
+    base_no = len(train_daily)
+    future_start: int | None = None
+    extra = 0
+    out_bars = []
+    for i, b in enumerate(chart["bars"]):
+        phase = b.pop("_phase", "train")
+        if phase == "future" and future_start is None:
+            future_start = i
+        if b["date"] in order:
+            no = order[b["date"]]
+        else:
+            extra += 1
+            no = base_no + extra
+        out_bars.append({**b, "no": no})
+    chart["bars"] = out_bars
+    chart["future_start"] = future_start if future_start is not None else len(out_bars)
+    chart["future_bars"] = len(future)
+    return chart, build_review(bars, start_date, window_end)
 
 
 @router.get("/replay/{session_id}")
@@ -1001,5 +1076,5 @@ async def replay(session_id: str, user: str = "default", view: str = "day"):
     record = _find_record(user, session_id)
     if not record:
         raise HTTPException(status_code=404, detail="未找到该训练记录（仅保留最近 200 条）")
-    chart = await asyncio.to_thread(_replay_chart, record, view)
-    return success_response(data={"record": record, "chart": chart})
+    chart, review = await asyncio.to_thread(_replay_chart, record, view)
+    return success_response(data={"record": {**record, "review": review}, "chart": chart})
