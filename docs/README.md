@@ -1,6 +1,6 @@
 # A股轮动策略交易系统 - 设计文档索引
 
-> 版本: v1.2 | 更新日期: 2026-05-05
+> 版本: v1.3 | 更新日期: 2026-11-13 | 更新: 补录 13，新增 14 盘感训练模块设计文档
 
 ---
 
@@ -20,6 +20,8 @@
 | 10 | [因子引擎设计文档](10-factor-engine.md) | FactorRegistry、置信度加权合成、截面上下文、API 与 `DEFAULT_WEIGHTS` |
 | 11 | [因子算法参考](11-factor-algorithms.md) | RSI/MACD/布林带/KDJ/动量/情绪/估值/轮动（含持续性截面定义） |
 | 12 | [MCP Agent 设计文档](12-mcp-agent.md) | MCP协议、SSE传输、金融Agent、工具定义与注册 |
+| 13 | [未完成功能实现指导文档](13-implementation-guide.md) | 各模块未完成功能的实现方案与最终状态 |
+| 14 | [盘感训练模块设计文档](14-stock-sense.md) | 盲盒回放、会话防作弊、交易结算、划线、复盘后市、盘后总结、前端交互 |
 
 ---
 
@@ -41,3 +43,4 @@
 - AI 决策 → [09-AI 决策服务设计文档](09-ai-decision.md) ⭐ 新增
 - 因子分析 → [10-因子引擎设计文档](10-factor-engine.md) + [11-因子算法参考](11-factor-algorithms.md)
 - MCP Agent → [12-MCP Agent 设计文档](12-mcp-agent.md)
+- 盘感训练 → [14-盘感训练模块设计文档](14-stock-sense.md) ⭐ 新增
