@@ -91,5 +91,9 @@ const geo = computed(() => {
 .candle-diagram {
   display: block;
   flex: none;
+  /* 带 viewBox 会等比缩放：容器（弹窗正文最窄 350 左右）放不下 400 宽时整体缩小，
+     此前没有 max-width，手机端右侧被 overflow-x:hidden 裁掉一截 */
+  max-width: 100%;
+  height: auto;
 }
 </style>

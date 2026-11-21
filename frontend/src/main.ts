@@ -15,6 +15,7 @@ import {
 import App from './App.vue'
 import router from './router'
 import './styles/index.scss'
+import './styles/mobile.scss'
 
 const app = createApp(App)
 

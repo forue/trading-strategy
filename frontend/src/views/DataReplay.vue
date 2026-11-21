@@ -152,31 +152,49 @@
             <div class="card-header">
               <span class="card-title">历史寻优记录（最新在前）</span>
             </div>
-            <div class="responsive-table">
+            <!-- 手机端：七列历史表改为记录条目 -->
+            <ul v-if="bp.isMobile.value" class="m-hist-list">
+              <li v-for="(row, hi) in pagedHistory" :key="hi" class="m-hist-row">
+                <div class="m-hist-head">
+                  <span class="m-hist-time">{{ row.created_at }}</span>
+                  <el-tag size="small">{{ row.strategy_type }}</el-tag>
+                </div>
+                <div class="m-hist-grid">
+                  <div><em>总收益</em><b :style="{ color: row.total_return >= 0 ? 'var(--accent-danger)' : 'var(--accent-success)' }">{{ (row.total_return * 100).toFixed(2) }}%</b></div>
+                  <div><em>最大回撤</em><b>{{ (row.max_drawdown * 100).toFixed(2) }}%</b></div>
+                  <div><em>夏普</em><b>{{ row.sharpe_ratio }}</b></div>
+                  <div><em>试验</em><b>{{ row.n_trials }}</b></div>
+                </div>
+                <div class="m-hist-range">{{ row.train_range?.join(' ~ ') || '--' }}</div>
+              </li>
+            </ul>
+
+            <div v-else class="responsive-table">
               <el-table :data="pagedHistory" stripe size="small" style="width: 100%">
-                <el-table-column prop="created_at" label="完成时间" width="170" />
-                <el-table-column prop="strategy_type" label="策略" width="100" />
-                <el-table-column prop="n_trials" label="试验次数" width="95" />
-                <el-table-column label="总收益" width="100">
+                <el-table-column prop="created_at" label="完成时间" width="160" />
+                <el-table-column prop="strategy_type" label="策略" width="96" />
+                <el-table-column prop="n_trials" label="试验次数" width="96" align="right" />
+                <el-table-column label="总收益" width="96" align="right">
                   <template #default="{ row }">{{ (row.total_return * 100).toFixed(2) }}%</template>
                 </el-table-column>
-                <el-table-column label="最大回撤" width="100">
+                <el-table-column label="最大回撤" width="96" align="right">
                   <template #default="{ row }">{{ (row.max_drawdown * 100).toFixed(2) }}%</template>
                 </el-table-column>
-                <el-table-column prop="sharpe_ratio" label="夏普" width="90" />
+                <el-table-column prop="sharpe_ratio" label="夏普" width="96" align="right" />
                 <el-table-column label="训练区间" min-width="180">
                   <template #default="{ row }">{{ row.train_range?.join(' ~ ') || '--' }}</template>
                 </el-table-column>
               </el-table>
-              <el-pagination
-                v-model:current-page="histPage"
-                v-model:page-size="histSize"
-                :total="optimizeHistory.length"
-                :page-sizes="[10, 20]"
-                layout="total, sizes, prev, pager, next"
-                class="table-pagination"
-              />
             </div>
+
+            <el-pagination
+              v-model:current-page="histPage"
+              v-model:page-size="histSize"
+              :total="optimizeHistory.length"
+              :page-sizes="[10, 20]"
+              layout="total, sizes, prev, pager, next"
+              class="table-pagination"
+            />
           </div>
         </el-tab-pane>
       </el-tabs>
@@ -201,7 +219,7 @@
         </el-col>
         <el-col :xs="12" :sm="6">
           <div class="stat-box">
-            <div class="stat-value" :style="{ color: maxRiseSector?.index_change_pct >= 0 ? '#f56c6c' : '#67c23a' }">
+            <div class="stat-value name" :style="{ color: maxRiseSector?.index_change_pct >= 0 ? '#f56c6c' : '#67c23a' }">
               {{ maxRiseSector?.sector_name || '-' }}
             </div>
             <div class="stat-label">领涨板块 {{ maxRiseSector ? (maxRiseSector.index_change_pct >= 0 ? '+' : '') + maxRiseSector.index_change_pct.toFixed(2) + '%' : '' }}</div>
@@ -209,30 +227,47 @@
         </el-col>
       </el-row>
 
-      <v-chart v-if="dayData?.date" :option="flowChartOption" :key="`flow-${dayData.date}`" style="height: 350px" autoresize />
-      <div v-else style="height: 350px; display: flex; align-items: center; justify-content: center; color: #909399">
+      <v-chart v-if="dayData?.date" :option="flowChartOption" :key="`flow-${dayData.date}`" class="flow-chart" autoresize />
+      <div v-else class="flow-chart chart-placeholder">
         加载中...
       </div>
 
-      <div class="responsive-table"><el-table :data="dayData.sectors" stripe size="small" style="margin-top: 16px" :default-sort="{ prop: 'index_change_pct', order: 'descending' }">
+      <!-- 手机端：六列板块数据改为「名称+涨跌幅 / 指标网格」条目 -->
+      <ul v-if="bp.isMobile.value" class="m-sector-data">
+        <li v-for="row in sortedDaySectors" :key="row.sector_code" class="m-sector-data-row">
+          <div class="m-sd-head">
+            <span class="m-sd-name">{{ row.sector_name }}</span>
+            <span class="m-sd-change" :style="{ color: row.index_change_pct >= 0 ? 'var(--accent-danger)' : 'var(--accent-success)' }">
+              {{ row.index_change_pct >= 0 ? '+' : '' }}{{ row.index_change_pct.toFixed(2) }}%
+            </span>
+          </div>
+          <div class="m-sd-grid">
+            <div><em>收盘指数</em><b>{{ row.index_close?.toFixed(2) }}</b></div>
+            <div><em>主力净流入</em><b :style="{ color: row.main_net_inflow >= 0 ? 'var(--accent-danger)' : 'var(--accent-success)' }">{{ (row.main_net_inflow / 1e8).toFixed(2) }}亿</b></div>
+            <div><em>成交额</em><b>{{ (row.turnover / 1e8).toFixed(2) }}亿</b></div>
+          </div>
+        </li>
+      </ul>
+
+      <div v-else class="responsive-table"><el-table :data="dayData.sectors" stripe size="small" style="margin-top: 16px" :default-sort="{ prop: 'index_change_pct', order: 'descending' }">
         <el-table-column prop="sector_name" label="板块" width="120" fixed />
-        <el-table-column prop="index_change_pct" label="涨跌幅" width="100" sortable>
+        <el-table-column prop="index_change_pct" label="涨跌幅" min-width="96" sortable align="right">
           <template #default="{ row }">
             <span :class="row.index_change_pct >= 0 ? 'signal-buy' : 'signal-sell'">
               {{ row.index_change_pct >= 0 ? '+' : '' }}{{ row.index_change_pct.toFixed(2) }}%
             </span>
           </template>
         </el-table-column>
-        <el-table-column prop="index_close" label="收盘指数" width="100">
+        <el-table-column prop="index_close" label="收盘指数" min-width="96" align="right">
           <template #default="{ row }">{{ row.index_close?.toFixed(2) }}</template>
         </el-table-column>
-        <el-table-column prop="main_net_inflow" label="主力净流入(亿)" width="130" sortable>
+        <el-table-column prop="main_net_inflow" label="主力净流入(亿)" min-width="120" sortable align="right">
           <template #default="{ row }">
             <span :style="{ color: row.main_net_inflow >= 0 ? '#f56c6c' : '#67c23a' }">{{ (row.main_net_inflow / 1e8).toFixed(2) }}</span>
           </template>
         </el-table-column>
         <!-- 北向资金数据源已停止披露，列置灰停用 -->
-        <el-table-column prop="north_net_inflow" label="北向净流入(亿)" width="150" sortable label-class-name="col-disabled" class-name="col-disabled">
+        <el-table-column prop="north_net_inflow" label="北向净流入(亿)" min-width="140" sortable label-class-name="col-disabled" class-name="col-disabled" align="right">
           <template #header>
             <el-tooltip content="沪深港通自 2024-08-19 起停止披露北向资金净买额，该列已停用" placement="top">
               <span>北向净流入(亿)<el-tag size="small" type="info" effect="plain">已停用</el-tag></span>
@@ -242,7 +277,7 @@
             <span class="disabled-text">{{ (row.north_net_inflow / 1e8).toFixed(2) }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="turnover" label="成交额(亿)" width="110" sortable>
+        <el-table-column prop="turnover" label="成交额(亿)" min-width="110" sortable align="right">
           <template #default="{ row }">{{ (row.turnover / 1e8).toFixed(2) }}</template>
         </el-table-column>
       </el-table></div>
@@ -274,25 +309,42 @@
         </el-col>
       </el-row>
 
-      <v-chart :option="sectorHistoryChartOption" style="height: 400px" autoresize />
+      <v-chart :option="sectorHistoryChartOption" class="sector-history-chart" autoresize />
 
-      <div class="responsive-table"><el-table :data="sectorHistory" stripe size="small" style="margin-top: 16px">
+      <!-- 手机端：交易日历史同样改为条目 -->
+      <ul v-if="bp.isMobile.value" class="m-sector-data">
+        <li v-for="row in sectorHistory" :key="row.date" class="m-sector-data-row">
+          <div class="m-sd-head">
+            <span class="m-sd-name">{{ row.date }}</span>
+            <span class="m-sd-change" :style="{ color: row.index_change_pct >= 0 ? 'var(--accent-danger)' : 'var(--accent-success)' }">
+              {{ row.index_change_pct >= 0 ? '+' : '' }}{{ row.index_change_pct.toFixed(2) }}%
+            </span>
+          </div>
+          <div class="m-sd-grid">
+            <div><em>收盘指数</em><b>{{ row.index_close?.toFixed(2) }}</b></div>
+            <div><em>主力净流入</em><b :style="{ color: row.main_net_inflow >= 0 ? 'var(--accent-danger)' : 'var(--accent-success)' }">{{ (row.main_net_inflow / 1e8).toFixed(2) }}亿</b></div>
+            <div><em>成交额</em><b>{{ (row.turnover / 1e8).toFixed(2) }}亿</b></div>
+          </div>
+        </li>
+      </ul>
+
+      <div v-else class="responsive-table"><el-table :data="sectorHistory" stripe size="small" style="margin-top: 16px">
         <el-table-column prop="date" label="日期" width="120" sortable />
-        <el-table-column prop="index_change_pct" label="涨跌幅" width="100" sortable>
+        <el-table-column prop="index_change_pct" label="涨跌幅" min-width="96" sortable align="right">
           <template #default="{ row }">
             <span :class="row.index_change_pct >= 0 ? 'signal-buy' : 'signal-sell'">{{ row.index_change_pct >= 0 ? '+' : '' }}{{ row.index_change_pct.toFixed(2) }}%</span>
           </template>
         </el-table-column>
-        <el-table-column prop="index_close" label="收盘指数" width="100">
+        <el-table-column prop="index_close" label="收盘指数" min-width="96" align="right">
           <template #default="{ row }">{{ row.index_close?.toFixed(2) }}</template>
         </el-table-column>
-        <el-table-column prop="main_net_inflow" label="主力净流入(亿)" width="130" sortable>
+        <el-table-column prop="main_net_inflow" label="主力净流入(亿)" min-width="120" sortable align="right">
           <template #default="{ row }">
             <span :style="{ color: row.main_net_inflow >= 0 ? '#f56c6c' : '#67c23a' }">{{ (row.main_net_inflow / 1e8).toFixed(2) }}</span>
           </template>
         </el-table-column>
         <!-- 北向资金数据源已停止披露，列置灰停用 -->
-        <el-table-column prop="north_net_inflow" label="北向净流入(亿)" width="150" sortable label-class-name="col-disabled" class-name="col-disabled">
+        <el-table-column prop="north_net_inflow" label="北向净流入(亿)" min-width="140" sortable label-class-name="col-disabled" class-name="col-disabled" align="right">
           <template #header>
             <el-tooltip content="沪深港通自 2024-08-19 起停止披露北向资金净买额，该列已停用" placement="top">
               <span>北向净流入(亿)<el-tag size="small" type="info" effect="plain">已停用</el-tag></span>
@@ -302,7 +354,7 @@
             <span class="disabled-text">{{ (row.north_net_inflow / 1e8).toFixed(2) }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="turnover" label="成交额(亿)" width="110" sortable>
+        <el-table-column prop="turnover" label="成交额(亿)" min-width="110" sortable align="right">
           <template #default="{ row }">{{ (row.turnover / 1e8).toFixed(2) }}</template>
         </el-table-column>
       </el-table></div>
@@ -386,7 +438,7 @@
               <span v-else style="color: var(--text-tertiary)">空仓</span>
             </template>
           </el-table-column>
-          <el-table-column label="买入" min-width="150">
+          <el-table-column label="买入" min-width="140">
             <template #default="{ row }">
               <el-tag v-for="sig in row.buySignals" :key="sig.sector_code" size="small" type="danger" style="margin: 1px">
                 {{ sig.sector_name }}
@@ -396,7 +448,7 @@
               </span>
             </template>
           </el-table-column>
-          <el-table-column label="卖出" min-width="150">
+          <el-table-column label="卖出" min-width="140">
             <template #default="{ row }">
               <el-tag v-for="sig in row.sellSignals" :key="sig.sector_code" size="small" type="success" style="margin: 1px">
                 {{ sig.sector_name }}
@@ -404,25 +456,25 @@
               <span v-if="!row.sellSignals.length" style="color: var(--text-tertiary)">-</span>
             </template>
           </el-table-column>
-          <el-table-column prop="strategy_return" label="策略日收益" width="100" sortable>
+          <el-table-column prop="strategy_return" label="策略日收益" width="96" sortable align="right">
             <template #default="{ row }">
               <span :style="{ color: row.strategy_return >= 0 ? (isDark ? '#ff6f61' : '#f56c6c') : (isDark ? '#357a5c' : '#67c23a') }">
                 {{ row.strategy_return >= 0 ? '+' : '' }}{{ row.strategy_return.toFixed(2) }}%
               </span>
             </template>
           </el-table-column>
-          <el-table-column prop="benchmark_return" label="基准日收益" width="100">
+          <el-table-column prop="benchmark_return" label="基准日收益" width="96" align="right">
             <template #default="{ row }">
               <span style="color: var(--text-tertiary)">{{ row.benchmark_return >= 0 ? '+' : '' }}{{ row.benchmark_return.toFixed(2) }}%</span>
             </template>
           </el-table-column>
-          <el-table-column prop="total_position_value" label="持仓市值" width="105">
+          <el-table-column prop="total_position_value" label="持仓市值" width="110" align="right">
             <template #default="{ row }">{{ formatOverlayMoney(row.total_position_value) }}</template>
           </el-table-column>
-          <el-table-column prop="cash" label="现金" width="105">
+          <el-table-column prop="cash" label="现金" width="110">
             <template #default="{ row }">{{ formatOverlayMoney(row.cash) }}</template>
           </el-table-column>
-          <el-table-column prop="total_asset" label="总资产" width="105" sortable>
+          <el-table-column prop="total_asset" label="总资产" width="110" sortable>
             <template #default="{ row }">{{ formatOverlayMoney(row.total_asset) }}</template>
           </el-table-column>
         </el-table></div>
@@ -442,21 +494,21 @@
           <!-- 持仓快照 -->
           <div v-if="group.snapshot?.portfolio?.length" class="responsive-table" style="margin: 8px 0">
             <el-table :data="group.snapshot.portfolio" stripe size="small" max-height="200">
-              <el-table-column prop="sector_name" label="板块" width="120" />
-              <el-table-column prop="weight" label="仓位" width="80">
+              <el-table-column prop="sector_name" label="板块" min-width="120" />
+              <el-table-column prop="weight" label="仓位" min-width="80" align="right">
                 <template #default="{ row }">{{ (row.weight * 100).toFixed(1) }}%</template>
               </el-table-column>
-              <el-table-column prop="amount" label="金额" width="100">
+              <el-table-column prop="amount" label="金额" min-width="96" align="right">
                 <template #default="{ row }">{{ formatOverlayMoney(row.amount) }}</template>
               </el-table-column>
-              <el-table-column prop="day_change_pct" label="当日涨跌" width="90">
+              <el-table-column prop="day_change_pct" label="当日涨跌" min-width="96" align="right">
                 <template #default="{ row }">
                   <span :style="{ color: row.day_change_pct >= 0 ? '#f56c6c' : '#67c23a' }">
                     {{ row.day_change_pct >= 0 ? '+' : '' }}{{ row.day_change_pct.toFixed(2) }}%
                   </span>
                 </template>
               </el-table-column>
-              <el-table-column prop="contribution_pct" label="贡献" width="80">
+              <el-table-column prop="contribution_pct" label="贡献" min-width="80" align="right">
                 <template #default="{ row }">
                   <span :style="{ color: row.contribution_pct >= 0 ? '#f56c6c' : '#67c23a' }">
                     {{ row.contribution_pct >= 0 ? '+' : '' }}{{ row.contribution_pct.toFixed(2) }}%
@@ -596,6 +648,10 @@ const avgChangeStr = computed(() => {
   const avg = dayData.value.sectors.reduce((sum, s) => sum + s.index_change_pct, 0) / dayData.value.sectors.length
   return (avg >= 0 ? '+' : '') + avg.toFixed(2) + '%'
 })
+// 移动端列表沿用表格默认排序（涨跌幅降序）
+const sortedDaySectors = computed(() =>
+  [...(dayData.value?.sectors || [])].sort((a, b) => (b.index_change_pct ?? 0) - (a.index_change_pct ?? 0)),
+)
 const maxRiseSector = computed(() => {
   if (!dayData.value?.sectors.length) return null
   return [...dayData.value.sectors].sort((a, b) => b.index_change_pct - a.index_change_pct)[0]
@@ -927,28 +983,39 @@ const flowChartOption = computed(() => {
         return html
       }
     },
-    legend: { data: ['涨跌幅(%)', '主力净流入(亿)', '北向净流入(亿)(已停用)'], selectedMode: 'multiple', textStyle: { color: textColor } },
-    grid: [
-      { left: 70, right: 50, top: 35, height: '42%' },
-      { left: 70, right: 50, top: '58%', height: '32%' },
-    ],
+    // 规则7.5.3：移动端图例顶部单行9px最多2项（北向已停用不展示）
+    legend: {
+      data: bp.isMobile.value ? ['涨跌幅(%)', '主力净流入(亿)'] : ['涨跌幅(%)', '主力净流入(亿)', '北向净流入(亿)(已停用)'],
+      selectedMode: 'multiple', top: 2, left: 'center', itemWidth: 12, itemHeight: 8,
+      textStyle: { color: textColor, fontSize: bp.isMobile.value ? 9 : 12 },
+    },
+    grid: bp.isMobile.value
+      ? [
+          { left: 46, right: 12, top: 28, height: '38%' },
+          { left: 46, right: 12, top: '62%', height: '22%' },
+        ]
+      : [
+          { left: 70, right: 50, top: 35, height: '40%' },
+          { left: 70, right: 50, top: '56%', height: '26%' },
+        ],
     dataZoom: [
       { type: 'inside', xAxisIndex: [0, 1], start: 0, end: 100 },
-      { type: 'slider', xAxisIndex: [0, 1], start: 0, end: 100, bottom: 5, height: 20, textStyle: { color: textColor } },
+      { type: 'slider', xAxisIndex: [0, 1], start: 0, end: 100, bottom: 4, height: 18, textStyle: { color: textColor } },
     ],
     xAxis: [
       { type: 'category', data: sectorNames, gridIndex: 0, axisLabel: { show: false }, position: 'top' },
-      { type: 'category', data: sectorNames, gridIndex: 1, axisLabel: { rotate: bp.isMobile.value ? 90 : 45, fontSize: bp.isMobile.value ? 9 : 10, color: textColor, interval: bp.labelInterval(sectorNames.length) }, position: 'bottom' },
+      { type: 'category', data: sectorNames, gridIndex: 1, axisLabel: { rotate: 45, fontSize: 9, color: textColor, interval: Math.max(bp.labelInterval(sectorNames.length), 2) }, position: 'bottom' },
     ],
+    // 规则7.5.3：移动端隐藏轴名称（靠图例颜色区分），避免名称压在图上
     yAxis: [
-      { type: 'value', name: '涨跌幅(%)', position: 'left', gridIndex: 0, nameTextStyle: { color: textColor }, axisLine: { show: true, lineStyle: { color: isDark ? '#7b93f5' : '#409eff' } }, axisLabel: { formatter: '{value}%', color: isDark ? '#646878' : '#9499a6' }, splitLine: { lineStyle: { color: gridColor } } },
-      { type: 'value', name: '主力(亿)', position: 'left', gridIndex: 1, offset: 0, nameTextStyle: { color: textColor }, axisLine: { show: true, lineStyle: { color: isDark ? '#f06060' : '#f56c6c' } }, axisLabel: { formatter: '{value}', margin: 8, color: isDark ? '#646878' : '#9499a6' }, splitLine: { lineStyle: { color: gridColor } } },
-      { type: 'value', name: '北向(亿)(停用)', position: 'right', gridIndex: 1, axisLine: { show: true, lineStyle: { color: '#909399' } }, axisLabel: { formatter: '{value}', margin: 8, color: isDark ? '#646878' : '#9499a6' }, splitLine: { show: false } },
+      { type: 'value', name: bp.isMobile.value ? '' : '涨跌幅(%)', position: 'left', gridIndex: 0, nameTextStyle: { color: textColor, fontSize: 10 }, axisLine: { show: true, lineStyle: { color: isDark ? '#7b93f5' : '#409eff' } }, axisLabel: { formatter: '{value}%', fontSize: 9, color: isDark ? '#646878' : '#9499a6' }, splitLine: { lineStyle: { color: gridColor } } },
+      { type: 'value', name: bp.isMobile.value ? '' : '主力(亿)', position: 'left', gridIndex: 1, offset: 0, nameTextStyle: { color: textColor, fontSize: 10 }, axisLine: { show: true, lineStyle: { color: isDark ? '#f06060' : '#f56c6c' } }, axisLabel: { formatter: '{value}', margin: 6, fontSize: 9, color: isDark ? '#646878' : '#9499a6' }, splitLine: { lineStyle: { color: gridColor } } },
+      ...(bp.isMobile.value ? [] : [{ type: 'value', name: '北向(亿)(停用)', position: 'right', gridIndex: 1, axisLine: { show: true, lineStyle: { color: '#909399' } }, axisLabel: { formatter: '{value}', margin: 8, color: isDark ? '#646878' : '#9499a6' }, splitLine: { show: false } }]),
     ],
     series: [
       { name: '涨跌幅(%)', type: 'bar', xAxisIndex: 0, yAxisIndex: 0, data: changes, itemStyle: { color: (p: any) => p.data >= 0 ? '#f56c6c' : '#67c23a' }, barMaxWidth: 24 },
       { name: '主力净流入(亿)', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: mainFlow, itemStyle: { color: '#f56c6c' }, barMaxWidth: 16 },
-      { name: '北向净流入(亿)(已停用)', type: 'bar', xAxisIndex: 1, yAxisIndex: 2, data: northFlow, itemStyle: { color: '#909399', opacity: 0.5 }, barMaxWidth: 16 },
+      ...(bp.isMobile.value ? [] : [{ name: '北向净流入(亿)(已停用)', type: 'bar', xAxisIndex: 1, yAxisIndex: 2, data: northFlow, itemStyle: { color: '#909399', opacity: 0.5 }, barMaxWidth: 16 }]),
     ],
   }
 })
@@ -1017,7 +1084,7 @@ const sectorHistoryChartOption = computed(() => {
     legend: { data: ['K线', 'MA5', 'MA10', '主力净流入(亿)', '北向净流入(亿)(已停用)'], top: 0, textStyle: { color: textColor } },
     // 上下双面板：上方K线占70%，下方资金流占30%
     grid: [
-      { left: 70, right: 20, top: 30, height: '52%' },  // K线主图
+      { left: 70, right: 20, top: 45, height: '52%' },  // K线主图
       { left: 70, right: 20, top: '72%', height: '20%' }, // 资金流副图
     ],
     xAxis: [
@@ -1206,24 +1273,24 @@ init()
 .control-input-num-small { width: 120px; max-width: 100%; }
 .date-progress { font-size: 14px; color: var(--accent-primary); font-weight: 600; margin-left: 8px; }
 .stat-box {
-  text-align: center; padding: 16px; background: var(--bg-tertiary); border-radius: var(--radius-sm);
-  transition: background var(--transition-base);
-  .stat-value { font-size: 20px; font-weight: 600; color: var(--text-primary); }
+  text-align: center; padding: 16px 0;
+  border-bottom: 1px solid var(--border-primary);
+  .stat-value { font-family: var(--font-mono); font-size: 24px; font-weight: 600; color: var(--text-primary); }
   .stat-label { font-size: 12px; color: var(--text-tertiary); margin-top: 4px; }
   &.rise .stat-value { color: var(--accent-danger); }
   &.fall .stat-value { color: var(--accent-success); }
 }
 .card-header {
-  display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;
-  .card-title { font-size: 16px; font-weight: 600; color: var(--text-primary); }
+  display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px;
+  .card-title { font-size: 18px; font-weight: 600; color: var(--text-primary); }
 }
 .params-display {
   margin-bottom: 12px; padding: 8px;
   background: var(--bg-tertiary); border-radius: var(--radius-sm);
 }
 .rebalance-group {
-  margin-bottom: 16px; padding: 12px; background: var(--bg-tertiary); border-radius: var(--radius-sm);
-  border-left: 3px solid var(--accent-primary);
+  margin-bottom: 16px; padding: 12px 0;
+  border-bottom: 1px solid var(--border-primary);
 }
 .rebalance-date-header {
   display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
@@ -1245,8 +1312,88 @@ init()
 }
 :deep(.el-tabs__nav-wrap::after) { display: none; }
 
+.flow-chart { height: var(--chart-h-lg); width: 100%; }
+.sector-history-chart { height: var(--chart-h-lg); width: 100%; }
+.chart-placeholder { display: flex; align-items: center; justify-content: center; color: var(--text-tertiary); font-size: 12px; }
+
+/* ─── 手机端：历史寻优记录 ─── */
+.m-hist-list,
+.m-sector-data {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.m-hist-row {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border-subtle);
+
+  &:last-child { border-bottom: none; }
+}
+
+.m-hist-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+
+  .m-hist-time { font-size: 11px; color: var(--text-secondary); font-family: var(--font-mono); }
+}
+
+.m-hist-grid,
+.m-sd-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px;
+  margin-top: 5px;
+
+  & > div {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+    padding: 4px 5px;
+    background: var(--bg-tertiary);
+    border-radius: 4px;
+
+    em { font-style: normal; font-size: 9px; color: var(--text-tertiary); }
+    b { font-size: 11px; font-weight: 600; font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; }
+  }
+}
+
+.m-hist-range { margin-top: 4px; font-size: 10px; color: var(--text-tertiary); font-family: var(--font-mono); }
+
+/* ─── 手机端：每日板块数据 ─── */
+.m-sector-data-row {
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border-subtle);
+
+  &:last-child { border-bottom: none; }
+}
+
+.m-sd-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+
+  .m-sd-name {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .m-sd-change { font-size: 12px; font-weight: 600; font-family: var(--font-mono); }
+}
+
+.m-sd-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
 @media (max-width: 768px) {
   .stat-box { padding: 10px; .stat-value { font-size: 16px; } }
+  .flow-chart { height: var(--chart-h-md); }
+  .sector-history-chart { height: var(--chart-h-md); }
   .card-header { flex-wrap: wrap; gap: 8px; }
   .replay-controls {
     :deep(.el-date-picker),
@@ -1260,20 +1407,39 @@ init()
   :deep(.el-col) { padding-left: 8px !important; padding-right: 8px !important; margin-bottom: 8px; }
 }
 @media (max-width: 480px) {
+  /* 规则7.5.2：控件紧凑网格，一屏可见多个控件；规则7.5.1：按钮12px */
   .replay-controls {
-    flex-direction: column; align-items: stretch;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    padding: 8px 0;
+    align-items: center;
     :deep(.el-divider--vertical) { display: none; }
+    :deep(.el-button) { width: 100%; margin: 0; font-size: 12px; padding: 6px 8px; height: 32px; }
+    :deep(.el-button .el-icon + span) { margin-left: 2px; }
+    :deep(.el-input-number) { width: 100%; }
+    > span { font-size: 11px; white-space: nowrap; }
   }
-  .control-date-range,
+  /* 日期区间、板块选择、进度独占整行 */
+  .control-date-range { grid-column: 1 / -1; width: 100% !important; }
+  .control-select-wide { grid-column: 1 / -1; }
+  .date-progress { margin-left: 0; }
   .control-select,
-  .control-select-wide,
   .control-select-small,
   .control-input-num,
   .control-input-num-small { width: 100%; }
-  .stat-box { padding: 8px; .stat-value { font-size: 14px; } }
-  .card-header { flex-direction: column; align-items: flex-start; }
-  .params-display { font-size: 12px; }
-  .date-progress { margin-left: auto; font-size: 12px; }
+  .stat-box {
+    padding: 8px;
+    .stat-value { font-size: 17px; }
+    /* 领涨板块一格里放的是板块名，长文本必须降字号否则撑破方格 */
+    .stat-value.name { font-size: 13px; line-height: 1.3; word-break: break-all; }
+    .stat-label { font-size: 10px; }
+  }
+  .card-header { flex-direction: column; align-items: stretch; gap: 6px; }
+  .stat-grid :deep(.el-col) { margin-bottom: 6px; }
+  :deep(.el-tabs__item) { font-size: 12px; padding: 0 10px; }
+  .params-display { font-size: 11px; }
+  .date-progress { font-size: 11px; }
   :deep(.el-row) { margin-left: -4px !important; margin-right: -4px !important; }
   :deep(.el-col) { padding-left: 4px !important; padding-right: 4px !important; margin-bottom: 6px; }
 }

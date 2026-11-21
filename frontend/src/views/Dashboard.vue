@@ -24,7 +24,7 @@
             <el-radio-button value="20d">20日</el-radio-button>
           </el-radio-group>
         </div>
-        <v-chart :option="heatmapOption" style="height: 380px" autoresize />
+        <v-chart :option="heatmapOption" class="heatmap-chart" autoresize />
       </div>
 
       <!-- Today's Signals -->
@@ -95,24 +95,44 @@
           :description="`当日信号为清仓卖出，持仓已全部离场（${selectedDateClearReason}）`"
         />
 
-        <el-table :data="selectedDateSignals" max-height="200">
-          <el-table-column prop="sector_name" label="板块" />
-          <el-table-column prop="direction" label="方向">
-            <template #default="{ row }">
+        <!-- 手机端：五列表格在 390px 下必然被挤压，改为两行信息块 -->
+        <ul v-if="bp.isMobile.value" class="m-signal-list">
+          <li v-for="(row, ri) in selectedDateSignals" :key="ri" class="m-signal-row">
+            <div class="m-row-head">
+              <span class="m-row-name">{{ row.sector_name }}</span>
               <el-tag v-if="isClearSignal(row)" type="warning" size="small">清仓</el-tag>
               <span v-else :class="row.direction === 'BUY' ? 'signal-buy' : 'signal-sell'">
                 {{ row.direction === 'BUY' ? '买入' : '卖出' }}
               </span>
-            </template>
-          </el-table-column>
-          <el-table-column prop="etf_code" label="ETF" />
-          <el-table-column prop="score" label="评分">
-            <template #default="{ row }">{{ row.score?.toFixed(2) }}</template>
-          </el-table-column>
-          <el-table-column prop="position_ratio" label="仓位">
-            <template #default="{ row }">{{ ((row.position_ratio || 0) * 100).toFixed(1) }}%</template>
-          </el-table-column>
-        </el-table>
+            </div>
+            <div class="m-row-meta">
+              <span>{{ row.etf_code || '—' }}</span>
+              <span>评分 {{ row.score != null ? row.score.toFixed(2) : '—' }}</span>
+              <span>仓位 {{ ((row.position_ratio || 0) * 100).toFixed(1) }}%</span>
+            </div>
+          </li>
+        </ul>
+
+        <div v-else class="responsive-table">
+          <el-table :data="selectedDateSignals" max-height="200">
+            <el-table-column prop="sector_name" label="板块" />
+            <el-table-column prop="direction" label="方向">
+              <template #default="{ row }">
+                <el-tag v-if="isClearSignal(row)" type="warning" size="small">清仓</el-tag>
+                <span v-else :class="row.direction === 'BUY' ? 'signal-buy' : 'signal-sell'">
+                  {{ row.direction === 'BUY' ? '买入' : '卖出' }}
+                </span>
+              </template>
+            </el-table-column>
+            <el-table-column prop="etf_code" label="ETF" />
+            <el-table-column prop="score" label="评分" align="right">
+              <template #default="{ row }">{{ row.score?.toFixed(2) ?? '—' }}</template>
+            </el-table-column>
+            <el-table-column prop="position_ratio" label="仓位" align="right">
+              <template #default="{ row }">{{ ((row.position_ratio || 0) * 100).toFixed(1) }}%</template>
+            </el-table-column>
+          </el-table>
+        </div>
 
         <!-- AI 分析回放：信号已清空/清仓时，历史解读必须标注为快照，避免误导 -->
         <div v-if="selectedAnalysis.length > 0" class="analysis-section">
@@ -185,10 +205,10 @@ const calendarMonth = ref(dayjs().format('YYYY-MM'))
 const todaySignals = ref<TradeSignal[]>([])
 
 const stats = ref([
-  { label: '总资产', value: '--', icon: 'Wallet', color: '#637ee8', bgColor: 'var(--accent-primary-light)' },
-  { label: '今日盈亏', value: '--', icon: 'TrendCharts', color: '#2da55a', bgColor: 'var(--accent-success-light)' },
-  { label: '累计收益率', value: '--', icon: 'DataLine', color: '#e6a23c', bgColor: 'var(--accent-warning-light)' },
-  { label: '活跃信号', value: '0', icon: 'Bell', color: '#e04a4a', bgColor: 'var(--accent-danger-light)' },
+  { label: '总资产', value: '--', icon: 'Wallet', color: 'var(--accent-primary)', bgColor: 'var(--accent-primary-light)' },
+  { label: '今日盈亏', value: '--', icon: 'TrendCharts', color: 'var(--accent-success)', bgColor: 'var(--accent-success-light)' },
+  { label: '累计收益率', value: '--', icon: 'DataLine', color: 'var(--accent-warning)', bgColor: 'var(--accent-warning-light)' },
+  { label: '活跃信号', value: '0', icon: 'Bell', color: 'var(--accent-danger)', bgColor: 'var(--accent-danger-light)' },
 ])
 
 const heatmapRawData = ref<any[]>([])
@@ -209,37 +229,70 @@ const heatmapOption = computed(() => {
 
   return {
     tooltip: {
+      // 手机端没有 hover：改点击触发，并用 confine 把提示框限制在图内，避免盖住标题或溢出屏幕
       position: 'top',
+      confine: true,
+      triggerOn: bp.isMobile.value ? 'click' : 'mousemove|click',
+      enterable: false,
+      textStyle: { fontSize: bp.isMobile.value ? 11 : 12 },
+      extraCssText: 'max-width:220px;white-space:normal;line-height:1.5;',
       formatter: (p: any) => {
         const sector = displaySectors[p.value[0]]
         const metrics = ['资金强度', '资金斜率', '相对强弱']
         return `${sector} - ${metrics[p.value[1]]}: ${p.value[2]?.toFixed(2)}`
       },
     },
-    grid: { top: 10, bottom: 60, left: 80, right: 20 },
+    // 手机端纵向空间紧张：压缩标题/色阶占位，把高度留给格子本身
+    // left 从 62 收到 26：纵轴 4 字标签改成竖排后横向只占一个字的宽度
+    grid: bp.isMobile.value
+      ? { top: 18, bottom: 52, left: 26, right: 8 }
+      : { top: 40, bottom: 96, left: 80, right: 20 },
     xAxis: {
       type: 'category',
       data: displaySectors,
-      axisLabel: { rotate: bp.isMobile.value ? 90 : 45, fontSize: bp.isMobile.value ? 10 : 11, color: axisLabelColor },
+      axisLabel: {
+        rotate: bp.isMobile.value ? 45 : 45,
+        fontSize: bp.isMobile.value ? 9 : 11,
+        color: axisLabelColor,
+        interval: bp.labelInterval(displaySectors.length),
+        // 手机上长板块名截断，避免竖排占位过高、相互遮挡
+        formatter: (value: string) => bp.isMobile.value && value.length > 4 ? value.slice(0, 4) + '…' : value,
+      },
     },
     yAxis: {
       type: 'category',
       data: ['资金强度', '资金斜率', '相对强弱'],
-      name: '热度排行指标',
+      // 手机端隐藏轴名：轴名会占用本就紧张的横向空间并压到格子上
+      name: bp.isMobile.value ? '' : '热度排行指标',
       nameLocation: 'end',
       nameGap: 20,
       nameTextStyle: { fontSize: 12, fontWeight: 'bold', color: textColor },
+      axisLabel: {
+        fontSize: bp.isMobile.value ? 9 : 11,
+        color: axisLabelColor,
+        // 手机端 4 字标签横排要吃 50 多像素，格子上方本来就窄：改竖排，一字一行
+        formatter: (v: string) => (bp.isMobile.value ? v.split('').join('\n') : v),
+        lineHeight: bp.isMobile.value ? 10 : 14,
+        margin: bp.isMobile.value ? 4 : 8,
+      },
     },
     visualMap: {
-      min: -3, max: 3, calculable: true, orient: 'horizontal', left: 'center', bottom: 0,
-      inRange: { color: isDark ? ['#1b3a5c', '#2d5280', '#3f6aa4', '#5182c4', '#505050', '#906040', '#b04030', '#d03020', '#e84838'] : ['#313695', '#4575b4', '#74add1', '#abd9e9', '#ffffbf', '#fee090', '#fdae61', '#f46d43', '#d73027'] },
+      min: -3, max: 3, calculable: !bp.isMobile.value, orient: 'horizontal', left: 'center', bottom: 0,
+      itemWidth: bp.isMobile.value ? 8 : 20,
+      itemHeight: bp.isMobile.value ? 100 : 140,
+      // 平滑发散色阶：蓝(流出/弱) → 中性灰(0) → 红(流入/强)，避免突兀的棕黄过渡
+      inRange: {
+        color: isDark
+          ? ['#2E5A8C', '#3D72A6', '#5A90BC', '#7CABC9', '#4A5560', '#C07F6E', '#D26A52', '#DE5339', '#E8422C']
+          : ['#537DB4', '#7FA3CC', '#ACC5DF', '#D7E3EE', '#EDEFF1', '#F3D5CB', '#EDB29E', '#E28A6E', '#D86247'],
+      },
       text: ['强', '弱'],
-      textStyle: { color: textColor },
+      textStyle: { color: textColor, fontSize: bp.isMobile.value ? 9 : 12 },
     },
     series: [{
       type: 'heatmap',
       data: buildHeatmapData(displaySectors),
-      label: { show: true, fontSize: 10, formatter: (p: any) => p.value[2]?.toFixed(1) },
+      label: { show: true, fontSize: bp.isMobile.value ? 8 : 10, formatter: (p: any) => p.value[2]?.toFixed(1) },
       emphasis: { itemStyle: { shadowBlur: 10, shadowColor: 'rgba(0,0,0,0.3)' } },
     }],
   }
@@ -338,11 +391,18 @@ const calendarOption = computed(() => {
     dateSignalsMap[d].push(sig)
   }
   const calData = Object.entries(dateSignalsMap).map(([date, signals]) => [date, signals.length])
-  const start = dayjs(calendarMonth.value + '-01')
-  const daysInMonth = start.daysInMonth()
+  // 固定 6 周（42 格）网格，消除不同月份 5/6 周导致的列数抖动
+  const firstOfMonth = dayjs(calendarMonth.value + '-01')
+  const offsetToMonday = (firstOfMonth.day() + 6) % 7
+  const rangeStart = firstOfMonth.subtract(offsetToMonday, 'day')
+  const rangeEnd = rangeStart.add(41, 'day')
+  const calRange: [string, string] = [rangeStart.format('YYYY-MM-DD'), rangeEnd.format('YYYY-MM-DD')]
+  const monthPrefix = calendarMonth.value
   const filledData: any[] = []
-  for (let i = 1; i <= daysInMonth; i++) {
-    const d = start.date(i).format('YYYY-MM-DD')
+  const outsideDates: string[] = []
+  for (let i = 0; i < 42; i++) {
+    const d = rangeStart.add(i, 'day').format('YYYY-MM-DD')
+    if (!d.startsWith(monthPrefix)) { outsideDates.push(d); continue }
     if (emptyDateMap[d]) continue // 空仓日由下方独立蓝色系列渲染
     const existing = calData.find(item => item[0] === d)
     if (existing) filledData.push(existing)
@@ -353,11 +413,20 @@ const calendarOption = computed(() => {
   const calBorderColor = isDark ? '#2a2d38' : '#dcdee0'
   const calEmptyColor = isDark ? '#1e2130' : '#f5f5f5'
   const calEmptyPositionColor = isDark ? '#2b4a7d' : '#a0cfff'
+  // 非本月格子：必须比"本月无数据"的 calEmptyColor 再深一档，否则两者同色，月份边界看不出来
+  const calOutsideColor = isDark ? '#15161c' : '#e9eaec'
   const emptyDates = Object.keys(emptyDateMap)
   return {
     tooltip: {
+      confine: true,
+      // 手指没有 hover：移动端改为点击格子后弹出，提示框不再跟指针跑到屏幕外
+      triggerOn: bp.isMobile.value ? 'click' : 'mousemove|click',
+      enterable: false,
+      textStyle: { fontSize: bp.isMobile.value ? 11 : 12 },
+      extraCssText: 'max-width:240px;white-space:normal;line-height:1.5;',
       formatter: (p: any) => {
         const date = p.data[0]
+        if (!String(date).startsWith(monthPrefix)) return `${date}<br/>非本月`
         const count = p.data[1]
         if (emptyDateMap[date]) {
           return `${date}: 空仓<br/>${emptyDateMap[date]}`
@@ -377,17 +446,20 @@ const calendarOption = computed(() => {
       // 仅作用于真实的信号数量系列，空仓标记系列不参与着色
       seriesIndex: 0,
       min: 0, max: 10, orient: 'horizontal', bottom: 0,
+      itemWidth: bp.isMobile.value ? 8 : 20,
+      itemHeight: bp.isMobile.value ? 80 : 140,
       inRange: { color: [calEmptyColor, '#9be9a8', '#40c463', '#30a14e', '#216e39'] },
-      textStyle: { color: calTextColor },
+      textStyle: { color: calTextColor, fontSize: bp.isMobile.value ? 9 : 12 },
     },
     calendar: {
-      top: 16, left: 60, right: 30, range: calendarMonth.value,
-      cellSize: ['auto', 18],
-      itemStyle: { borderWidth: 1, borderColor: calBorderColor, color: calEmptyColor },
-      splitLine: { show: true, lineStyle: { color: isDark ? '#333848' : '#d0d0d0' } },
+      top: 18, left: 'center', right: 'auto', range: calRange,
+      // 手机端放大格子：22px 在 390 宽下每天只剩 3px 间隙，点选困难
+      cellSize: bp.isMobile.value ? [28, 28] : [22, 22],
+      itemStyle: { borderWidth: 2, borderColor: calBorderColor, color: calEmptyColor },
+      splitLine: { show: false },
       yearLabel: { show: false },
-      dayLabel: { firstDay: 1, nameMap: 'cn', color: calTextColor },
-      monthLabel: { nameMap: 'cn', color: calTextColor },
+      dayLabel: { firstDay: 1, nameMap: 'cn', color: calTextColor, margin: bp.isMobile.value ? 12 : 10, fontSize: bp.isMobile.value ? 9 : 12 },
+      monthLabel: { show: false },
     },
     series: [
       {
@@ -403,6 +475,17 @@ const calendarOption = computed(() => {
         itemStyle: {
           color: calEmptyPositionColor,
           borderWidth: 1,
+          borderColor: calBorderColor,
+        },
+      },
+      {
+        // 非本月：单独一个系列，visualMap 的 seriesIndex 只作用于 0，这里不会被染色
+        type: 'heatmap',
+        coordinateSystem: 'calendar',
+        data: outsideDates.map(d => [d, 0]),
+        itemStyle: {
+          color: calOutsideColor,
+          borderWidth: 2,
           borderColor: calBorderColor,
         },
       },
@@ -442,6 +525,8 @@ const selectedDateStaleAnalysis = computed(
 async function handleCalendarClick(params: any) {
   if (params.data) {
     const date = params.data[0]
+    // 非本月格子只作月份边界提示，点了不该弹明细
+    if (!String(date).startsWith(calendarMonth.value)) return
     selectedDate.value = date
     const dayRecords = calendarRealData.value.filter((sig: any) => {
       const d = sig.signal_date || sig.created_at?.substring(0, 10)
@@ -503,18 +588,11 @@ watch(calendarMonth, () => loadCalendarData())
 </script>
 
 <style lang="scss" scoped>
-.stat-grid {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 16px;
-  margin-bottom: 16px;
-}
-
 .dashboard-grid {
   display: grid;
   grid-template-columns: 1.4fr 1fr;
-  gap: 16px;
-  margin-bottom: 16px;
+  gap: 32px;
+  margin-bottom: 48px;
 }
 
 .heatmap-card { margin-bottom: 0; }
@@ -527,7 +605,7 @@ watch(calendarMonth, () => loadCalendarData())
   max-width: 100%;
 }
 .calendar-chart {
-  height: 240px; width: 100%;
+  height: var(--chart-h-md); width: 100%;
 }
 
 .signal-list {
@@ -591,20 +669,56 @@ watch(calendarMonth, () => loadCalendarData())
 }
 
 @media (max-width: 1024px) {
-  .dashboard-grid {
-    grid-template-columns: 1fr;
-  }
-  .stat-grid {
-    grid-template-columns: repeat(2, 1fr);
-  }
+  .dashboard-grid { grid-template-columns: 1fr; }
+}
+
+.heatmap-chart {
+  height: var(--chart-h-lg);
+  width: 100%;
 }
 
 @media (max-width: 768px) {
-  .stat-grid { gap: 10px; }
-  .stat-card { padding: 14px 16px; }
-  .heatmap-card :deep(.echarts) { height: 280px !important; }
+  .stat-grid { gap: 12px; }
+  .heatmap-chart { height: var(--chart-h-md); }
   .signal-list { max-height: 240px; }
-  .calendar-chart { height: 200px; }
+  /* 22px 格子 × 6 行 = 132 + top 18 + 星期头 ≈ 171，200px 刚好放得下 */
+  .calendar-chart { height: var(--chart-h-sm); }
+}
+
+/* 手机端日历格子放大到 28px，6 行就是 168，再让色阶贴底不遮挡：
+   固定 232px（18 + 星期头 21 + 168 + 色阶 8 + 余量），否则色阶压在最后一行日期上 */
+@media (max-width: 480px) {
+  .calendar-chart { height: 232px; }
+}
+
+/* 手机端：热力图沿用 ≤768 的 260px，信号列表改为不限高，卡片间距压缩到 8px */
+@media (max-width: 480px) {
+  .dashboard-grid { gap: 8px; margin-bottom: 8px; }
+  .signal-list { max-height: none; }
+
+  .signal-item {
+    padding: 8px 0;
+
+    .signal-top .sector-name { font-size: 12px; }
+    .signal-top .signal-direction { font-size: 10px; padding: 1px 7px; }
+    .signal-meta {
+      margin-top: 4px;
+      gap: 8px;
+      font-size: 10px;
+      flex-wrap: wrap;
+    }
+  }
+
+  .signal-empty {
+    padding: 20px 0;
+    p { font-size: 11px; }
+  }
+
+  .signal-dialog-body { padding: 0; }
+  .analysis-section { margin-top: 10px; padding-top: 8px; }
+  .analysis-title { font-size: 12px; margin-bottom: 6px; }
+  .analysis-card { margin-bottom: 8px; padding: 8px; }
+  .analysis-header { margin-bottom: 4px; }
 }
 
 .signal-dialog-body {
@@ -661,15 +775,52 @@ watch(calendarMonth, () => loadCalendarData())
   font-size: 13px;
 }
 
-@media (max-width: 480px) {
-  .stat-grid {
-    grid-template-columns: 1fr;
-    gap: 8px;
+/* ─── 手机端信号列表（替代五列表格） ─── */
+.m-signal-list {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+}
+
+.m-signal-row {
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border-subtle);
+
+  &:last-child { border-bottom: none; }
+}
+
+.m-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+
+  .m-row-name {
+    font-weight: 600;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
-  .stat-card { padding: 10px 12px; }
-  .stat-value { font-size: 16px; }
-  :deep(.el-dialog) { width: 90% !important; }
-  .calendar-chart { height: 180px; }
+}
+
+.m-row-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 3px;
+  font-size: 10px;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+}
+
+/* ─── 手机端：热力图/日历降高，弹窗内容靠边 ─── */
+@media (max-width: 480px) {
+  .stat-grid { gap: 8px; }
+  .analysis-text { font-size: 12px; }
+  .analysis-risks, .analysis-suggest { font-size: 11px; }
+  .analysis-empty { font-size: 11px; margin-top: 10px; }
 }
 </style>
 

@@ -177,7 +177,7 @@
             <el-button size="small" @click="loadCacheStats" :loading="loadingCache">刷新统计</el-button>
           </div>
 
-          <el-row :gutter="20" v-if="cacheStats" style="margin-bottom: 20px">
+          <el-row class="stat-row" :gutter="20" v-if="cacheStats" style="margin-bottom: 20px">
             <el-col :xs="12" :sm="6">
               <div class="stat-box">
                 <div class="stat-value">{{ cacheStats.total_keys }}</div>
@@ -206,16 +206,29 @@
 
           <el-form label-width="160px" style="max-width: 600px; margin-bottom: 20px">
             <el-form-item label="默认缓存天数">
-              <el-input-number v-model="cacheTtlDays" :min="1" :max="90" @change="saveSettings" />
-              <span style="margin-left: 8px; color: var(--text-tertiary); font-size: 13px">天</span>
+              <div class="ctrl-unit">
+                <el-input-number v-model="cacheTtlDays" :min="1" :max="90" @change="saveSettings" />
+                <span class="unit-text">天</span>
+              </div>
             </el-form-item>
           </el-form>
 
-          <div class="responsive-table"><el-table v-if="cacheStats && Object.keys(cacheStats.categories).length > 0" :data="categoryData" stripe size="small" style="margin-bottom: 20px">
+          <!-- 手机端：缓存分类改为两行条目 -->
+          <ul v-if="isMobile && categoryData.length" class="m-cache-list">
+            <li v-for="row in categoryData" :key="row.name" class="m-cache-row">
+              <div class="m-cache-head">
+                <span class="m-cache-name">{{ categoryLabels[row.name] || row.name }}</span>
+                <span class="m-cache-count">{{ row.count }} 个 key</span>
+              </div>
+              <div class="m-cache-desc">{{ categoryDescs[row.name] || '' }}</div>
+            </li>
+          </ul>
+
+          <div v-else class="responsive-table"><el-table v-if="cacheStats && Object.keys(cacheStats.categories).length > 0" :data="categoryData" stripe size="small" style="margin-bottom: 20px">
             <el-table-column prop="name" label="缓存分类" width="200">
               <template #default="{ row }">{{ categoryLabels[row.name] || row.name }}</template>
             </el-table-column>
-            <el-table-column prop="count" label="Key数量" width="120" />
+            <el-table-column prop="count" label="Key数量" width="120" align="right" />
             <el-table-column prop="name" label="说明">
               <template #default="{ row }">{{ categoryDescs[row.name] || '' }}</template>
             </el-table-column>
@@ -304,18 +317,24 @@
           </div>
           <el-form label-width="160px" style="max-width: 600px">
             <el-form-item label="数据采集时间">
-              <el-time-picker v-model="schedulerTimes.collect" format="HH:mm" value-format="HH:mm" placeholder="采集时间" @change="saveSettings" />
-              <span style="margin-left: 8px; color: var(--text-tertiary); font-size: 13px">每交易日</span>
+              <div class="ctrl-unit">
+                <el-time-picker v-model="schedulerTimes.collect" format="HH:mm" value-format="HH:mm" placeholder="采集时间" @change="saveSettings" />
+                <span class="unit-text">每交易日</span>
+              </div>
             </el-form-item>
             <el-form-item label="策略计算时间">
-              <el-time-picker v-model="schedulerTimes.calculate" format="HH:mm" value-format="HH:mm" placeholder="计算时间" @change="saveSettings" />
-              <span style="margin-left: 8px; color: var(--text-tertiary); font-size: 13px">每交易日</span>
+              <div class="ctrl-unit">
+                <el-time-picker v-model="schedulerTimes.calculate" format="HH:mm" value-format="HH:mm" placeholder="计算时间" @change="saveSettings" />
+                <span class="unit-text">每交易日</span>
+              </div>
             </el-form-item>
             <el-form-item label="北向资金采集" class="feature-disabled">
-              <el-time-picker v-model="schedulerTimes.north_bound" format="HH:mm" value-format="HH:mm" placeholder="采集时间" disabled />
-              <el-tooltip content="沪深港通自 2024-08-19 起停止披露北向资金净买额，采集结果恒为 0，该采集任务已暂停" placement="top">
-                <span class="disabled-note">已停用</span>
-              </el-tooltip>
+              <div class="ctrl-unit">
+                <el-time-picker v-model="schedulerTimes.north_bound" format="HH:mm" value-format="HH:mm" placeholder="采集时间" disabled />
+                <el-tooltip content="沪深港通自 2024-08-19 起停止披露北向资金净买额，采集结果恒为 0，该采集任务已暂停" placement="top">
+                  <span class="disabled-note">已停用</span>
+                </el-tooltip>
+              </div>
             </el-form-item>
           </el-form>
         </div>
@@ -337,7 +356,9 @@ import { strategyApi } from '@/api/strategy'
 import { useSignalStore } from '@/stores/signal'
 import AiSettings from '@/components/AiSettings.vue'
 import type { NotifyConfig } from '@/api/settings'
+import { useBreakpoint } from '@/composables/useBreakpoint'
 
+const { isMobile } = useBreakpoint()
 const signalStore = useSignalStore()
 
 const activeTab = ref('ws')
@@ -623,23 +644,141 @@ onMounted(() => {
   border-radius: var(--radius-md) var(--radius-md) 0 0;
 }
 .stat-box {
-  text-align: center; padding: 20px;
-  background: var(--bg-tertiary); border-radius: var(--radius-sm);
+  text-align: center; padding: 18px 12px;
+  border: 1px solid var(--border-secondary);
+  border-radius: var(--radius-md);
   .stat-value { font-size: 24px; font-weight: 600; color: var(--text-primary); font-family: var(--font-mono); }
   .stat-label { font-size: 13px; color: var(--text-tertiary); margin-top: 6px; }
 }
 .db-card {
-  background: var(--bg-tertiary); border-radius: var(--radius-sm); padding: 20px;
-  transition: background var(--transition-base);
+  padding: 18px;
+  border: 1px solid var(--border-secondary);
+  border-radius: var(--radius-md);
   .db-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; font-size: 16px; font-weight: 600; color: var(--text-primary); }
   .db-info { font-size: 13px; color: var(--text-secondary); line-height: 1.8; }
 }
-.card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; .card-title { font-size: 16px; font-weight: 600; color: var(--text-primary); } }
+.card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; .card-title { font-size: 18px; font-weight: 600; color: var(--text-primary); } }
 .form-hint { font-size: 12px; color: var(--text-tertiary); margin-top: 4px; }
 
-@media (max-width: 480px) {
+/* 手机端缓存分类条目 */
+.m-cache-list {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+}
+.m-cache-row {
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border-subtle);
+
+  &:last-child { border-bottom: none; }
+}
+.m-cache-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+
+  .m-cache-name { font-size: 12px; font-weight: 500; color: var(--text-primary); }
+  .m-cache-count { font-size: 11px; color: var(--text-secondary); font-family: var(--font-mono); }
+}
+.m-cache-desc { margin-top: 2px; font-size: 10px; color: var(--text-tertiary); line-height: 1.45; }
+
+/* 带单位的单行控件（缓存天数 + 天、采集时间 + 每交易日）
+   用一层 nowrap 的 flex 容器托管，避免 el-form-item__content 的 wrap 把单位挤到下一行 */
+.ctrl-unit {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+.ctrl-unit > .unit-text {
+  flex: 0 0 auto;
+  font-size: 13px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+@media (max-width: 768px) {
   :deep(.el-form-item__label) { width: auto !important; display: block; text-align: left; }
-  .stat-box { padding: 12px; .stat-value { font-size: 18px; } }
-  .db-card { padding: 12px; .db-header { font-size: 14px; } }
+  :deep(.el-form-item) { flex-direction: column; align-items: stretch; }
+  :deep(.el-form-item__content) { margin-left: 0 !important; flex-wrap: wrap; gap: 8px; }
+  :deep(.el-select), :deep(.el-input-number), :deep(.el-input), :deep(.el-time-editor) { width: 100% !important; }
+  /* 滑块的数值输入框是同名 .el-input-number，会被上一行拉满整行，把滑块轨道挤成 0 宽 */
+  :deep(.el-slider__input) { width: 72px !important; }
+  /* flex-basis 0 优先于 width，控件吃掉剩余宽度，单位保持同行 */
+  .ctrl-unit > :deep(.el-input-number),
+  .ctrl-unit > :deep(.el-date-editor) { flex: 1 1 0; min-width: 0; }
+  .stat-box .stat-value { font-size: 18px; }
+  /* 桌面 el-row 的 gutter 只给横向 20px，卡片之间没有纵向间距；
+     窄屏改 2×2 栅格重排，横纵都用 --m-gap，行列间距才一致 */
+  .stat-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--m-gap);
+    margin: 0 0 var(--m-gap) !important;
+
+    :deep(.el-col) { padding: 0 !important; max-width: none !important; flex: none !important; width: auto !important; }
+  }
+}
+
+/* ─── 手机端：标签订阅页 + 表单纵向排列，取消双层卡片 ─── */
+@media (max-width: 480px) {
+  :deep(.el-tabs--border-card) { border: none; background: transparent; }
+  :deep(.el-tabs--border-card > .el-tabs__header) {
+    background: transparent;
+    border-bottom: 1px solid var(--border-secondary);
+  }
+  /* 取消双层卡片可以，但标签条与内容、内容与底部之间仍需留间距，
+     否则第一张卡片直接顶在标签条下边框上，最后一行贴住页面底部 */
+  :deep(.el-tabs--border-card > .el-tabs__content) { padding: var(--m-pad) 0; overflow: visible; }
+  :deep(.el-tabs--border-card > .el-tabs__header .el-tabs__item) { border: none; border-radius: 0; }
+
+  /* 与其它页面保持一致：保留卡片内边距，标题不贴边 */
+  .card-header { margin-bottom: 10px; align-items: center; }
+  .card-header .card-title { font-size: 13px; }
+  .card-header .el-button { flex: none; }
+
+  :deep(.el-form-item) { margin-bottom: var(--ctrl-row-gap); }
+  :deep(.el-form-item__label) { padding-bottom: 3px; font-size: 11px; }
+  :deep(.el-divider--horizontal) { margin: 10px 0; }
+  :deep(.el-divider__text) { font-size: 11px; }
+
+  .form-hint { font-size: 10px; margin-top: 2px; word-break: break-all; }
+  .disabled-note { font-size: 10px; margin-left: 4px; }
+
+  .stat-box {
+    padding: 8px;
+    text-align: left;
+    border: none;
+    background: var(--bg-tertiary);
+    border-radius: 6px;
+
+    .stat-value { font-size: 16px; word-break: break-all; }
+    .stat-label { font-size: 10px; margin-top: 2px; }
+  }
+  .ctrl-unit { gap: 6px; }
+  .ctrl-unit > .unit-text { font-size: 11px; }
+
+  .db-card {
+    padding: 10px;
+    border: 1px solid var(--border-secondary);
+    border-radius: 8px;
+    margin-bottom: 8px;
+
+    .db-header { font-size: 13px; margin-bottom: 6px; gap: 6px; }
+    .db-info { font-size: 11px; line-height: 1.7; }
+  }
+
+  :deep(.el-switch) { --el-switch-on-color: var(--accent-primary); }
+  :deep(.el-switch__label) { font-size: 11px; }
+
+  /* 顶部标签过多：横向滚动，不换行不压缩 */
+  :deep(.el-tabs__nav-wrap) { overflow-x: auto; }
+  :deep(.el-tabs__nav-scroll) { overflow: visible; }
+
+  /* 危险操作按钮：纵向排列，按内容宽度左对齐，不再拉满整行 */
+  .page-card > div[style*="display: flex"] { flex-direction: column; align-items: flex-start; gap: 8px !important; }
+  .page-card > div[style*="display: flex"] :deep(.el-button) { margin-left: 0; }
 }
 </style>

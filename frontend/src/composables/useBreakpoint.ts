@@ -26,8 +26,9 @@ export function useBreakpoint() {
   // Return how many x-axis labels to show for a given dataset size
   function labelCount(dataLength: number, minLabels = 5): number {
     if (isMobile.value) return Math.max(minLabels, Math.min(dataLength, 8))
-    if (isTablet.value) return Math.max(minLabels, Math.min(dataLength, 14))
-    return dataLength
+    if (isTablet.value) return Math.max(minLabels, Math.min(dataLength, 12))
+    // 桌面端也要限流：此前返回全部条数导致 interval=1，旋转标签必然重叠
+    return Math.max(minLabels, Math.min(dataLength, 12))
   }
 
   // Return label interval (every Nth label)

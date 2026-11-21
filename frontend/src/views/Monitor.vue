@@ -46,7 +46,13 @@
           <el-button size="small" @click="fetchLogs" :loading="logsLoading">刷新日志</el-button>
         </div>
       </div>
-      <div class="log-container">
+      <div class="log-container" :style="{
+        '--log-bg': logTheme.bg,
+        '--log-border': logTheme.border,
+        '--log-fg': logTheme.fg,
+        '--log-time': logTheme.time,
+        '--log-service': logTheme.service,
+      }">
         <div v-if="logsLoading && logs.length === 0" :style="{ color: themeColors.textSub, textAlign: 'center', padding: '20px' }">
           加载日志中...
         </div>
@@ -68,12 +74,16 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { useThemeStore } from '@/stores/theme'
 
-// 次要文字色随主题切换（日志终端区域刻意保持深色风格，不随主题变化）
 const themeStore = useThemeStore()
 const isDark = computed(() => themeStore.mode === 'dark')
 const themeColors = computed(() => (isDark.value
   ? { textSub: '#9da1b0' }
   : { textSub: '#909399' }))
+
+// 日志区跟随主题：白天用浅色表面、深色文字，夜晚保留深色终端风格
+const logTheme = computed(() => (isDark.value
+  ? { bg: '#17171A', border: '#2A2A30', fg: '#D4D4D8', time: '#6A9955', service: '#7B93F5' }
+  : { bg: '#F7F7F5', border: '#E4E4E1', fg: '#3F3F46', time: '#15803D', service: '#4557CC' }))
 
 const refreshing = ref(false)
 const logsLoading = ref(false)
@@ -182,7 +192,7 @@ onMounted(() => {
   display: flex; align-items: center; gap: 12px; padding: 12px;
   border-radius: var(--radius-sm); background: var(--bg-tertiary);
   border-left: 3px solid var(--text-tertiary);
-  transition: background var(--transition-base);
+  transition: background-color var(--dur-base) var(--ease);
   &.healthy { border-left-color: var(--accent-success); }
   &.unhealthy { border-left-color: var(--accent-danger); }
   &.warning { border-left-color: var(--accent-warning); }
@@ -197,18 +207,20 @@ onMounted(() => {
 .log-service-select { width: 140px; max-width: 100%; }
 .log-level-select { width: 100px; max-width: 100%; }
 .log-container {
-  background: #12141a; border-radius: var(--radius-sm); padding: 16px;
+  background: var(--log-bg, #F7F7F5);
+  border: 1px solid var(--log-border, #E4E4E1);
+  border-radius: var(--radius-sm); padding: 16px;
   max-height: 500px; overflow-y: auto;
   font-family: var(--font-mono); font-size: 13px;
 }
 .log-line {
-  padding: 4px 0; color: #d4d4d4; display: flex; align-items: center;
+  padding: 4px 0; color: var(--log-fg, #3F3F46); display: flex; align-items: center;
   flex-wrap: wrap;
   &.warn { color: var(--accent-warning); }
   &.error { color: var(--accent-danger); }
   &.debug { color: var(--text-tertiary); }
-  .log-time { color: #6a9955; min-width: 160px; flex-shrink: 0; }
-  .log-service { color: #569cd6; min-width: 120px; flex-shrink: 0; }
+  .log-time { color: var(--log-time, #15803D); min-width: 160px; flex-shrink: 0; }
+  .log-service { color: var(--log-service, #4051E0); min-width: 120px; flex-shrink: 0; }
   .log-message { flex: 1; word-break: break-all; min-width: 0; }
 }
 @media (max-width: 768px) {
@@ -217,11 +229,45 @@ onMounted(() => {
   .log-level-select { width: 100%; }
 }
 
+/* 手机端：健康检查两列紧凑卡片，日志一条三行显示 */
 @media (max-width: 480px) {
-  .log-time { min-width: 100px !important; font-size: 11px; }
-  .log-service { min-width: 70px !important; font-size: 11px; }
-  .log-container { padding: 8px; font-size: 11px; }
-  .log-line { gap: 4px; }
-  .log-message { flex-basis: 100%; margin-top: 2px; }
+  .health-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+  }
+  .health-item {
+    gap: 8px;
+    padding: 8px;
+    align-items: flex-start;
+
+    :deep(.el-icon) { font-size: 16px !important; margin-top: 1px; }
+    .health-info {
+      min-width: 0;
+      .health-name { font-size: 11px; font-weight: 500; }
+      .health-detail { font-size: 10px; margin-top: 1px; word-break: break-all; line-height: 1.35; }
+    }
+  }
+
+  .log-header-controls {
+    width: 100%;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+
+    .el-button { grid-column: 1 / -1; justify-self: start; width: auto; }
+  }
+  .log-service-select, .log-level-select { width: 100%; }
+
+  .log-container { padding: 8px; font-size: 11px; max-height: 420px; }
+  .log-line {
+    display: block;
+    padding: 5px 0;
+    border-bottom: 1px dashed var(--log-border, #E4E4E1);
+
+    .log-time { min-width: 0 !important; font-size: 10px; margin-right: 6px; }
+    .log-service { min-width: 0 !important; font-size: 10px; }
+    .log-message { display: block; font-size: 11px; line-height: 1.45; margin-top: 2px; word-break: break-all; }
+    :deep(.el-tag) { height: 16px; line-height: 14px; font-size: 10px; padding: 0 4px; margin: 0 4px !important; }
+  }
 }
 </style>

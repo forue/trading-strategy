@@ -98,21 +98,32 @@ watch(() => [props.strategyType, props.signalDate], loadAnalyses, { immediate: t
 
 <style lang="scss" scoped>
 .ai-analysis-panel {
-  background: var(--bg-primary);
+  align-self: start;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-primary);
   border-radius: var(--radius-md);
-  border: 1px solid var(--border-secondary);
-  box-shadow: var(--shadow-card);
+  padding: 20px;
   overflow: hidden;
 
   .panel-header {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 12px 16px;
-    background: linear-gradient(135deg, #637ee8 0%, #8b5cf6 100%);
-    color: var(--text-inverse);
+    padding: 0 0 16px;
+    margin-bottom: 16px;
+    border-bottom: 1px solid var(--border-subtle);
+    color: var(--text-primary);
     font-weight: 600;
-    font-size: 14px;
+    font-size: 16px;
+
+    &::before {
+      content: '';
+      width: 2px;
+      height: 14px;
+      border-radius: 1px;
+      background: var(--accent-primary);
+      flex-shrink: 0;
+    }
   }
 
   .loading-state, .empty-state {
@@ -120,16 +131,15 @@ watch(() => [props.strategyType, props.signalDate], loadAnalyses, { immediate: t
   }
 
   .analysis-list {
-    padding: 12px;
+    padding: 0;
 
     .analysis-card {
-      padding: 12px;
-      border: 1px solid var(--border-secondary);
-      border-radius: 6px;
-      margin-bottom: 10px;
+      padding: 16px 0;
+      border-bottom: 1px solid var(--border-primary);
+      margin-bottom: 0;
 
       &:last-child {
-        margin-bottom: 0;
+        border-bottom: none;
       }
 
       .card-header {
@@ -214,6 +224,64 @@ watch(() => [props.strategyType, props.signalDate], loadAnalyses, { immediate: t
     .meta {
       font-size: 11px;
       color: var(--text-tertiary);
+    }
+  }
+}
+
+/* 手机端：面板与卡片内边距压到 10px，正文 11px、辅助 10px */
+@media (max-width: 480px) {
+  .ai-analysis-panel {
+    padding: 10px;
+
+    .panel-header {
+      gap: 6px;
+      padding-bottom: 8px;
+      margin-bottom: 8px;
+      font-size: 12px;
+
+      &::before { height: 11px; }
+    }
+
+    .loading-state,
+    .empty-state { padding: 10px; }
+
+    .analysis-list .analysis-card {
+      padding: 9px 0;
+
+      .card-header {
+        gap: 6px;
+        margin-bottom: 6px;
+
+        .sector-name { font-size: 12px; }
+        .confidence .label { font-size: 10px; }
+      }
+
+      .interpretation {
+        font-size: 11px;
+        line-height: 1.55;
+        padding: 6px 8px;
+        margin-bottom: 7px;
+      }
+
+      .risk-factors {
+        margin-bottom: 7px;
+
+        .risk-title { font-size: 11px; margin-bottom: 4px; }
+        ul { padding-left: 16px; font-size: 10px; line-height: 1.7; }
+      }
+
+      .suggestion {
+        gap: 5px;
+        padding: 6px 8px;
+        font-size: 10px;
+        line-height: 1.5;
+      }
+    }
+
+    .panel-footer {
+      padding: 6px 8px;
+
+      .meta { font-size: 10px; }
     }
   }
 }

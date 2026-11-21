@@ -9,7 +9,7 @@
       </el-col>
     </el-row>
 
-    <el-row :gutter="20">
+    <el-row :gutter="20" class="chart-row">
       <el-col :xs="24" :md="16">
         <div class="page-card">
           <div class="card-header">
@@ -25,7 +25,7 @@
               </el-form-item>
             </el-form>
           </div>
-          <v-chart :option="navChartOption" style="height: 350px" autoresize />
+          <v-chart :option="navChartOption" class="fill-chart nav-chart" autoresize />
           <el-row :gutter="12" class="stats-row">
             <el-col :xs="12" :sm="6" v-for="s in profitStats" :key="s.label">
               <div class="stat-item">
@@ -41,19 +41,19 @@
           <div class="card-header">
             <span class="card-title">月度收益率</span>
           </div>
-          <v-chart :option="monthlyBarOption" style="height: 350px" autoresize />
+          <v-chart :option="monthlyBarOption" class="fill-chart" autoresize />
         </div>
       </el-col>
     </el-row>
 
-    <el-row :gutter="20" class="page-section">
+    <el-row :gutter="20" class="chart-row page-section">
       <el-col :xs="24" :md="16">
         <div class="page-card">
           <div class="card-header">
             <span class="card-title">每日盈亏日历</span>
             <el-date-picker v-model="calendarMonth" type="month" placeholder="选择月份" size="small" value-format="YYYY-MM" @change="loadDailyPnl" />
           </div>
-          <v-chart :option="pnlCalendarOption" style="height: 260px" autoresize />
+          <v-chart :option="pnlCalendarOption" class="fill-chart calendar-chart" autoresize />
         </div>
       </el-col>
       <el-col :xs="24" :md="8">
@@ -61,7 +61,7 @@
           <div class="card-header">
             <span class="card-title">收益归因分析</span>
           </div>
-          <v-chart :option="attributionChartOption" style="height: 350px" autoresize />
+          <v-chart :option="attributionChartOption" class="fill-chart" autoresize />
         </div>
       </el-col>
     </el-row>
@@ -73,7 +73,27 @@
           <el-icon><Plus /></el-icon> 新增转账
         </el-button>
       </div>
-      <div class="responsive-table"><el-table :data="transfers" stripe empty-text="暂无转账记录">
+      <!-- 手机端：转账记录改为「日期+金额」双行条目 -->
+      <ul v-if="isMobile" class="m-list">
+        <li v-for="row in transfers" :key="row.id" class="m-list-row">
+          <div class="m-row-main">
+            <span class="m-row-date">{{ row.transfer_date }}</span>
+            <span class="m-row-amount" :style="{ color: row.direction === 'DEPOSIT' ? themeColors.loss : themeColors.profit }">
+              {{ row.direction === 'DEPOSIT' ? '+' : '-' }}¥{{ row.amount.toLocaleString() }}
+            </span>
+          </div>
+          <div class="m-row-sub">
+            <el-tag :type="row.direction === 'DEPOSIT' ? 'success' : 'danger'" size="small">
+              {{ row.direction === 'DEPOSIT' ? '入金' : '出金' }}
+            </el-tag>
+            <span class="m-row-remark">{{ row.remark || '—' }}</span>
+            <el-button type="danger" size="small" link @click="deleteTransfer(row.id)">删除</el-button>
+          </div>
+        </li>
+        <li v-if="transfers.length === 0" class="m-list-empty">暂无转账记录</li>
+      </ul>
+
+      <div v-else class="responsive-table"><el-table :data="transfers" stripe empty-text="暂无转账记录">
         <el-table-column prop="transfer_date" label="日期" width="110" />
         <el-table-column label="方向" width="80">
           <template #default="{ row }">
@@ -82,7 +102,7 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="金额" width="150">
+        <el-table-column label="金额" width="140" align="right">
           <template #default="{ row }">
             <span :style="{ color: row.direction === 'DEPOSIT' ? themeColors.loss : themeColors.profit }">
               {{ row.direction === 'DEPOSIT' ? '+' : '-' }}¥{{ row.amount.toLocaleString() }}
@@ -108,26 +128,53 @@
           <el-option label="保守" value="CONSERVATIVE" />
         </el-select>
       </div>
-      <div class="responsive-table"><el-table :data="positions" stripe empty-text="暂无持仓">
-        <el-table-column prop="sector_name" label="板块" width="100" />
+      <!-- 手机端：持仓改为「标题 + 2×2 指标块 + 页脚」卡片 -->
+      <ul v-if="isMobile" class="m-pos-list">
+        <li v-for="(row, i) in positions" :key="i" class="m-pos-card">
+          <div class="m-pos-head">
+            <span class="m-pos-sector">{{ row.sector_name }}</span>
+            <el-tag size="small">{{ STRATEGY_LABELS[row.strategy_type] ?? row.strategy_type }}</el-tag>
+            <span :class="row.direction === 'BUY' ? 'signal-buy' : 'signal-sell'">{{ row.direction === 'BUY' ? '多' : '空' }}</span>
+            <span v-if="row.current_price && row.avg_price" class="m-pos-pnl"
+              :style="{ color: row.current_price > row.avg_price ? themeColors.profit : themeColors.loss }">
+              {{ ((row.current_price - row.avg_price) / row.avg_price * 100).toFixed(2) }}%
+            </span>
+            <span v-else class="m-pos-pnl text-muted">--</span>
+          </div>
+          <div class="m-pos-grid">
+            <div><em>数量</em><b>{{ row.quantity }}</b></div>
+            <div><em>均价</em><b>¥{{ row.avg_price?.toFixed(4) }}</b></div>
+            <div><em>现价</em><b>¥{{ row.current_price?.toFixed(4) }}</b></div>
+            <div><em>仓位</em><b>{{ (row.position_ratio * 100).toFixed(1) }}%</b></div>
+          </div>
+          <div class="m-pos-foot">
+            盈亏 {{ row.current_price && row.avg_price ? '¥' + ((row.current_price - row.avg_price) * row.quantity).toFixed(2) : '--' }}
+            · 开仓 {{ (row.opened_at || '').slice(0, 16) || '--' }}
+          </div>
+        </li>
+        <li v-if="positions.length === 0" class="m-list-empty">暂无持仓</li>
+      </ul>
+
+      <div v-else class="responsive-table"><el-table :data="positions" stripe empty-text="暂无持仓">
+        <el-table-column prop="sector_name" label="板块" width="96" />
         <el-table-column prop="strategy_type" label="策略" width="80">
           <template #default="{ row }">
             <el-tag size="small">{{ STRATEGY_LABELS[row.strategy_type] ?? row.strategy_type }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="direction" label="方向" width="60">
+        <el-table-column prop="direction" label="方向" width="64">
           <template #default="{ row }">
             <span :class="row.direction === 'BUY' ? 'signal-buy' : 'signal-sell'">{{ row.direction === 'BUY' ? '多' : '空' }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="quantity" label="数量" width="90" />
-        <el-table-column prop="avg_price" label="均价" width="90">
+        <el-table-column prop="quantity" label="数量" width="96" align="right" />
+        <el-table-column prop="avg_price" label="均价" width="96" align="right">
           <template #default="{ row }">¥{{ row.avg_price?.toFixed(4) }}</template>
         </el-table-column>
-        <el-table-column prop="current_price" label="现价" width="90">
+        <el-table-column prop="current_price" label="现价" width="96" align="right">
           <template #default="{ row }">¥{{ row.current_price?.toFixed(4) }}</template>
         </el-table-column>
-        <el-table-column label="盈亏" width="130">
+        <el-table-column label="盈亏" width="120" align="right">
           <template #default="{ row }">
             <span v-if="row.current_price && row.avg_price" :style="{ color: row.current_price > row.avg_price ? themeColors.profit : themeColors.loss }">
               {{ ((row.current_price - row.avg_price) / row.avg_price * 100).toFixed(2) }}%
@@ -136,14 +183,14 @@
             <span v-else class="text-muted">--</span>
           </template>
         </el-table-column>
-        <el-table-column prop="position_ratio" label="仓位" width="80">
+        <el-table-column prop="position_ratio" label="仓位" width="80" align="right">
           <template #default="{ row }">{{ (row.position_ratio * 100).toFixed(1) }}%</template>
         </el-table-column>
-        <el-table-column prop="opened_at" label="开仓时间" min-width="150" />
+        <el-table-column prop="opened_at" label="开仓时间" min-width="140" />
       </el-table></div>
     </div>
 
-    <el-dialog v-model="showTransferDialog" title="新增银证转账" width="420px">
+    <el-dialog v-model="showTransferDialog" title="新增银证转账" width="460px">
       <el-form :model="transferForm" label-width="70px">
         <el-form-item label="日期">
           <el-date-picker v-model="transferForm.date" type="date" placeholder="选择日期" value-format="YYYY-MM-DD"
@@ -182,6 +229,9 @@ import { useThemeStore } from '@/stores/theme'
 import type { Position, NavRecord, DailyPnl, BankTransfer, ProfitCurveData } from '@/api/fund'
 import dayjs from 'dayjs'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { useBreakpoint } from '@/composables/useBreakpoint'
+
+const { isMobile } = useBreakpoint()
 
 use([LineChart, BarChart, PieChart, HeatmapChart, CalendarComponent, GridComponent, TooltipComponent, LegendComponent, VisualMapComponent, CanvasRenderer])
 
@@ -191,13 +241,15 @@ const isDark = computed(() => themeStore.mode === 'dark')
 // 语义色随主题切换：暗色下需提高明度、改用暗色网格/边框，
 // 否则深色文字（#303133）与浅灰边框（#dcdee0）在 --bg-secondary(#1a1d24) 上不可读或刺眼。
 const themeColors = computed(() => (isDark.value ? {
-  profit: '#ff6f61', loss: '#357a5c', text: '#e8eaef', textSub: '#9da1b0',
+  profit: '#ff6f61', loss: '#57a182', text: '#e8eaef', textSub: '#9da1b0',
   primary: '#7b93f5', warning: '#e6a23c', grid: '#2a2d38', axis: '#2a2d38',
   tooltipBg: '#252832', tooltipBorder: '#2a2d38',
 } : {
-  profit: '#f56c6c', loss: '#67c23a', text: '#303133', textSub: '#5a5f6e',
-  primary: '#409eff', warning: '#e6a23c', grid: '#ebeef5', axis: '#e4e7ed',
-  tooltipBg: '#fff', tooltipBorder: '#ebeef5',
+  /* 这组色用于 ECharts 与内联数字，不能写 CSS 变量；原 EP 默认
+     (#67c23a / #f56c6c / #e6a23c / #409eff) 在白底只有 2.0~3.1:1，统一换成语义色 */
+  profit: '#d92d20', loss: '#12805c', text: '#18181b', textSub: '#52525b',
+  primary: '#4051E0', warning: '#b54708', grid: '#ebeef5', axis: '#e4e7ed',
+  tooltipBg: '#ffffff', tooltipBorder: '#e4e4e1',
 }))
 
 // 策略类型中文名：集中定义为 Record，修复模板中用 any 索引对象字面量导致的 TS7053
@@ -303,43 +355,71 @@ const monthlyBarOption = computed(() => {
 })
 
 const pnlCalendarOption = computed(() => {
-  const data = dailyPnlData.value.map(d => [d.date, d.daily_return])
-  if (data.length === 0) return {}
-  // 暗色配色：中位色改用暗灰（不可用纯白，否则在暗背景上过亮且与盈利红混淆），
-  // 亏损绿/盈利红按暗背景调整明度，保证与卡片底色（--bg-secondary #1a1d24）的对比度。
-  // 暗色下刻意拉开红绿明度差：两者亮度接近（对比度仅 1.28）时难以区分，
-  // 故选「亮红 + 中绿」，互差提升至 1.88，色觉障碍用户也更易分辨。
-  const profitColor = isDark.value ? '#ff6f61' : '#f56c6c'
-  const lossColor = isDark.value ? '#357a5c' : '#67c23a'
-  const neutralColor = isDark.value ? '#4a4f5c' : '#fff'
-  const borderColor = isDark.value ? '#2a2d38' : '#dcdee0'
-  const labelColor = isDark.value ? '#9da1b0' : '#5a5f6e'
-  const monthLabelColor = isDark.value ? '#e8eaef' : '#303133'
+  // 固定 6 周（42 格）网格：从不同月份导致的 5/6 列抖动改为恒定 6 列
+  const firstOfMonth = dayjs(calendarMonth.value + '-01')
+  const offsetToMonday = (firstOfMonth.day() + 6) % 7
+  const rangeStart = firstOfMonth.subtract(offsetToMonday, 'day')
+  const rangeEnd = rangeStart.add(41, 'day')
+  const range: [string, string] = [rangeStart.format('YYYY-MM-DD'), rangeEnd.format('YYYY-MM-DD')]
+  const monthPrefix = calendarMonth.value
+  const retMap = new Map(dailyPnlData.value.map(d => [d.date, d.daily_return]))
+
+  // 统一主题语义色（红=盈利、绿=亏损），中位色贴近卡片底色；
+  // ±2% 量程让常见的 ±1% 收益有明显色差，不再压成同一块灰紫
+  const profitColor = isDark.value ? '#E5484D' : '#D92D20'
+  const lossColor = isDark.value ? '#3FA372' : '#12805C'
+  const neutralColor = isDark.value ? '#333842' : '#F1F1EF'
+  const outsideColor = isDark.value ? '#1E2128' : '#F9F9F8'
+  const borderColor = isDark.value ? '#2A2A30' : '#E4E4E1'
+  const labelColor = isDark.value ? '#9DA1B0' : '#71717A'
+  const monthLabelColor = isDark.value ? '#FAFAFA' : '#18181B'
+
+  const data: any[] = []
+  for (let i = 0; i < 42; i++) {
+    const date = rangeStart.add(i, 'day').format('YYYY-MM-DD')
+    const inMonth = date.startsWith(monthPrefix)
+    if (!inMonth) {
+      data.push({ value: [date, 0], itemStyle: { color: outsideColor } })
+    } else {
+      data.push([date, retMap.has(date) ? retMap.get(date) : 0])
+    }
+  }
 
   return {
     tooltip: {
-      formatter: (p: any) => `${p.data[0]}<br/>收益率: ${p.data[1]}%<br/>金额: ¥${pnlAmountMap.value[p.data[0]] || 0}`,
-      backgroundColor: isDark.value ? '#252832' : '#fff',
-      borderColor: isDark.value ? '#2a2d38' : '#ebeef5',
-      textStyle: { color: isDark.value ? '#e8eaef' : '#303133' },
+      formatter: (p: any) => {
+        const date = Array.isArray(p.data) ? p.data[0] : p.data.value[0]
+        if (!date.startsWith(monthPrefix)) return `${date}<br/>非本月`
+        const ret = retMap.get(date)
+        const amount = pnlAmountMap.value[date]
+        const retText = ret !== undefined
+          ? `当日收益: ${ret >= 0 ? '+' : ''}${Number(ret).toFixed(2)}%`
+          : '暂无数据'
+        const amountText = amount !== undefined
+          ? `<br/>盈亏金额: ${amount >= 0 ? '+' : ''}¥${Number(amount).toFixed(2)}`
+          : ''
+        return `${date}<br/>${retText}${amountText}`
+      },
+      backgroundColor: isDark.value ? '#17171A' : '#FFFFFF',
+      borderColor: isDark.value ? '#2A2A30' : '#E4E4E1',
+      textStyle: { color: isDark.value ? '#FAFAFA' : '#18181B' },
     },
     visualMap: {
-      min: -5, max: 5, show: true, orient: 'horizontal', left: 'center', bottom: 0,
-      // visualMap.text 为 [高端, 低端]：高端是 +5%（盈利），低端是 -5%（亏损）
+      min: -2, max: 2, show: true, orient: 'horizontal', left: 'center', bottom: 0,
+      // visualMap.text 为 [高端, 低端]：高端是盈利（红），低端是亏损（绿）
       inRange: { color: [lossColor, neutralColor, profitColor] },
       text: ['盈利', '亏损'],
-      textStyle: { color: labelColor },
+      textStyle: { color: labelColor, fontSize: isMobile.value ? 9 : 12 },
+      // 手机端默认色阶条厚 20px + 文字，会压在最后一行日期上，压成 8px 细条
+      itemWidth: isMobile.value ? 8 : 20,
+      itemHeight: isMobile.value ? 90 : 140,
     },
     calendar: {
-      top: 20, left: 30, right: 30, range: calendarMonth.value, cellSize: ['auto', 20],
-      itemStyle: {
-        borderWidth: 1,
-        borderColor,
-        // 无数据格子透明（露出卡片底色），与「0 收益」的中性灰区分开
-        color: isDark.value ? 'transparent' : '#fff',
-      },
-      dayLabel: { firstDay: 1, nameMap: 'cn', color: labelColor },
-      monthLabel: { nameMap: 'cn', color: monthLabelColor },
+      top: 28, left: 'center', right: 'auto', range, cellSize: [22, 22],
+      itemStyle: { borderWidth: 2, borderColor, color: neutralColor },
+      dayLabel: { firstDay: 1, nameMap: 'cn', color: labelColor, margin: 10 },
+      monthLabel: { show: false },
+      splitLine: { show: false },
     },
     series: [{ type: 'heatmap', coordinateSystem: 'calendar', data }],
   }
@@ -359,17 +439,17 @@ const attributionChartOption = computed(() => {
       backgroundColor: c.tooltipBg, borderColor: c.tooltipBorder, textStyle: { color: c.text },
     },
     legend: {
-      orient: 'vertical', left: 'left', top: 'middle', type: 'scroll',
+      orient: 'horizontal', left: 'center', bottom: 0, type: 'scroll',
       textStyle: { color: c.textSub },
     },
     series: [{
-      type: 'pie', radius: ['40%', '70%'], center: ['60%', '50%'],
+      type: 'pie', radius: ['38%', '62%'], center: ['50%', '46%'],
       data: attributionData.value.length > 0
         ? attributionData.value.map((a: any) => ({ name: a.sector_name, value: +a.contribution }))
         : [{ name: '暂无数据', value: 1 }],
       emphasis: { itemStyle: { shadowBlur: 10 } },
-      label: { formatter: '{b}\n¥{c}', color: c.textSub },
-      labelLine: { lineStyle: { color: c.axis } },
+      label: { show: false },
+      labelLine: { show: false },
     }],
   }
 })
@@ -460,23 +540,139 @@ onMounted(() => {
 </script>
 
 <style lang="scss" scoped>
+/* 同一行卡片等高，图表 flex 填充，消除模块错落 */
+.chart-row { align-items: stretch; }
+.chart-row > :deep(.el-col) { display: flex; }
+.chart-row > :deep(.el-col) > .page-card {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  width: 100%;
+}
+.fill-chart { flex: 1; min-height: 0; width: 100%; }
+.nav-chart { min-height: var(--chart-h-md); }
+/* 桌面：日历本体 6 行 × 22 + 星期头 ≈ 182，底部还要放 20px 色阶条（visualMap bottom:0），
+   200px 时色阶压住最后一行日期；留 40px 余量 */
+.calendar-chart { min-height: calc(var(--chart-h-sm) + 40px); }
+
 .summary-row { margin-bottom: 16px; }
 .summary-card {
-  background: var(--bg-secondary); border: 1px solid var(--border-secondary);
-  border-radius: var(--radius-md); padding: 18px 12px; text-align: center;
-  box-shadow: var(--shadow-sm);
-  transition: all var(--transition-base);
-  overflow: hidden;
-  &:hover { box-shadow: var(--shadow-card); }
+  padding: 18px 16px; text-align: center;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-md);
+  transition: border-color var(--dur-fast) var(--ease);
+  &:hover { border-color: var(--accent-primary); }
   .summary-label { font-size: 12px; color: var(--text-tertiary); margin-bottom: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .summary-value { font-size: 20px; font-weight: 700; font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .summary-value { font-size: 24px; font-weight: 600; font-family: var(--font-mono); letter-spacing: -.03em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 }
-.stats-row { margin-top: 12px; }
+.stats-row { margin-top: 12px; flex-shrink: 0; }
 .stat-item {
   text-align: center; padding: 8px;
   background: var(--bg-tertiary); border-radius: var(--radius-sm);
   .stat-label { font-size: 12px; color: var(--text-tertiary); display: block; }
   .stat-val { font-size: 15px; font-weight: 600; }
+}
+
+/* ─── 手机端列表（转账 / 持仓） ─── */
+.m-list, .m-pos-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.m-list-row {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border-subtle);
+
+  &:last-child { border-bottom: none; }
+}
+
+.m-row-main {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+
+  .m-row-date { font-size: 12px; color: var(--text-secondary); font-family: var(--font-mono); }
+  .m-row-amount { font-size: 13px; font-weight: 600; font-family: var(--font-mono); }
+}
+
+.m-row-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+  font-size: 10px;
+  color: var(--text-tertiary);
+
+  .m-row-remark {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+.m-pos-card {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border-subtle);
+
+  &:last-child { border-bottom: none; }
+}
+
+.m-pos-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+
+  .m-pos-sector {
+    flex: 1;
+    min-width: 0;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .m-pos-pnl { font-size: 12px; font-weight: 600; font-family: var(--font-mono); }
+}
+
+.m-pos-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px;
+  margin-top: 6px;
+
+  & > div {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+    padding: 4px 5px;
+    background: var(--bg-tertiary);
+    border-radius: 4px;
+
+    em { font-style: normal; font-size: 9px; color: var(--text-tertiary); }
+    b { font-size: 11px; font-weight: 600; font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; }
+  }
+}
+
+.m-pos-foot {
+  margin-top: 5px;
+  font-size: 10px;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+}
+
+.m-list-empty {
+  padding: 22px 0;
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-tertiary);
 }
 
 @media (max-width: 768px) {
@@ -490,16 +686,27 @@ onMounted(() => {
   .stats-row :deep(.el-col) { margin-bottom: 6px; }
   :deep(.el-row) { margin-left: -8px !important; margin-right: -8px !important; }
   :deep(.el-col) { padding-left: 8px !important; padding-right: 8px !important; }
+  /* 单列堆叠后卡片失去等高约束，图表必须有确定高度，否则 flex:1 会塌成 0 */
+  .fill-chart { flex: none; height: var(--chart-h-sm); min-height: var(--chart-h-sm); }
+  .nav-chart { height: var(--chart-h-sm); }
+  /* 22px 格子 × 6 行 + 月份头 28 + 星期头 22 = 182，200px 时贴底的色阶会压住最后一行日期 */
+  .calendar-chart { height: 216px; min-height: 216px; }
 }
 
 @media (max-width: 480px) {
   .summary-card {
-    padding: 10px 6px;
+    padding: 8px 6px;
     .summary-value { font-size: 14px; }
-    .summary-label { font-size: 10px; }
+    .summary-label { font-size: 10px; margin-bottom: 3px; }
   }
-  .stat-item { padding: 6px 4px; .stat-val { font-size: 12px; } .stat-label { font-size: 11px; } }
+  .stat-item { padding: 5px 3px; .stat-val { font-size: 12px; } .stat-label { font-size: 10px; } }
   :deep(.el-row) { margin-left: -4px !important; margin-right: -4px !important; }
   :deep(.el-col) { padding-left: 4px !important; padding-right: 4px !important; }
+
+  .chart-row :deep(.el-col) { margin-bottom: 8px; }
+  .stats-row { margin-top: 6px; }
+
+  .page-card .card-header :deep(.el-form) { width: 100%; }
+  .page-card .card-header :deep(.el-form-item) { margin-bottom: 0; }
 }
 </style>

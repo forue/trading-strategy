@@ -798,15 +798,29 @@ async function scrollToBottom() {
   .quick-actions {
     display: flex; gap: 6px; padding: 8px 12px;
     border-top: 1px solid var(--border-secondary); overflow-x: auto;
-    .action-tag { cursor: pointer; white-space: nowrap; &:hover { background: var(--accent-primary-light); } &.disabled { opacity: 0.5; pointer-events: none; } }
+    .action-tag {
+      cursor: pointer; white-space: nowrap;
+      height: auto; padding: 5px 10px;
+      color: var(--text-secondary);
+      background: var(--bg-surface);
+      border: 1px solid var(--border-primary);
+      border-radius: var(--radius-sm);
+      &:hover { background: var(--accent-primary-light); border-color: var(--accent-primary); color: var(--accent-primary); }
+      &.disabled { opacity: 0.5; pointer-events: none; }
+    }
   }
 
   .chat-input {
     padding: 10px 12px; border-top: 1px solid var(--border-secondary);
     display: flex; gap: 8px; align-items: flex-end;
-    :deep(.el-textarea__inner) { resize: none; border-radius: 8px; }
+    :deep(.el-textarea__inner) { resize: none; border-radius: var(--radius-sm); }
     .input-actions { display: flex; align-items: flex-end; }
-    .send-btn { height: 56px; border-radius: 8px; }
+    .send-btn {
+      height: 32px; border-radius: var(--radius-sm); padding: 0 16px;
+      background: var(--accent-primary); border-color: var(--accent-primary); color: #fff;
+      &:hover, &:focus { background: var(--accent-primary-hover); border-color: var(--accent-primary-hover); }
+      &.is-disabled { background: var(--bg-hover); border-color: var(--border-primary); color: var(--text-tertiary); }
+    }
   }
 }
 

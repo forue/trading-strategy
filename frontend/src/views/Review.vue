@@ -79,8 +79,8 @@
           <div class="stat-card">
             <span class="stat-label">最佳 / 最差</span>
             <span class="stat-value sm">
-              <em :style="{ color: '#f56c6c' }">{{ fmtSignedPct(perf.best_return) }}</em>
-              <em :style="{ color: '#67c23a' }">{{ fmtSignedPct(perf.worst_return) }}</em>
+              <em :style="{ color: 'var(--accent-danger)' }">{{ fmtSignedPct(perf.best_return) }}</em>
+              <em :style="{ color: 'var(--accent-success)' }">{{ fmtSignedPct(perf.worst_return) }}</em>
             </span>
           </div>
         </div>
@@ -101,39 +101,68 @@
         <div class="detail-grid">
           <div class="detail-block">
             <div class="block-title">方向拆分</div>
-            <el-table :data="directionRows" size="small" stripe>
-              <el-table-column prop="label" label="方向" width="80" />
-              <el-table-column prop="count" label="信号数" width="80" align="center" />
-              <el-table-column label="命中率" width="80" align="center">
-                <template #default="{ row }">{{ fmtPct(row.hit_rate) }}</template>
-              </el-table-column>
-              <el-table-column label="平均净收益" align="right">
-                <template #default="{ row }">
-                  <span :style="{ color: signColor(row.avg_return) }">{{ fmtSignedPct(row.avg_return) }}</span>
-                </template>
-              </el-table-column>
-              <el-table-column label="平均毛收益" align="right">
-                <template #default="{ row }">
-                  <span :style="{ color: signColor(row.avg_return_gross) }">{{ fmtSignedPct(row.avg_return_gross) }}</span>
-                </template>
-              </el-table-column>
-            </el-table>
+            <!-- 手机端：五列表格在卡片内只剩 366px，改为「标题 + 指标网格」 -->
+            <ul v-if="isMobile" class="m-metric-list">
+              <li v-for="row in directionRows" :key="row.label" class="m-metric-card">
+                <div class="m-metric-head">
+                  <span class="m-metric-name">{{ row.label }}</span>
+                  <span class="m-metric-hit">命中 {{ fmtPct(row.hit_rate) }}</span>
+                </div>
+                <div class="m-metric-grid">
+                  <div><em>信号数</em><b>{{ row.count }}</b></div>
+                  <div><em>平均净收益</em><b :style="{ color: signColor(row.avg_return) }">{{ fmtSignedPct(row.avg_return) }}</b></div>
+                  <div><em>平均毛收益</em><b :style="{ color: signColor(row.avg_return_gross) }">{{ fmtSignedPct(row.avg_return_gross) }}</b></div>
+                </div>
+              </li>
+            </ul>
+
+            <div v-else class="responsive-table">
+              <el-table :data="directionRows" stripe>
+                <el-table-column prop="label" label="方向" width="80" />
+                <el-table-column prop="count" label="信号数" width="80" align="right" />
+                <el-table-column label="命中率" width="80" align="right">
+                  <template #default="{ row }">{{ fmtPct(row.hit_rate) }}</template>
+                </el-table-column>
+                <el-table-column label="平均净收益" align="right">
+                  <template #default="{ row }">
+                    <span :style="{ color: signColor(row.avg_return) }">{{ fmtSignedPct(row.avg_return) }}</span>
+                  </template>
+                </el-table-column>
+                <el-table-column label="平均毛收益" align="right">
+                  <template #default="{ row }">
+                    <span :style="{ color: signColor(row.avg_return_gross) }">{{ fmtSignedPct(row.avg_return_gross) }}</span>
+                  </template>
+                </el-table-column>
+              </el-table>
+            </div>
           </div>
 
           <div class="detail-block">
             <div class="block-title">板块表现（按样本数降序）</div>
-            <el-table :data="perf.sectors" size="small" stripe max-height="280">
-              <el-table-column prop="sector_name" label="板块" min-width="100" />
-              <el-table-column prop="evaluated" label="样本" width="70" align="center" />
-              <el-table-column label="命中率" width="80" align="center">
-                <template #default="{ row }">{{ fmtPct(row.hit_rate) }}</template>
-              </el-table-column>
-              <el-table-column label="平均净收益" width="110" align="right">
-                <template #default="{ row }">
-                  <span :style="{ color: signColor(row.avg_return) }">{{ fmtSignedPct(row.avg_return) }}</span>
-                </template>
-              </el-table-column>
-            </el-table>
+            <!-- 手机端：板块表现改为单行区块 -->
+            <ul v-if="isMobile" class="m-sector-list">
+              <li v-for="row in perf.sectors" :key="row.sector_name" class="m-sector-row">
+                <span class="m-sector-name">{{ row.sector_name }}</span>
+                <span class="m-sector-return" :style="{ color: signColor(row.avg_return) }">{{ fmtSignedPct(row.avg_return) }}</span>
+                <span class="m-sector-meta">{{ row.evaluated }} 样本 · 命中 {{ fmtPct(row.hit_rate) }}</span>
+              </li>
+              <li v-if="!perf.sectors.length" class="m-list-empty">暂无板块样本</li>
+            </ul>
+
+            <div v-else class="responsive-table">
+              <el-table :data="perf.sectors" stripe max-height="280">
+                <el-table-column prop="sector_name" label="板块" min-width="96" />
+                <el-table-column prop="evaluated" label="样本" width="64" align="right" />
+                <el-table-column label="命中率" width="80" align="right">
+                  <template #default="{ row }">{{ fmtPct(row.hit_rate) }}</template>
+                </el-table-column>
+                <el-table-column label="平均净收益" width="110" align="right">
+                  <template #default="{ row }">
+                    <span :style="{ color: signColor(row.avg_return) }">{{ fmtSignedPct(row.avg_return) }}</span>
+                  </template>
+                </el-table-column>
+              </el-table>
+            </div>
           </div>
         </div>
       </template>
@@ -153,6 +182,9 @@ import { ElMessage } from 'element-plus'
 import { strategyApi, type SignalPerformance } from '@/api/strategy'
 import { useThemeStore } from '@/stores/theme'
 import { useStrategyStore, STRATEGY_OPTIONS } from '@/stores/strategy'
+import { useBreakpoint } from '@/composables/useBreakpoint'
+
+const { isMobile } = useBreakpoint()
 
 use([CanvasRenderer, LineChart, BarChart, GridComponent, TooltipComponent, LegendComponent])
 
@@ -189,7 +221,7 @@ const equityOption = computed(() => {
         return `${p.name}<br/>累计净收益: ${p.value}%`
       },
     },
-    grid: { left: 55, right: 20, top: 20, bottom: 40 },
+    grid: { left: 55, right: 20, top: 40, bottom: 40 },
     xAxis: {
       type: 'category',
       data: points.map(p => p.date),
@@ -209,7 +241,7 @@ const equityOption = computed(() => {
       showSymbol: false,
       areaStyle: { opacity: 0.12 },
       data: points.map(p => +(p.cum_return * 100).toFixed(2)),
-      itemStyle: { color: '#409eff' },
+      itemStyle: { color: '#4051E0' },
     }],
   }
 })
@@ -240,7 +272,7 @@ const monthlyOption = computed(() => {
     series: [{
       type: 'bar',
       barMaxWidth: 28,
-      data: items.map(m => ({ value: +((m.hit_rate || 0) * 100).toFixed(1), itemStyle: { color: '#67c23a' } })),
+      data: items.map(m => ({ value: +((m.hit_rate || 0) * 100).toFixed(1), itemStyle: { color: '#4051E0', borderRadius: [4, 4, 0, 0] } })),
     }],
   }
 })
@@ -258,14 +290,14 @@ function fmtSignedPct(v: number | null | undefined): string {
 
 function rateColor(v: number | null | undefined): string {
   if (v === null || v === undefined) return 'var(--text-primary)'
-  if (v >= 0.5) return '#f56c6c'
-  if (v >= 0.4) return '#e6a23c'
-  return '#67c23a'
+  if (v >= 0.5) return 'var(--accent-danger)'
+  if (v >= 0.4) return 'var(--accent-warning)'
+  return 'var(--accent-success)'
 }
 
 function signColor(v: number | null | undefined): string {
   if (v === null || v === undefined) return 'var(--text-primary)'
-  return v >= 0 ? '#f56c6c' : '#67c23a'
+  return v >= 0 ? 'var(--accent-danger)' : 'var(--accent-success)'
 }
 
 async function loadPerformance() {
@@ -310,32 +342,22 @@ onMounted(() => {
 
 <style lang="scss" scoped>
 .review-page { padding: 0; }
-.card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 8px; }
-.card-title { font-size: 16px; font-weight: 600; color: var(--text-primary); }
+.card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 8px; }
+.card-title { font-size: 18px; font-weight: 600; color: var(--text-primary); }
 .header-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .ctrl-strategy { width: 120px; max-width: 100%; }
 .ctrl-horizon { width: 140px; max-width: 100%; }
 .ctrl-daterange { width: 260px; max-width: 100%; }
 .meta-alert { margin-bottom: 16px; }
 
-.stat-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-  gap: 12px;
-  margin-bottom: 20px;
-}
 .stat-card {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 14px 16px;
-  border-radius: var(--radius-md, 8px);
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border-primary);
-  .stat-label { font-size: 12px; color: var(--text-secondary); }
+  .stat-label { font-size: 12px; color: var(--text-tertiary); }
   .stat-value {
-    font-size: 22px; font-weight: 600; color: var(--text-primary);
-    em { font-size: 14px; font-style: normal; color: var(--text-secondary); margin-left: 4px; }
+    font-family: var(--font-mono); font-size: 30px; font-weight: 600; letter-spacing: -.04em; color: var(--text-primary);
+    em { font-family: var(--font-sans); font-size: 14px; font-style: normal; color: var(--text-secondary); margin-left: 4px; letter-spacing: 0; }
     &.sm { font-size: 15px; display: flex; gap: 12px; }
   }
 }
@@ -346,16 +368,124 @@ onMounted(() => {
   gap: 16px;
   margin-bottom: 20px;
 }
-.block-title { font-size: 14px; font-weight: 600; color: var(--text-primary); margin-bottom: 10px; }
-.review-chart { height: 280px; }
+.chart-block, .detail-block {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-md);
+  padding: 16px;
+}
+.block-title {
+  font-size: 14px; font-weight: 600; color: var(--text-primary);
+  display: flex; align-items: center; gap: 8px; margin-bottom: 14px;
+  &::before { content: ''; width: 2px; height: 13px; border-radius: 1px; background: var(--accent-primary); flex-shrink: 0; }
+}
+.review-chart { height: var(--chart-h-md); }
+
+/* ─── 手机端指标块 / 板块列表（替代宽表格） ─── */
+.m-metric-list, .m-sector-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.m-metric-card {
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border-subtle);
+
+  &:last-child { border-bottom: none; }
+}
+
+.m-metric-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+
+  .m-metric-name { font-size: 12px; font-weight: 600; color: var(--text-primary); }
+  .m-metric-hit { font-size: 11px; color: var(--text-secondary); font-family: var(--font-mono); }
+}
+
+.m-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+  margin-top: 5px;
+
+  & > div {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+    padding: 4px 5px;
+    background: var(--bg-tertiary);
+    border-radius: 4px;
+
+    em { font-style: normal; font-size: 10px; color: var(--text-tertiary); }
+    b { font-size: 11px; font-weight: 600; font-family: var(--font-mono); }
+  }
+}
+
+.m-sector-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 1px 8px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border-subtle);
+
+  &:last-child { border-bottom: none; }
+
+  .m-sector-name {
+    font-size: 12px;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .m-sector-return { font-size: 12px; font-weight: 600; font-family: var(--font-mono); }
+  .m-sector-meta { grid-column: 1 / -1; font-size: 10px; color: var(--text-tertiary); }
+}
+
+.m-list-empty {
+  padding: 20px 0;
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
 
 @media (max-width: 900px) {
   .chart-grid, .detail-grid { grid-template-columns: 1fr; }
 }
 
+@media (max-width: 768px) {
+  .stat-value { font-size: 20px; overflow-wrap: anywhere; }
+  .stat-value.sm { flex-wrap: wrap; gap: 6px; }
+  .header-actions { width: 100%; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  /* el-date-picker 根节点丢了本组件的 data-v，也不接收 class，.ctrl-daterange 是死规则，
+     只能用结构选择器；同时栅格里的 el-button 会带上 EP 的 margin-left:12px，
+     表现为「回填收益」在行首仍然右移 12px */
+  .header-actions > :deep(.el-date-editor) { grid-column: 1 / -1; width: 100% !important; }
+  .header-actions > :deep(.el-button) { margin-left: 0 !important; }
+  .ctrl-strategy, .ctrl-horizon { width: 100%; }
+  .card-header { flex-direction: column; align-items: stretch; margin-bottom: 12px; }
+  .chart-grid, .detail-grid { gap: 8px; margin-bottom: 8px; }
+  .chart-block, .detail-block { padding: 10px; border-radius: 8px; }
+}
+
 @media (max-width: 480px) {
-  .card-header { flex-direction: column; align-items: flex-start; }
-  .header-actions { width: 100%; }
-  .ctrl-strategy, .ctrl-horizon, .ctrl-daterange { width: 100%; }
+  .card-header { margin-bottom: 10px; gap: 6px; }
+  .meta-alert { margin-bottom: 8px; }
+  .stat-card {
+    gap: 2px;
+    padding: 8px;
+
+    .stat-label { font-size: 10px; }
+    .stat-value {
+      font-size: 18px;
+      em { font-size: 11px; margin-left: 2px; }
+      &.sm { font-size: 12px; }
+    }
+  }
+  .block-title { font-size: 12px; margin-bottom: 8px; &::before { height: 11px; } }
+  .review-chart { height: var(--chart-h-sm); }
 }
 </style>

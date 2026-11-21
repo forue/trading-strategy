@@ -1,0 +1,479 @@
+/* ═══════════════════════════════════════════════════════
+   移动端独立样式层（仅作用于 ≤480px）
+   设计前提：手机上 12px 正文即为常规字号，14px 属于大号，
+   因此本层重新定义字号尺度、间距节奏与组件形态，不再是桌面端等比缩放。
+   ┌ 桌面端（>480px）完全不受本文件影响
+   └ 页面级结构重排写在各页面 scoped 样式内，本文件只负责外壳与通用组件
+   ═══════════════════════════════════════════════════════ */
+
+@media (max-width: 480px) {
+  /* ─── 移动端字号与间距令牌 ─── */
+  :root {
+    --m-fs-title: 17px;    /* 页面标题 */
+    --m-fs-card: 13px;     /* 卡片标题 */
+    --m-fs-body: 12px;     /* 正文 */
+    --m-fs-sub: 11px;      /* 次要信息 */
+    --m-fs-tiny: 10px;     /* 辅助/标签 */
+    --m-fs-kpi: 18px;      /* 数值指标 */
+    --m-gap: 8px;          /* 卡片间距 */
+    --m-pad: 10px;         /* 卡片内边距 */
+    /* 控件高度统一 32：36 那一档比桌面（32）还大，整屏控件都显得发胖，
+       主次只能靠字号/字重区分。改回 32 后手机与桌面同规格，视觉层级交给颜色与字重。 */
+    --m-tap: 32px;
+    --m-seg-h: var(--m-tap);   /* 分段选择器（多选一）高度 */
+    --m-seg-pad-x: 8px;        /* 分段选择器水平内边距 */
+    --m-seg-fs: var(--m-fs-body); /* 分段选择器字号 */
+  }
+
+  /* ─── 外壳：压缩标题区，隐藏营销型副标题 ─── */
+  .page-context {
+    /* 手机没有浏览器边框，12px 是标题与状态栏/顶部的可读下限 */
+    padding: 12px 10px 0;
+    gap: 6px;
+    flex-direction: column;
+    align-items: stretch;
+
+    .context-left {
+      h1 { font-size: var(--m-fs-title); letter-spacing: -.02em; line-height: 1.25; }
+      /* 手机端省略描述性副标题，把首屏高度让给内容 */
+      .context-sub { display: none; }
+    }
+
+    .context-actions {
+      width: 100%;
+      max-width: 100%;
+      gap: 6px;
+      flex-wrap: nowrap;
+      justify-content: space-between;
+      overflow-x: auto;
+      scrollbar-width: none;
+
+      &::-webkit-scrollbar { display: none; }
+    }
+  }
+
+  .context-chip {
+    height: var(--m-tap);
+    padding: 0 8px;
+    font-size: var(--m-fs-body);
+  }
+
+  .context-icon {
+    width: var(--m-tap);
+    height: var(--m-tap);
+  }
+
+  .page-content {
+    /* 顶部留 --m-pad：原先为 0，页面第一张卡片直接顶在标题栏下边框上 */
+    padding: var(--m-pad) 10px 12px;
+    font-size: var(--m-fs-body);
+    overflow-x: hidden;
+  }
+
+  /* ─── 卡片：更薄的边框与更紧的留白 ─── */
+  .page-card {
+    padding: var(--m-pad);
+    margin-bottom: var(--m-gap);
+    border-radius: 8px;
+
+    /* 标题左、控件右：标题与控件同一行，放不下时才换行，避免每个控件独占一行 */
+    .card-header {
+      flex-direction: row !important;
+      flex-wrap: wrap;
+      align-items: center !important;
+      justify-content: space-between;
+      gap: 6px;
+      margin-bottom: var(--m-pad);
+      padding-bottom: 6px;
+    }
+
+    .card-title {
+      flex: 1 1 auto;
+      min-width: 0;
+      font-size: var(--m-fs-card);
+      gap: 6px;
+      text-align: left;
+
+      &::before { height: 12px; }
+    }
+  }
+
+  .page-section { margin-top: var(--m-gap); }
+
+  /* 卡片头部控件按内容宽度排列，不再拉伸成整行宽按钮/下拉 */
+  .page-card .card-header > *:not(.card-title) {
+    flex: 0 0 auto;
+    min-width: 0;
+  }
+
+  /* 下拉/日期/输入按内容宽度，但要保证选中文本能完整显示，不能被压成一条缝 */
+  .page-card .card-header .el-select,
+  .page-card .card-header .el-date-editor,
+  .page-card .card-header .el-input {
+    width: auto !important;
+    min-width: 120px !important;
+    max-width: 100%;
+  }
+
+  /* ─── KPI：两列紧凑排布，标签在上、数值在下 ─── */
+  .stat-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--m-gap);
+    margin-bottom: var(--m-gap);
+  }
+
+  .stat-card {
+    padding: var(--m-pad);
+    border-radius: 8px;
+
+    .stat-body {
+      .stat-value {
+        font-size: var(--m-fs-kpi);
+        letter-spacing: -.02em;
+        line-height: 1.15;
+        word-break: break-all;
+      }
+      .stat-label { font-size: var(--m-fs-tiny); margin-top: 4px; }
+    }
+  }
+
+  /* ─── 底部标签栏：更矮更紧凑 ─── */
+  .bottom-tabs { height: 52px; flex: 0 0 52px; }
+  .bottom-tab {
+    gap: 2px;
+    font-size: 10px;
+
+    .el-icon { font-size: 17px; }
+
+    span { white-space: nowrap; }
+  }
+
+  /* ─── 表单：标签在上、控件全宽、间距压缩 ─── */
+  /* EP 的 el-form--inline 是 block，仅改 flex-direction 无效，会把表单项压成一条缝 */
+  .el-form--inline {
+    display: flex !important;
+    flex-direction: column;
+    align-items: stretch;
+
+    /* 堆叠后的行间距由容器 gap 统一给（全局 8px），
+       这里再用 margin-bottom 会与 gap 叠加成 16px */
+    .el-form-item {
+      margin: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+
+      .el-form-item__label {
+        text-align: left;
+        padding: 0 0 3px;
+        height: auto;
+        line-height: 1.4;
+        font-size: var(--m-fs-sub);
+        color: var(--text-tertiary);
+      }
+
+      .el-form-item__content {
+        margin-left: 0 !important;
+
+        & > .el-date-picker,
+        & > .el-date-editor--daterange,
+        & > .el-date-editor--date,
+        & > .el-select,
+        & > .el-input-number,
+        & > .el-button { width: 100% !important; max-width: 100%; }
+      }
+    }
+  }
+
+  .el-form-item__label { font-size: var(--m-fs-sub); }
+
+  /* 表单控件统一走 --m-tap（32）：与按钮/日期框同档，避免 32/36 混排 */
+  .el-form {
+    --el-component-size: var(--m-tap);
+    --el-component-size-small: var(--m-tap);
+
+    .el-button,
+    .el-button--small { height: var(--m-tap); }
+
+    .el-select .el-select__wrapper,
+    .el-select--small .el-select__wrapper { min-height: var(--m-tap); }
+
+    .el-date-editor .el-input__wrapper { min-height: var(--m-tap); }
+  }
+
+  /* 卡片头/过滤行/工具栏不再降到桌面 S 档 24：
+     24 高配 6px 内边距 + 22 行高时文字必然偏上（24 - 6*2 - 22 < 0），
+     是"同一排按钮文字不对齐"的直接来源。
+     index.scss 对这几个区域写了 (0,2,0)/(0,3,0) 的 24 档，这里必须同层覆盖，
+     只写 .el-button 会被它压回 24，整条栏统一走 --m-tap，放不下就换行。 */
+  .card-header,
+  .context-actions,
+  .filter-row,
+  .card-actions {
+    .el-form,
+    .el-form--inline {
+      --el-component-size: var(--m-tap);
+      --el-component-size-small: var(--m-tap);
+    }
+
+    .el-button,
+    .el-button--small { height: var(--m-tap); }
+
+    .el-select .el-select__wrapper,
+    .el-select--small .el-select__wrapper,
+    .el-date-editor .el-input__wrapper,
+    .el-input .el-input__wrapper { min-height: var(--m-tap); }
+  }
+
+  /* 弹框底部按钮跟随控件档：否则表单 32 配一对 36 的按钮 */
+  .el-dialog__footer .el-button { height: var(--m-tap); }
+  .el-input__inner,
+  .el-textarea__inner,
+  .el-select__placeholder,
+  .el-select__selected-item { font-size: var(--m-fs-body) !important; }
+  .el-input-number .el-input__inner { font-size: var(--m-fs-body); }
+
+  /* 步进器触控：小号数字框默认 25x22，高度低于 24x24 触控下限；
+     抬到令牌高度后两侧 ± 按钮随 absolute 定位同步变高。
+     wrapper 是 content-box（padding 1px），改 border-box 才不会比外层高 2px */
+  .el-input-number--small {
+    height: var(--m-tap);
+
+    .el-input { min-height: var(--m-tap); }
+
+    .el-input__wrapper {
+      box-sizing: border-box;
+      min-height: var(--m-tap);
+    }
+  }
+
+  /* 日期区间：内部字号同步下调，避免撑破 */
+  .el-date-editor--daterange {
+    width: 100% !important;
+
+    .el-range-input { font-size: var(--m-fs-body); }
+    .el-range-separator { font-size: var(--m-fs-tiny); padding: 0 2px; }
+  }
+
+  /* ─── Element Plus 通用控件：统一一档，主次靠字重而非尺寸 ─── */
+  /* 原 30 / 26 / 34 三档并存，与表单控件撞出"同排按钮一高一矮"；
+     移动端只保留 --m-tap 一档，字号统一 12。 */
+  .el-button,
+  .el-button--small,
+  .el-button--large {
+    height: var(--m-tap);
+    padding: 0 10px;
+    font-size: var(--m-fs-body);
+  }
+  /* 尺寸全统一后，主操作（带类型的按钮）靠 600 字重区分层次 */
+  .el-button--primary,
+  .el-button--danger,
+  .el-button--success,
+  .el-button--warning { font-weight: 600; }
+  .el-button.is-link { height: auto; padding: 0 2px; }
+
+  .el-tag {
+    height: 18px;
+    padding: 0 5px;
+    font-size: var(--m-fs-tiny);
+    line-height: 16px;
+    border-radius: 3px;
+  }
+
+  .el-alert {
+    padding: 6px 8px;
+    border-radius: 6px;
+
+    .el-alert__title { font-size: var(--m-fs-sub); line-height: 1.4; }
+    .el-alert__description { font-size: var(--m-fs-tiny); line-height: 1.45; margin: 2px 0 0; }
+    .el-alert__icon { font-size: 14px; }
+  }
+
+  /* ─── 分段选择（多选一）：唯一规格 ───
+     原先 4 处各写一套（height 32 / 24，padding-y 5 / 6，line-height 18 / 22，font-size 11 / 12），
+     同一控件换页面就变高、文字固定偏上 1–4px。现在只允许改这一处：
+     高度靠 flex 居中，不写 line-height 与 padding-y。
+     选择器写三层 (0,3,0)，因为 EP 自带两条更靠后的规则会反压：
+     .el-radio-button__inner（0,1,0，padding 8/15）
+     .el-radio-button--small .el-radio-button__inner（0,2,0，padding 5/11） */
+  .el-radio-group .el-radio-button .el-radio-button__inner {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    height: var(--m-seg-h);
+    padding: 0 var(--m-seg-pad-x);
+    font-size: var(--m-seg-fs);
+    line-height: 1;
+    text-align: center;
+  }
+
+  /* 等分模式：容器加 class="fill"，选项按容器宽度均分。
+     文字居中由上面的 justify-content 统一，页面不得再写 width / padding / font-size */
+  .el-radio-group.fill { display: flex; }
+  .el-radio-group.fill > .el-radio-button { flex: 1 1 0; min-width: 0; }
+  .el-radio-group.fill > .el-radio-button > .el-radio-button__inner { width: 100%; }
+
+  .el-checkbox__label { font-size: var(--m-fs-body); }
+  .el-checkbox { height: 26px; }
+
+  /* 标签页：横向滚动而不是挤压换行 */
+  .el-tabs__header { margin-bottom: var(--m-gap); }
+  .el-tabs__nav-wrap { overflow-x: auto; scrollbar-width: none; }
+  .el-tabs__nav-wrap::-webkit-scrollbar { display: none; }
+  /* 标签条目统一走 --m-tap：EP 默认 top 型 40、border-card 型 32，同站两档。
+     选择器带到 .el-tabs__header（0,2,0），否则 EP 自带 (0,1,0) 会随 chunk 后注入反压 */
+  .el-tabs__header .el-tabs__item {
+    height: var(--m-tap);
+    line-height: calc(var(--m-tap) - 2px);
+    font-size: var(--m-fs-body);
+    padding: 0 8px;
+  }
+
+  /* 边框卡片式标签页（设置页）：标签条目同样走 --m-tap，
+     且内容区必须留内边距——原先 padding 为 0，第一张卡片紧贴标签条、
+     最后一行紧贴卡片下边框，看起来就是"tab 栏和底部没有间距" */
+  .el-tabs--border-card {
+    > .el-tabs__header .el-tabs__item { padding: 0 10px; font-size: var(--m-fs-sub); }
+
+    > .el-tabs__content { padding: var(--m-pad); }
+  }
+
+  /* 分页：只保留翻页与总数 */
+  .el-pagination {
+    font-size: var(--m-fs-sub);
+    gap: 2px;
+
+    .el-pagination__total { margin-right: 4px; }
+    .el-pagination__sizes { display: none; }
+    button, .el-pager li { min-width: 26px; height: 26px; line-height: 26px; font-size: var(--m-fs-sub); }
+  }
+
+  .el-empty { padding: 16px 0; }
+  .el-empty__description p { font-size: var(--m-fs-sub); }
+  .el-skeleton { padding: 8px 0; }
+
+  /* ─── 弹窗 / 抽屉：手机上一律贴边全屏 ─── */
+  .el-overlay-dialog { padding: 0; }
+  .el-dialog {
+    width: calc(100vw - 16px) !important;
+    max-width: calc(100vw - 16px) !important;
+    margin: 8px auto !important;
+    border-radius: 8px;
+    max-height: calc(100vh - 16px);
+    display: flex;
+    flex-direction: column;
+
+    .el-dialog__header { padding: 10px 10px 6px; margin-right: 0; }
+    .el-dialog__title { font-size: 13px; }
+    .el-dialog__body {
+      padding: 8px 10px 12px;
+      overflow-x: hidden;
+      overflow-y: auto;
+      font-size: var(--m-fs-body);
+    }
+    .el-dialog__footer { padding: 6px 10px 10px; }
+  }
+  .el-message-box {
+    width: calc(100vw - 32px) !important;
+    max-width: calc(100vw - 32px) !important;
+    padding: 12px;
+  }
+  .el-message-box__title { font-size: 13px; }
+  .el-message-box__message { font-size: var(--m-fs-body); }
+
+  .el-drawer__header { margin-bottom: 0; padding: 10px 12px; font-size: 13px; }
+  .el-drawer__body { padding: 10px; }
+
+  /* 下拉 / 日期弹层不越界 */
+  .el-select__popper,
+  .el-picker-panel,
+  .el-dropdown__popper { max-width: calc(100vw - 16px); }
+
+  .el-popover.el-popper { max-width: calc(100vw - 24px) !important; }
+
+  /* ─── 表格：容器必须可横滑且不撑破卡片 ───
+     页面中已改造为卡片列表的表格不再依赖本规则；
+     未改造的次要表格通过容器横滑保证字段可读，绝不裁切。 */
+  .responsive-table {
+    width: 100%;
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
+  }
+
+  /* 宽度交给 index.scss 的 .responsive-table .el-table { min-width: 100% } 统一管；
+     这里再写 max-content 会让表格宽由单元格反推，与 EP 的列宽分配互相递归，
+     列宽被算成两万多像素（详见 docs/15-table-spec.md 6.2） */
+
+  .el-table {
+    font-size: var(--m-fs-sub);
+
+    .cell { padding: 0 6px; line-height: 1.45; }
+    .el-table__cell { padding: 5px 0; }
+    th.el-table__cell { font-size: var(--m-fs-tiny); font-weight: 600; }
+  }
+
+  /* ─── 代码 / 日志块：等宽字体缩小，允许换行 ─── */
+  .el-scrollbar__view { min-width: 0; }
+
+  /* ─── 字号强制收敛 ───
+     各页面 scoped 样式与 Element Plus 内部规则优先级更高，这里统一兜底，
+     保证手机端不出现 14px 及以上的正文/辅助文字（数值与标题除外），
+     同时守住可读下限：常规文本 11px，纯辅助标签允许 10px。 */
+  .page-card .card-title { font-size: 13px !important; }
+  .page-card .stat-value { font-size: 18px !important; }
+  /* Element Plus 的 CSS 由异步 chunk 注入，加载顺序不稳定，字号必须强制收敛 */
+  .el-button,
+  .el-button > span { font-size: 12px !important; }
+  .el-button--small,
+  .el-button--small > span { font-size: 12px !important; }
+  .el-tag { font-size: 11px !important; }
+  .el-tabs__item { font-size: 12px !important; }
+  .el-radio-group .el-radio-button .el-radio-button__inner { font-size: var(--m-seg-fs) !important; }
+  /* 高度同源兜底：各页面 scoped 仍写 24/32（聊天工具条、页头操作区、模型选择），
+     与字号兜底同理必须 !important，否则同一条栏里 24/32 多档并存。
+     文字链接（.is-link）保持 auto，它没有可点区域的概念 */
+  .el-button:not(.is-link),
+  .el-button--small:not(.is-link) { height: var(--m-tap) !important; }
+  /* 圆形图标按钮（AI 工具条三点、发送等）：EP 只给 width 24/32，被上面的高度拉成椭圆 */
+  .el-button.is-circle {
+    width: var(--m-tap) !important;
+    min-width: var(--m-tap) !important;
+    padding: 0 !important;
+  }
+  /* wrapper 是 content-box（padding 1px），只写 min-height 会多出 2px，
+     必须同时改 border-box 才能实测到 --m-tap */
+  .el-select__wrapper,
+  .el-input__wrapper,
+  .el-date-editor { box-sizing: border-box; min-height: var(--m-tap) !important; }
+  .el-range-separator { font-size: 11px !important; }
+  .el-form-item__label { font-size: 11px !important; }
+  .el-checkbox__label { font-size: 12px !important; }
+  .el-radio__label { font-size: 12px !important; }
+  .el-switch__label,
+  .el-switch__label * { font-size: 11px !important; }
+  .el-alert__title { font-size: 11px !important; }
+  .el-alert__description { font-size: 11px !important; }
+  .el-pagination__total,
+  .el-pagination__jump { font-size: 11px !important; }
+  .el-dialog__title,
+  .el-drawer__title { font-size: 13px !important; }
+  .el-message-box__title { font-size: 13px !important; }
+  .el-descriptions__label,
+  .el-descriptions__content { font-size: 11px !important; }
+  .el-empty__description p { font-size: 11px !important; }
+}
+
+/* 768 以下的平板段：只处理容器不溢出，不改变视觉密度 */
+@media (max-width: 768px) {
+  .page-content { overflow-x: hidden; }
+
+  .responsive-table {
+    width: 100%;
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+}

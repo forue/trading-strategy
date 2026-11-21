@@ -11,6 +11,8 @@ export interface TradeSignal {
   direction: 'BUY' | 'SELL'
   position_ratio: number
   score: number
+  // 信号生成时的参考价，后端可能缺省
+  current_price?: number | null
   reason: string
   rank: number | null
   total_sectors: number | null

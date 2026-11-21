@@ -7,13 +7,36 @@
         <el-button type="primary" size="small" @click="showAddProvider">添加提供商</el-button>
       </div>
 
+      <!-- 手机端：五列表格（580px）必然横向裁切，改为条目 -->
+      <ul v-if="isMobile" class="m-provider-list">
+        <li v-for="row in providers" :key="row.id" class="m-provider-row">
+          <div class="m-provider-head">
+            <span class="m-provider-name">{{ row.name }}</span>
+            <el-tag v-if="row.id === 'ollama'" type="info" size="small">本地</el-tag>
+            <el-tag v-else-if="row.is_configured" type="success" size="small">已配置</el-tag>
+            <el-tag v-else type="warning" size="small">未配置</el-tag>
+          </div>
+          <div class="m-provider-url">{{ row.base_url }}</div>
+          <div class="m-provider-foot">
+            <span class="m-provider-models">{{ row.models?.length || 0 }} 个模型</span>
+            <div class="m-provider-actions">
+              <el-button size="small" @click="editProvider(row)">编辑</el-button>
+              <el-button size="small" :loading="testingId === row.id" @click="testConnection(row)">测试</el-button>
+              <el-button v-if="!row.is_builtin" size="small" type="danger" @click="deleteProvider(row)">删除</el-button>
+            </div>
+          </div>
+        </li>
+        <li v-if="!providers.length" class="m-provider-empty">暂无提供商</li>
+      </ul>
+
+      <div v-else class="responsive-table">
       <el-table :data="providers" stripe size="small">
         <el-table-column prop="name" label="提供商" width="120" />
         <el-table-column prop="base_url" label="API 地址" min-width="200" show-overflow-tooltip />
         <el-table-column label="模型数" width="80" align="center">
           <template #default="{ row }">{{ row.models?.length || 0 }}</template>
         </el-table-column>
-        <el-table-column label="状态" width="100" align="center">
+        <el-table-column label="状态" width="96" align="center">
           <template #default="{ row }">
             <el-tag v-if="row.id === 'ollama'" type="info" size="small">本地</el-tag>
             <el-tag v-else-if="row.is_configured" type="success" size="small">已配置</el-tag>
@@ -28,6 +51,7 @@
           </template>
         </el-table-column>
       </el-table>
+      </div>
     </div>
 
     <!-- 全局设置 -->
@@ -70,7 +94,7 @@
     </div>
 
     <!-- 编辑提供商对话框 -->
-    <el-dialog v-model="dialogVisible" :title="isEdit ? '编辑提供商' : '添加提供商'" width="600px">
+    <el-dialog v-model="dialogVisible" :title="isEdit ? '编辑提供商' : '添加提供商'" width="640px">
       <el-form :model="editForm" label-width="100px">
         <el-form-item label="提供商ID">
           <el-input v-model="editForm.id" :disabled="isEdit" placeholder="如: my-api" />
@@ -99,11 +123,11 @@
           </el-button>
         </div>
 
-        <div v-for="(m, idx) in editForm.models" :key="idx" style="display: flex; gap: 8px; margin-bottom: 8px">
-          <el-input v-model="m.value" placeholder="模型ID" style="flex: 1" />
-          <el-input v-model="m.label" placeholder="显示名称" style="flex: 1" />
-          <el-input v-model="m.desc" placeholder="描述" style="flex: 1" />
-          <el-button :icon="Delete" circle size="small" @click="editForm.models.splice(idx, 1)" />
+        <div v-for="(m, idx) in editForm.models" :key="idx" class="model-row">
+          <el-input v-model="m.value" placeholder="模型ID" class="model-input" />
+          <el-input v-model="m.label" placeholder="显示名称" class="model-input" />
+          <el-input v-model="m.desc" placeholder="描述" class="model-input" />
+          <el-button :icon="Delete" circle size="small" class="model-del" @click="editForm.models.splice(idx, 1)" />
         </div>
       </el-form>
 
@@ -122,7 +146,9 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { aiApi } from '@/api/ai'
 import { useAiStore } from '@/stores/ai'
 import type { ProviderConfig, ModelInfo } from '@/api/ai'
+import { useBreakpoint } from '@/composables/useBreakpoint'
 
+const { isMobile } = useBreakpoint()
 const aiStore = useAiStore()
 const providers = ref<ProviderConfig[]>([])
 const dialogVisible = ref(false)
@@ -327,8 +353,117 @@ async function saveGlobalConfig() {
   }
 }
 
-@media (max-width: 480px) {
-  :deep(.el-dialog) { width: 95% !important; }
+/* 对话框被 teleport 到 body，模型行样式必须写在根级才能命中 */
+.model-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+
+  .model-input {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .model-del { flex: none; }
+}
+
+/* 手机端提供商条目 */
+.m-provider-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.m-provider-row {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border-subtle);
+
+  &:last-child { border-bottom: none; }
+}
+.m-provider-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+
+  .m-provider-name {
+    flex: 1;
+    min-width: 0;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+.m-provider-url {
+  margin-top: 2px;
+  font-size: 10px;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  word-break: break-all;
+}
+.m-provider-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-top: 6px;
+
+  .m-provider-models { font-size: 10px; color: var(--text-tertiary); }
+  .m-provider-actions { display: flex; gap: 4px; }
+}
+.m-provider-empty {
+  padding: 20px 0;
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+@media (max-width: 768px) {
+  :deep(.el-dialog) { width: calc(100vw - 16px) !important; }
   :deep(.el-form-item__label) { width: auto !important; display: block; text-align: left; }
+  :deep(.el-form-item) { flex-direction: column; align-items: stretch; }
+  :deep(.el-form-item__content) { margin-left: 0 !important; flex-wrap: wrap; }
+}
+
+@media (max-width: 480px) {
+  :deep(.el-form) { max-width: 100% !important; }
+  :deep(.el-form-item) { margin-bottom: var(--ctrl-row-gap); }
+  :deep(.el-form-item__label) { font-size: 11px; padding-bottom: 3px; }
+  :deep(.el-slider) { width: 100%; }
+  /* 带 show-input 的滑块：数值框本身也是 .el-input-number，被拉满 100% 后会把轨道挤没，
+     还会因为 12px 外边距溢出。这里固定 72px，剩余空间留给轨道 */
+  :deep(.el-slider__runway) { flex: 1 1 auto; min-width: 0; }
+  :deep(.el-slider__input) { flex: 0 0 72px; width: 72px !important; margin-left: 8px; }
+  :deep(.el-form-item__content > .el-input-number) { width: 100%; }
+  .form-hint { font-size: 10px; line-height: 1.45; }
+
+  /* 模型编辑行：三个输入框 + 删除按钮在 366px 内无法并排，改为单列堆叠 */
+  .model-row {
+    position: relative;
+    display: block !important;
+    padding: 6px 34px 6px 6px;
+    margin-bottom: 6px !important;
+    background: var(--bg-tertiary);
+    border-radius: 6px;
+
+    .model-input {
+      display: block;
+      margin-bottom: 6px !important;
+
+      &:last-of-type { margin-bottom: 0 !important; }
+    }
+
+    .model-del {
+      position: absolute;
+      top: 6px;
+      right: 6px;
+      width: 26px;
+      height: 26px;
+      margin: 0;
+    }
+  }
+  .page-card { padding: 10px; }
+  .page-card + .page-card { margin-top: 8px !important; }
 }
 </style>

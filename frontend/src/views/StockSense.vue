@@ -1,6 +1,6 @@
 <template>
   <div class="sense-page">
-    <header class="sense-header">
+    <header class="sense-header page-card">
       <div class="title-block">
         <h2>盘感训练</h2>
         <p>随机标的 · 隐藏后市的连续一年K线 · 按天/周推进，判断买卖时机</p>
@@ -15,7 +15,7 @@
         <el-button v-else-if="state.ended" type="primary" :loading="busy" @click="start">
           再来一轮
         </el-button>
-        <el-button v-else plain :loading="busy" :disabled="!sid" @click="doFinish">结束训练</el-button>
+        <el-button v-else type="danger" :loading="busy" :disabled="!sid" @click="doFinish">结束训练</el-button>
         <el-button plain @click="historyVisible = true">历史复盘</el-button>
       </div>
     </header>
@@ -78,7 +78,9 @@
           </div>
         </div>
         <el-progress :percentage="progressPct" :show-text="false" :stroke-width="4" />
-        <VChart ref="chartRef" class="kline-chart" :option="chartOption" autoresize />
+        <div class="kline-chart-scroll">
+          <VChart ref="chartRef" class="kline-chart" :option="chartOption" autoresize @datazoom="onDataZoom" />
+        </div>
         <div v-if="magnifier" class="magnifier">
           <div class="magnifier-title">
             局部放大 · 第{{ magnifier.no }}根 · {{ magnifier.price.toFixed(3) }}
@@ -104,20 +106,16 @@
             <el-radio-button :value="0.5">1/2</el-radio-button>
             <el-radio-button :value="1">全部</el-radio-button>
           </el-radio-group>
-          <el-button type="danger" :loading="busy" :disabled="!state.can_buy" @click="doTrade('buy')">
+          <el-button type="danger" size="small" :loading="busy" :disabled="!state.can_buy" @click="doTrade('buy')">
             买入
           </el-button>
-          <el-button type="success" :loading="busy" :disabled="!state.can_sell" @click="doTrade('sell')">
+          <el-button type="success" size="small" :loading="busy" :disabled="!state.can_sell" @click="doTrade('sell')">
             卖出
           </el-button>
           <span class="trade-divider" />
-          <el-radio-group v-model="unit" size="small" :disabled="busy" @change="onUnitChange">
-            <el-radio-button value="day">按天</el-radio-button>
-            <el-radio-button value="week">按周</el-radio-button>
-          </el-radio-group>
-          <el-button :loading="busy" :disabled="!state.can_step" @click="onManualStep">下一根</el-button>
-          <span class="trade-divider" />
+          <!-- 播放类操作放在前段，高频的「下一根」独立放到末尾，避免夹在低频切换之间误触 -->
           <el-button
+            size="small"
             :type="autoPlaying ? 'warning' : 'default'"
             :disabled="!state.can_step && !autoPlaying"
             @click="toggleAuto"
@@ -129,6 +127,12 @@
             <el-radio-button :value="600">中</el-radio-button>
             <el-radio-button :value="250">快</el-radio-button>
           </el-radio-group>
+          <span class="trade-divider" />
+          <el-radio-group v-model="unit" size="small" :disabled="busy" @change="onUnitChange">
+            <el-radio-button value="day">按天</el-radio-button>
+            <el-radio-button value="week">按周</el-radio-button>
+          </el-radio-group>
+          <el-button size="small" :loading="busy" :disabled="!state.can_step" @click="onManualStep">下一根</el-button>
         </div>
       </section>
 
@@ -219,19 +223,39 @@
 
         <SenseReviewPanel v-model:show-signals="showSuggestions" :review="summary.review" />
 
-        <el-table v-if="summary.trades.length" :data="summary.trades" size="small" max-height="220">
-          <el-table-column prop="action" label="方向" width="70">
-            <template #default="{ row }">{{ row.action === 'BUY' ? '买入' : '卖出' }}</template>
-          </el-table-column>
-          <el-table-column prop="date" label="日期" width="110" />
-          <el-table-column prop="price" label="价格" width="90">
-            <template #default="{ row }">{{ row.price.toFixed(3) }}</template>
-          </el-table-column>
-          <el-table-column prop="shares" label="股数" width="90" />
-          <el-table-column prop="fee" label="费用" width="90">
-            <template #default="{ row }">{{ row.fee.toFixed(2) }}</template>
-          </el-table-column>
-        </el-table>
+        <template v-if="summary.trades.length">
+          <!-- 手机端：五列表格改为紧凑单行条目，避免横向滑动 -->
+          <ul v-if="bp.isMobile.value" class="m-trade-list">
+            <li class="m-trade-head">
+              <span>方向</span><span>日期</span><span>价格</span><span>股数</span><span>费用</span>
+            </li>
+            <li v-for="(row, i) in summary.trades" :key="i">
+              <span :class="row.action === 'BUY' ? 'tag-buy' : 'tag-sell'">
+                {{ row.action === 'BUY' ? '买' : '卖' }}
+              </span>
+              <span>{{ row.date }}</span>
+              <span class="m-trade-num">{{ row.price.toFixed(3) }}</span>
+              <span class="m-trade-num">{{ row.shares }}</span>
+              <span class="m-trade-num">{{ row.fee.toFixed(2) }}</span>
+            </li>
+          </ul>
+          <div v-else class="responsive-table">
+            <el-table :data="summary.trades" max-height="220">
+              <el-table-column prop="action" label="方向" width="64">
+                <template #default="{ row }">{{ row.action === 'BUY' ? '买入' : '卖出' }}</template>
+              </el-table-column>
+              <!-- 弹性列：结算弹窗内同样要铺满，全固定列会在右侧留一块空白 -->
+              <el-table-column prop="date" label="日期" min-width="110" />
+              <el-table-column prop="price" label="价格" width="96" align="right">
+                <template #default="{ row }">{{ row.price.toFixed(3) }}</template>
+              </el-table-column>
+              <el-table-column prop="shares" label="股数" width="96" align="right" />
+              <el-table-column prop="fee" label="费用" width="96" align="right">
+                <template #default="{ row }">{{ row.fee.toFixed(2) }}</template>
+              </el-table-column>
+            </el-table>
+          </div>
+        </template>
       </div>
       <template #footer>
         <el-button v-if="summary" @click="replayCurrent">查看后续走势与复盘</el-button>
@@ -305,31 +329,54 @@
         <SenseReviewPanel v-model:show-signals="showSuggestions" :review="replayRecord.review" />
 
         <div class="card-title">逐笔交易</div>
-        <el-table v-if="pairs.length" :data="pairs" size="small" max-height="240">
-          <el-table-column prop="buy_date" label="买入日" width="106" />
-          <el-table-column label="买入价" width="82">
-            <template #default="{ row }">{{ row.buy_price.toFixed(3) }}</template>
-          </el-table-column>
-          <el-table-column prop="sell_date" label="卖出日" width="106" />
-          <el-table-column label="卖出价" width="82">
-            <template #default="{ row }">{{ row.sell_price.toFixed(3) }}</template>
-          </el-table-column>
-          <el-table-column prop="shares" label="股数" width="76" />
-          <el-table-column label="盈亏" width="94">
-            <template #default="{ row }">
-              <span :class="pnlClass(row.pnl)">{{ row.pnl > 0 ? '+' : '' }}{{ fmt(row.pnl) }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="盈亏比" width="86">
-            <template #default="{ row }">
-              <span :class="pnlClass(row.pnl_pct)">{{ signed(row.pnl_pct) }}%</span>
-            </template>
-          </el-table-column>
-          <el-table-column prop="days" label="持有天数" width="86" />
-          <el-table-column label="备注">
-            <template #default="{ row }">{{ row.forced ? '回放结束强制平仓' : '' }}</template>
-          </el-table-column>
-        </el-table>
+        <template v-if="pairs.length">
+          <!-- 手机端：九列配对表改为条目，避免横向滑动 -->
+          <ul v-if="bp.isMobile.value" class="m-pair-list">
+            <li v-for="(row, pi) in pairs" :key="pi" class="m-pair-row">
+              <div class="m-pair-head">
+                <span class="m-pair-range">{{ row.buy_date }} → {{ row.sell_date }}</span>
+                <span class="m-pair-pnl" :class="pnlClass(row.pnl)">
+                  {{ row.pnl > 0 ? '+' : '' }}{{ fmt(row.pnl) }}
+                  <em :class="pnlClass(row.pnl_pct)">{{ signed(row.pnl_pct) }}%</em>
+                </span>
+              </div>
+              <div class="m-pair-grid">
+                <div><em>买入价</em><b>{{ row.buy_price.toFixed(3) }}</b></div>
+                <div><em>卖出价</em><b>{{ row.sell_price.toFixed(3) }}</b></div>
+                <div><em>股数</em><b>{{ row.shares }}</b></div>
+                <div><em>持有</em><b>{{ row.days }}天</b></div>
+              </div>
+              <div v-if="row.forced" class="m-pair-tip">回放结束强制平仓</div>
+            </li>
+          </ul>
+          <div v-else class="responsive-table">
+            <el-table :data="pairs" max-height="240">
+              <el-table-column prop="buy_date" label="买入日" width="110" />
+              <el-table-column label="买入价" width="80" align="right">
+                <template #default="{ row }">{{ row.buy_price.toFixed(3) }}</template>
+              </el-table-column>
+              <el-table-column prop="sell_date" label="卖出日" width="110" />
+              <el-table-column label="卖出价" width="80" align="right">
+                <template #default="{ row }">{{ row.sell_price.toFixed(3) }}</template>
+              </el-table-column>
+              <el-table-column prop="shares" label="股数" width="80" align="right" />
+              <el-table-column label="盈亏" width="96" align="right">
+                <template #default="{ row }">
+                  <span :class="pnlClass(row.pnl)">{{ row.pnl > 0 ? '+' : '' }}{{ fmt(row.pnl) }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="盈亏比" width="80" align="right">
+                <template #default="{ row }">
+                  <span :class="pnlClass(row.pnl_pct)">{{ signed(row.pnl_pct) }}%</span>
+                </template>
+              </el-table-column>
+              <el-table-column prop="days" label="持有天数" width="80" align="right" />
+              <el-table-column label="备注" min-width="160">
+                <template #default="{ row }">{{ row.forced ? '回放结束强制平仓' : '—' }}</template>
+              </el-table-column>
+            </el-table>
+          </div>
+        </template>
         <div v-else class="empty-tip">全程空仓，没有产生交易</div>
       </div>
     </el-drawer>
@@ -371,6 +418,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { useBreakpoint } from '@/composables/useBreakpoint'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
 import { BarChart, LineChart, ScatterChart, CandlestickChart } from 'echarts/charts'
@@ -410,10 +458,34 @@ use([
 ])
 
 const userStore = useUserStore()
+const bp = useBreakpoint()
 const userName = computed(() => userStore.userInfo?.username || 'default')
 
 /** 当前训练会话 id 的本地记录，用于刷新页面后恢复训练（会话与划线都在后端） */
 const SID_KEY = 'stock-sense-sid:'
+
+/**
+ * 用户捏合/拖动滑块后的可视K线根数，跨训练记住：下次开始训练按这个宽度显示。
+ * 存根数而不是百分比——日/周/月切换、推进若干根之后每根K线的宽度都一样，
+ * 存比例会在一年末把窗口撑到一半、K线又挤成一片。
+ */
+const ZOOM_BARS_KEY = 'stock-sense-zoom-bars:'
+const MIN_ZOOM_BARS = 6
+const MAX_ZOOM_BARS = 240
+const userZoomBars = ref<number | null>(null)
+
+function readZoomBars(): number | null {
+  const raw = Number(localStorage.getItem(ZOOM_BARS_KEY + userName.value))
+  return Number.isFinite(raw) && raw >= MIN_ZOOM_BARS && raw <= MAX_ZOOM_BARS ? Math.round(raw) : null
+}
+
+function saveZoomBars(bars: number) {
+  const v = Math.round(bars)
+  if (!Number.isFinite(v) || v < MIN_ZOOM_BARS || v > MAX_ZOOM_BARS) return
+  if (userZoomBars.value === v) return
+  userZoomBars.value = v
+  localStorage.setItem(ZOOM_BARS_KEY + userName.value, String(v))
+}
 
 const busy = ref(false)
 /** 自动播放的单步请求单独计数：不占用 busy，连续推进时按钮不会出现/消失 loading 图标 */
@@ -424,6 +496,8 @@ const inFlight = computed(() => busy.value || stepping.value)
 const sid = ref('')
 const state = ref<SenseState | null>(null)
 const chart = ref<SenseChart | null>(null)
+/** 训练图受控数据窗口（bars 下标）：随当前K线滑动，重渲染时保持不变 */
+const zoomWin = ref<{ start: number; end: number } | null>(null)
 const view = ref<ChartView>('day')
 const unit = ref<StepUnit>('day')
 const summary = ref<SenseSummary | null>(null)
@@ -522,6 +596,8 @@ interface ChartDecor {
   /** 微调模式下显示可拖拽锚点 */
   anchorMode?: boolean
   activeAnchor?: { line: number; point: number } | null
+  /** 受控数据窗口（bars 下标）；不传则显示整段 */
+  zoom?: { start: number; end: number } | null
 }
 
 function buildChartOption(
@@ -543,6 +619,10 @@ function buildChartOption(
   const axisIdx = Array.from({ length: subPanels.length + 1 }, (_, i) => i)
   const volumeAxis = subPanels.indexOf('volume') + 1
   const macdAxis = subPanels.indexOf('macd') + 1
+  // 视窗写进 option：每次重建 option 都带着同一窗口，买卖/推进不会跳回整段
+  const zoomSpan = decor.zoom
+    ? { startValue: decor.zoom.start, endValue: decor.zoom.end }
+    : { start: 0, end: 100 }
 
   const rawDates = c.bars.map((b) => b.date)
   const dates = rawDates.map(dayLabel)
@@ -607,7 +687,8 @@ function buildChartOption(
       value: t.action === 'BUY' ? 'B' : 'S',
       itemStyle: { color: t.action === 'BUY' ? '#ef232a' : '#14b143' },
       symbol: 'pin',
-      symbolSize: 34,
+      // 手机端图表宽度≈视口宽度，34px 的 pin 会把相邻K线的买卖点糊成一片
+      symbolSize: bp.isMobile.value ? 20 : 26,
       label: { color: '#fff', fontSize: 11 },
     })
   }
@@ -620,7 +701,7 @@ function buildChartOption(
       coord: [i, s.price],
       value: String(n + 1),
       symbol: 'circle',
-      symbolSize: 18,
+      symbolSize: bp.isMobile.value ? 14 : 16,
       itemStyle: {
         color: s.action === 'buy' ? '#d81e06' : s.action === 'sell' ? '#0a9b45' : '#e6a23c',
         borderColor: '#fff',
@@ -723,11 +804,14 @@ function buildChartOption(
       left: 0,
       show: vis.ma,
       data: vis.ma ? Object.keys(c.ma).map((n) => n.toUpperCase()) : [],
-      textStyle: { color: '#8a94a6', fontSize: 11 },
+      itemWidth: bp.isMobile.value ? 12 : 25,
+      itemHeight: bp.isMobile.value ? 6 : 14,
+      textStyle: { color: '#8a94a6', fontSize: bp.isMobile.value ? 9 : 11 },
     },
     tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
     axisPointer: { link: [{ xAxisIndex: 'all' }] },
-    grid: subPanels.length === 2
+    // 手机端把价格轴的横向占位从 56px 压到 38px，把宽度让给 40 根K线
+    grid: (subPanels.length === 2
       ? [
           { left: 56, right: 20, top: 30, height: '46%' },
           { left: 56, right: 20, top: '58%', height: '13%' },
@@ -738,14 +822,20 @@ function buildChartOption(
             { left: 56, right: 20, top: 30, height: '62%' },
             { left: 56, right: 20, top: '72%', height: '20%' },
           ]
-        : [{ left: 56, right: 20, top: 30, height: '80%' }],
+        : [{ left: 56, right: 20, top: 30, height: '80%' }]
+    ).map((g) => (bp.isMobile.value ? { ...g, left: 38, right: 6 } : g)),
     xAxis: axisIdx.map((i) => ({
       type: 'category',
       gridIndex: i,
       data: dates,
       boundaryGap: true,
       axisLine: { lineStyle: { color: '#2f3644' } },
-      axisLabel: { show: i === axisIdx.length - 1, color: '#8a94a6', fontSize: 10 },
+      axisLabel: {
+        show: i === axisIdx.length - 1,
+        color: '#8a94a6',
+        fontSize: bp.isMobile.value ? 9 : 10,
+        ...(bp.isMobile.value ? { hideOverlap: true } : {}),
+      },
       axisTick: { show: false },
       splitLine: { show: false },
     })),
@@ -754,19 +844,25 @@ function buildChartOption(
         scale: true,
         gridIndex: 0,
         splitLine: { lineStyle: { color: 'rgba(128,128,128,0.15)' } },
-        axisLabel: { color: '#8a94a6', fontSize: 10 },
+        axisLabel: { color: '#8a94a6', fontSize: bp.isMobile.value ? 9 : 10 },
       },
       ...subPanels.map((p, i) => ({
         scale: true,
         gridIndex: i + 1,
         splitNumber: 2,
-        axisLabel: p === 'volume' ? { show: false } : { color: '#8a94a6', fontSize: 10 },
+        axisLabel: p === 'volume' ? { show: false } : { color: '#8a94a6', fontSize: bp.isMobile.value ? 9 : 10 },
         splitLine: { show: false },
       })),
     ],
     dataZoom: [
-      { type: 'inside', xAxisIndex: axisIdx, start: 0, end: 100 },
-      { type: 'slider', xAxisIndex: axisIdx, height: 16, bottom: 4, start: 0, end: 100 },
+      { type: 'inside', xAxisIndex: axisIdx, ...zoomSpan },
+      {
+        type: 'slider', xAxisIndex: axisIdx,
+        height: bp.isMobile.value ? 12 : 16,
+        bottom: bp.isMobile.value ? 0 : 4,
+        ...zoomSpan,
+        showDetail: false,
+      },
     ],
     series: [
       {
@@ -874,11 +970,15 @@ function buildChartOption(
 const chartOption = computed(() =>
   buildChartOption(
     chart.value, state.value?.trades || [], undefined, lines.value, pendingPoints.value,
-    { anchorMode: adjustMode.value, activeAnchor: dragging.value, panels },
+    { anchorMode: adjustMode.value, activeAnchor: dragging.value, panels, zoom: zoomWin.value },
   )
 )
-const replayOption = computed(() =>
-  buildChartOption(
+const replayOption = computed(() => {
+  // 复盘按时间顺序看：视窗从训练区间开头起给一小段（整段压缩后 B/S、编号、结束线全糊在一起）；
+  // 后续走势靠拖动滑块/捏合去看，不再默认停在末尾那段
+  const total = replayChart.value?.bars?.length || 0
+  const win = bp.isMobile.value ? 40 : 60
+  return buildChartOption(
     replayChart.value,
     replayRecord.value?.trades || [],
     replayRecord.value?.end_date,
@@ -886,13 +986,14 @@ const replayOption = computed(() =>
     [],
     {
       panels,
+      zoom: total > win ? { start: 0, end: win - 1 } : null,
       // 图上只标有统计方向的点，编号与总结面板的定向列表一致；关掉开关后只剩自己的 B/S 点
       signals: showSuggestions.value
         ? (replayRecord.value?.review?.signals || []).filter((s) => s.action !== 'watch')
         : [],
     },
   )
-)
+})
 
 
 
@@ -1147,6 +1248,7 @@ async function start() {
     const res = await stockSenseApi.start(userName.value)
     sid.value = res.session.session_id
     state.value = res.session
+    resetViewWindow()
     chart.value = res.chart
     lines.value = res.session.lines || []
     drawMode.value = ''
@@ -1154,6 +1256,7 @@ async function start() {
     summary.value = null
     summaryVisible.value = false
     localStorage.setItem(SID_KEY + userName.value, sid.value)
+    ensureCurrentBarVisible()
   } catch {
     // 错误提示由请求拦截器统一给出
   } finally {
@@ -1168,6 +1271,9 @@ async function onViewChange(v: string | number | boolean | undefined) {
     const res = await stockSenseApi.chart(sid.value, v as ChartView)
     chart.value = res.chart
     state.value = res.session
+    // 切周/月线后 bars 数量变化，旧视窗下标失效：按记住的根数重新定位
+    resetViewWindow()
+    ensureCurrentBarVisible()
   } finally {
     busy.value = false
   }
@@ -1197,6 +1303,8 @@ async function doStep(silent = false): Promise<boolean> {
       await finishUp(res.summary)
       return false
     }
+    // 规则7.5.4：下一根后自动前移视窗，保证当前K线可见
+    ensureCurrentBarVisible()
   } catch {
     // 错误提示由请求拦截器统一给出
   } finally {
@@ -1213,6 +1321,8 @@ async function doTrade(action: 'buy' | 'sell') {
     state.value = res.session
     chart.value = res.chart
     lines.value = res.session.lines || lines.value
+    // 买卖同样会整体替换图表数据，视窗必须跟着重算，否则缩回整段
+    ensureCurrentBarVisible()
     ElMessage.success(`${action === 'buy' ? '买入' : '卖出'}成功（${ratioLabel(ratio.value)}仓位）`)
   } catch {
     // 错误提示由请求拦截器统一给出（后端 detail 会原样展示，如 T+1 限制）
@@ -1233,6 +1343,82 @@ function ratioLabel(v: number) {
 function chartInstance(): any {
   const c = chartRef.value
   return c?.chart || c?.getChart?.() || null
+}
+
+/**
+ * 用户手势缩放（捏合 / 拖动滑块）后把窗口写回 option（zoomWin）：
+ * 之后买卖、划线、微调、推进重建 option 时仍带着同一窗口，不再跳回整段。
+ * 手势过程中不立刻改 option（会打断捏合），停手 160ms 后写回；按钮操作前会先 flush。
+ */
+let pendingZoom: { start: number; end: number } | null = null
+let zoomTimer: ReturnType<typeof setTimeout> | undefined
+
+function applyPendingZoom() {
+  if (zoomTimer) {
+    clearTimeout(zoomTimer)
+    zoomTimer = undefined
+  }
+  if (!pendingZoom) return
+  zoomWin.value = pendingZoom
+  pendingZoom = null
+}
+
+/** 换标的/换周期时旧窗口下标作废，连同未落地的缩放一起清掉 */
+function resetViewWindow() {
+  if (zoomTimer) {
+    clearTimeout(zoomTimer)
+    zoomTimer = undefined
+  }
+  pendingZoom = null
+  zoomWin.value = null
+}
+
+function onDataZoom(e: any) {
+  const total = chart.value?.bars?.length || 0
+  if (!total) return
+  const b = e?.batch?.[0] || e
+  let start = Number(b?.startValue)
+  let end = Number(b?.endValue)
+  // 部分渲染器只给百分比，按根数换算
+  if (!Number.isFinite(start) || !Number.isFinite(end)) {
+    start = Math.round(((Number(b?.start) || 0) / 100) * (total - 1))
+    end = Math.round(((Number(b?.end) ?? 100) / 100) * (total - 1))
+  }
+  start = Math.max(0, Math.min(Math.round(start), total - 1))
+  end = Math.max(start, Math.min(Math.round(end), total - 1))
+  saveZoomBars(end - start + 1)
+  const cur = zoomWin.value
+  if (cur && cur.start === start && cur.end === end) return
+  pendingZoom = { start, end }
+  if (zoomTimer) clearTimeout(zoomTimer)
+  zoomTimer = setTimeout(applyPendingZoom, 160)
+}
+
+/**
+ * 规则7.5.4：保证当前K线可见，但**不重设用户缩放后的窗口宽度**。
+ * - 当前根仍在窗口内：原样保留（买卖、划线、微调都不动视窗）
+ * - 推进一根后当前根越出右边界：窗口整体右移一根，宽度不变
+ * - 没有用户窗口时：按上次记住的根数（userZoomBars）恢复，没记录过则移动端 40 根、桌面整段
+ */
+function ensureCurrentBarVisible() {
+  applyPendingZoom()
+  const c = chart.value
+  if (!c?.bars?.length) return
+  const total = c.bars.length
+  const current = Math.min(Math.max((state.value?.progress?.current ?? total) - 1, 0), total - 1)
+  const prev = zoomWin.value
+  if (prev && current >= prev.start && current <= prev.end) return
+  const want = prev
+    ? prev.end - prev.start + 1
+    : (userZoomBars.value ?? (bp.isMobile.value ? 40 : total))
+  const size = Math.min(want, total)
+  if (size >= total) {
+    zoomWin.value = null
+    return
+  }
+  let start = current - size + 1
+  if (start < 0) start = 0
+  zoomWin.value = { start, end: start + size - 1 }
 }
 
 function setDrawMode(t: SenseLineType) {
@@ -1457,6 +1643,7 @@ const onWindowMouseUp = () => { if (dragging.value) endDrag() }
 onMounted(async () => {
   window.addEventListener('mouseup', onWindowMouseUp)
   window.addEventListener('keydown', onKeyDown)
+  userZoomBars.value = readZoomBars()
   await loadStats()
   // 刷新页面后排断：会话与划线都存后端，按本地记录的会话 id 恢复
   const saved = localStorage.getItem(SID_KEY + userName.value)
@@ -1467,6 +1654,7 @@ onMounted(async () => {
     state.value = res.session
     chart.value = res.chart
     lines.value = res.session.lines || []
+    ensureCurrentBarVisible()
   } catch {
     localStorage.removeItem(SID_KEY + userName.value)
   }
@@ -1474,6 +1662,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   stopAuto()
+  if (zoomTimer) clearTimeout(zoomTimer)
   window.removeEventListener('mouseup', onWindowMouseUp)
   window.removeEventListener('keydown', onKeyDown)
 })
@@ -1554,7 +1743,7 @@ onUnmounted(() => {
 
 .draw-hint {
   font-size: 11px;
-  color: var(--accent-primary, #637ee8);
+  color: var(--accent-primary, #4051E0);
   margin-right: 2px;
 }
 
@@ -1598,7 +1787,7 @@ onUnmounted(() => {
 }
 
 .revealed {
-  color: var(--accent-primary, #637ee8);
+  color: var(--accent-primary, #4051E0);
   font-weight: 600;
 }
 
@@ -1616,8 +1805,8 @@ onUnmounted(() => {
   z-index: 5;
   width: 330px;
   padding: 6px 8px 4px;
-  border: 1px solid #409eff;
-  border-radius: 8px;
+  border: 1px solid var(--accent-primary);
+  border-radius: var(--radius-lg);
   background: var(--bg-secondary, #ffffff);
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
   pointer-events: none;
@@ -1699,17 +1888,15 @@ onUnmounted(() => {
 }
 
 .card {
-  background: var(--bg-secondary, #ffffff);
-  border: 1px solid var(--border-primary, #e4e7ed);
-  border-radius: 10px;
-  padding: 12px 14px;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--border-primary);
 }
 
 .card-title {
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 600;
   margin-bottom: 10px;
-  color: var(--text-primary, #1a1d2e);
+  color: var(--text-primary);
 }
 
 .kv {
@@ -1810,7 +1997,7 @@ onUnmounted(() => {
   border-radius: 4px;
   color: var(--text-secondary, #8a94a6);
   cursor: pointer;
-  transition: background var(--transition-fast, 150ms);
+  transition: background-color var(--dur-fast) var(--ease);
 }
 
 .record-info {
@@ -1889,6 +2076,119 @@ onUnmounted(() => {
   margin-top: 0;
 }
 
+/* ─── 手机端：逐笔交易配对条目（替代九列表格的横向滑动） ─── */
+.m-pair-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.m-pair-row {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border-subtle, var(--border-primary, #e4e7ed));
+  font-size: 12px;
+}
+
+.m-pair-row:last-child {
+  border-bottom: none;
+}
+
+.m-pair-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.m-pair-range {
+  min-width: 0;
+  font-size: 11px;
+  color: var(--text-secondary, #8a94a6);
+  font-family: var(--font-mono, monospace);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.m-pair-pnl {
+  flex: none;
+  font-weight: 600;
+  font-family: var(--font-mono, monospace);
+}
+
+.m-pair-pnl em {
+  margin-left: 6px;
+  font-style: normal;
+  font-size: 11px;
+}
+
+.m-pair-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px;
+  margin-top: 5px;
+}
+
+.m-pair-grid > div {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  padding: 4px 5px;
+  background: var(--bg-tertiary, #f5f6f8);
+  border-radius: 4px;
+}
+
+.m-pair-grid em {
+  font-style: normal;
+  font-size: 9px;
+  color: var(--text-tertiary, #9499a6);
+}
+
+.m-pair-grid b {
+  font-size: 11px;
+  font-weight: 600;
+  font-family: var(--font-mono, monospace);
+}
+
+.m-pair-tip {
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--text-tertiary, #9499a6);
+}
+
+/* ─── 手机端：结算弹窗的平铺成交流水（五列压成一行） ─── */
+.m-trade-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 11px;
+  font-family: var(--font-mono, monospace);
+}
+
+.m-trade-list li {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) 54px 38px 44px;
+  gap: 6px;
+  align-items: center;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border-subtle, var(--border-primary, #e4e7ed));
+}
+
+.m-trade-list li:last-child {
+  border-bottom: none;
+}
+
+.m-trade-list .m-trade-head {
+  font-size: 9px;
+  color: var(--text-tertiary, #9499a6);
+  padding-bottom: 3px;
+}
+
+.m-trade-num {
+  text-align: right;
+}
+
 .record-return {
   font-weight: 600;
 }
@@ -1950,5 +2250,162 @@ onUnmounted(() => {
   .side-panel .card {
     flex: 1 1 260px;
   }
+}
+
+@media (max-width: 768px) {
+  /* 绘图工具区：提示独占整行，按钮横向排列可换行，杜绝竖排错乱 */
+  .draw-tools {
+    flex-wrap: wrap;
+    width: 100%;
+    gap: 8px;
+  }
+  .draw-hint {
+    flex: 1 1 100%;
+    line-height: 1.5;
+    white-space: normal;
+  }
+  .draw-tools :deep(.el-button-group) {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    width: 100%;
+    .el-button {
+      flex: 1 1 auto;
+      margin-left: 0 !important;
+      border-radius: 4px !important;
+    }
+  }
+  .draw-tools :deep(.el-button) { margin-left: 0; }
+
+  /* 元信息分行展示 */
+  .meta-text { flex-direction: column; gap: 4px; }
+
+  /* 移动端：K线宽度贴合视口，可视窗口由 dataZoom 控制（见 ensureCurrentBarVisible） */
+  .kline-chart-scroll {
+    width: 100%;
+    max-width: 100%;
+    overflow: hidden;
+  }
+  .kline-chart { height: 320px; width: 100%; max-width: 100%; }
+  .replay .kline-chart { height: 280px; width: 100%; }
+  /* 容器高度必须跟着图表一起降：.replay-chart 桌面 min-height 420，只改图表 280
+     就会在图表与盘后总结之间留出 140px 空白 */
+  .replay-chart { min-height: 280px; }
+
+  /* 局部放大镜收窄到视口内 */
+  .magnifier {
+    width: calc(100vw - 48px);
+    max-width: 330px;
+    right: 12px;
+  }
+
+  /* 指标开关与快捷键提示分行 */
+  .chart-toolbar { flex-direction: column; align-items: flex-start; }
+  .chart-legend-tip { text-align: left; line-height: 1.5; }
+
+  /* 复盘长文区：允许换行，避免横向溢出 */
+  .replay :deep(p), .replay :deep(.summary-reveal) { overflow-wrap: anywhere; word-break: break-word; }
+  .summary-reveal { grid-template-columns: 1fr !important; }
+}
+
+@media (max-width: 480px) {
+  /* 页面自身不再叠加内边距，避免与全局 10px 双重留白 */
+  .sense-page { padding: 0; }
+  .kline-chart { height: 300px; }
+
+  .sense-header,
+  .chart-panel {
+    padding: 10px;
+    border-radius: 8px;
+  }
+  .sense-header { flex-direction: column; gap: 8px; margin-bottom: 8px; }
+  .title-block {
+    h2 { font-size: 16px; margin-bottom: 0; }
+    p { display: none; }
+  }
+  .header-actions {
+    width: 100%;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+
+    .el-button { width: 100%; margin-left: 0 !important; }
+  }
+
+  .chart-meta { font-size: 10px; gap: 6px; margin-bottom: 4px; }
+  .meta-text { gap: 4px 8px; }
+  .draw-tools { gap: 4px; }
+  .draw-hint { font-size: 9px; }
+
+  /* 交易栏：从单行长条改为 4 行网格，主操作占满整行，符合触屏点击习惯 */
+  .trade-bar {
+    display: grid;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 6px;
+    padding-top: 8px;
+    margin-top: 4px;
+
+    .trade-label,
+    .trade-divider { display: none; }
+  }
+  .trade-bar > :deep(.el-button) { width: 100%; margin-left: 0 !important; grid-column: span 3; }
+
+  /* 卡在本文件的坑：本组件的样式块是纯 CSS（无 lang="scss"），浏览器原生嵌套不参与
+     作用域改写，把 :deep() 写进 .a { } 内部会编译成 ".a[data-v] [data-v] .b"（双 data-v
+     后代选择器），永远匹配不到，规则静默失效。所以本文件所有 :deep() 一律写在顶层。
+     分段选择器必须显式跨 3 列：el-radio-group 是 inline-flex，宽度会塌缩成内容宽（53px），
+     "按天/按周"、"慢/中/快" 因此被挤成竖排。 */
+  .header-actions :deep(.el-radio-group) { grid-column: 1 / -1; display: flex; min-width: 0; }
+  .header-actions :deep(.el-radio-button) { flex: 1 1 0; min-width: 0; }
+  .header-actions :deep(.el-radio-button__inner) { width: 100%; }
+  .trade-bar > :deep(.el-radio-group) { display: flex; min-width: 0; grid-column: span 3; }
+  .trade-bar > :deep(.el-radio-group):first-of-type { grid-column: span 6; }
+  .trade-bar :deep(.el-radio-button) { flex: 1 1 0; min-width: 0; }
+  /* 控件尺寸（高 36 / 内边距 0 8 / 字号 12）由 mobile.scss 的分段规范统一，这里只管铺满 */
+  .trade-bar :deep(.el-radio-button__inner) { width: 100%; }
+
+  /* 划线工具：5 个工具用 6 列栅格排版 —— 第一行 3 个各占 2 列、第二行 2 个各占 3 列。
+     原先用 flex 换行 + flex:1 1 30%，两行各自的伸缩基数不同，第一行整体比第二行
+     右移 4px（113×3 / 171×2），左右边距对不齐。
+     这里必须逐个指定 grid-area 而不用 span 自动排布：组内存在占位元素时，
+     首行会被顶到第 2 列开始，反而把 3 个按钮挤成 2 行。 */
+  .draw-tools :deep(.el-button-group) {
+    display: grid;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 4px;
+  }
+  .draw-tools :deep(.el-button-group > .el-button) {
+    margin-left: 0 !important;
+    font-size: 11px;
+  }
+  .draw-tools :deep(.el-button-group > .el-button:nth-child(1)) { grid-area: 1 / 1 / 2 / 3; }
+  .draw-tools :deep(.el-button-group > .el-button:nth-child(2)) { grid-area: 1 / 3 / 2 / 5; }
+  .draw-tools :deep(.el-button-group > .el-button:nth-child(3)) { grid-area: 1 / 5 / 2 / 7; }
+  .draw-tools :deep(.el-button-group > .el-button:nth-child(4)) { grid-area: 2 / 1 / 3 / 4; }
+  .draw-tools :deep(.el-button-group > .el-button:nth-child(5)) { grid-area: 2 / 4 / 3 / 7; }
+
+  .chart-toolbar { gap: 4px; }
+  .chart-legend-tip { display: none; }
+  .indicator-toggles { gap: 2px; }
+  .indicator-toggles :deep(.el-checkbox) { margin-right: 8px; }
+
+  .side-panel { gap: 8px; }
+  .side-panel .card { padding: 8px 0; }
+  .card-title { font-size: 12px; }
+  .kv { font-size: 11px; padding: 3px 0; }
+  .trade-row { font-size: 10px; }
+
+  /* 规则7.5.2：抽屉全宽、内容单列；规则7.5.1：字号压到12px */
+  :deep(.el-drawer) { width: 100vw !important; }
+  :deep(.el-drawer__body) { padding: 12px; }
+  .stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .stat-grid b { font-size: 16px; }
+  .record-row { font-size: 12px; }
+  .record-return { font-size: 13px; }
+  .summary-reveal { font-size: 12px; }
+  .summary-nums { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  /* 复盘的周期按钮与开关横向排列，禁止竖排 */
+  .replay-toolbar { flex-wrap: wrap; gap: 8px; }
+  .shape-box { font-size: 12px; }
 }
 </style>

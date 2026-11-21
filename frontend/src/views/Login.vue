@@ -317,7 +317,7 @@ async function handleRegister() {
 :deep(.el-input__wrapper) {
   border-radius: var(--radius-sm);
   background: var(--bg-tertiary);
-  transition: all var(--transition-fast);
+  transition: background-color var(--dur-fast) var(--ease);
 }
 :deep(.el-input__wrapper:focus-within),
 :deep(.el-input__wrapper:hover) {
@@ -343,7 +343,7 @@ async function handleRegister() {
   background: var(--bg-tertiary);
   color: var(--text-secondary);
   cursor: pointer;
-  transition: all var(--transition-fast);
+  transition: border-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease), background-color var(--dur-fast) var(--ease);
   font-size: 12px;
   font-family: var(--font-sans);
 

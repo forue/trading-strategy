@@ -433,4 +433,22 @@ function openWindow(it: { s: SenseReviewSignal }) {
 .shape-rule {
   color: #409eff;
 }
+
+@media (max-width: 768px) {
+  /* 规则7.5.2：长文本区单列，禁止缩略图+窄文字列造成文字竖排 */
+  .row-body { flex-direction: column; gap: 6px; }
+  .window-box { align-self: flex-start; }
+  .reasons { width: 100%; }
+  .row-head { gap: 6px; }
+  .review-score { margin-left: 0; }
+}
+@media (max-width: 480px) {
+  .review-panel { padding: 10px; }
+  .review-title { font-size: 13px; flex-wrap: wrap; gap: 6px; }
+  .review-summary, .review-reason { font-size: 12px; }
+  .review-row { font-size: 12px; }
+  /* 图形示例弹窗：宽度由 mobile.scss 的 .el-dialog 全宽规则接管，图内 SVG 靠
+     SenseCandleDiagram 自身的 max-width:100% 缩放——弹窗 teleport 到 body 后
+     本组件的 :deep(.el-dialog) 匹配不到，写了也不生效 */
+}
 </style>

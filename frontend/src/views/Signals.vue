@@ -75,16 +75,42 @@
         </el-button>
       </div>
 
-       <div class="responsive-table">
+      <!-- 手机端：9 列表格在 390px 下只能靠横向滚动，改为单列信号卡片 -->
+      <ul v-if="isMobile" class="m-signal-cards" v-loading="loading">
+        <li v-for="(row, i) in pagedSignals" :key="row.id ?? i" class="m-signal-card">
+          <div class="m-card-head">
+            <span class="m-sector">{{ row.sector_name }}</span>
+            <el-tag :type="strategyTagMap[row.strategy_type] || 'info'" size="small">
+              {{ strategyLabelMap[row.strategy_type] || row.strategy_type }}
+            </el-tag>
+            <el-tag v-if="isClearSignal(row)" type="warning" size="small">清仓</el-tag>
+            <span v-else class="m-direction" :class="row.direction === 'BUY' ? 'signal-buy' : 'signal-sell'">
+              {{ row.direction === 'BUY' ? '买入' : '卖出' }}
+            </span>
+          </div>
+          <div class="m-card-mid">
+            <span v-if="row.etf_code">{{ row.etf_code }} {{ row.etf_name }}</span>
+            <span>信号价 {{ row.current_price != null ? '¥' + Number(row.current_price).toFixed(4) : '--' }}</span>
+          </div>
+          <div class="m-card-foot">
+            <span>仓位 {{ (row.position_ratio * 100).toFixed(1) }}%</span>
+            <span>评分 {{ row.score != null ? row.score.toFixed(2) : '--' }}</span>
+            <span class="m-date">{{ row.signal_date || formatTime(row.created_at).slice(0, 10) }}</span>
+          </div>
+        </li>
+        <li v-if="pagedSignals.length === 0" class="m-card-empty">{{ emptyDescription }}</li>
+      </ul>
+
+      <div v-else class="responsive-table">
         <el-table :data="pagedSignals" stripe style="width: 100%" v-loading="loading">
-        <el-table-column prop="signal_date" label="信号日期" width="110" />
-        <el-table-column prop="strategy_type" label="策略类型" width="90">
+        <el-table-column prop="signal_date" label="信号日期" width="96" />
+        <el-table-column prop="strategy_type" label="策略类型" width="96" class-name="hide-mobile" label-class-name="hide-mobile">
           <template #default="{ row }">
             <el-tag :type="strategyTagMap[row.strategy_type]" size="small">{{ strategyLabelMap[row.strategy_type] || row.strategy_type }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="sector_name" label="板块" width="90" />
-        <el-table-column label="推荐ETF" width="140">
+        <el-table-column prop="sector_name" label="板块" width="96" />
+        <el-table-column label="推荐ETF" width="140" class-name="hide-mobile" label-class-name="hide-mobile">
           <template #default="{ row }">
             <span v-if="row.etf_code" class="etf-tag" @click="copyEtf(row.etf_code)">
               <el-tag type="primary" effect="plain" size="small">{{ row.etf_code }}</el-tag>
@@ -101,21 +127,21 @@
             </span>
           </template>
         </el-table-column>
-        <el-table-column prop="current_price" label="信号价" width="100">
+        <el-table-column prop="current_price" label="信号价" width="96" align="right">
           <template #default="{ row }">
             <span>{{ row.current_price != null ? '¥' + Number(row.current_price).toFixed(4) : '--' }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="position_ratio" label="建议仓位" width="90">
+        <el-table-column prop="position_ratio" label="建议仓位" width="96" align="right">
           <template #default="{ row }">{{ (row.position_ratio * 100).toFixed(1) }}%</template>
         </el-table-column>
-        <el-table-column prop="score" label="评分" width="90">
+        <el-table-column prop="score" label="评分" width="96" class-name="hide-mobile" label-class-name="hide-mobile" align="right">
           <template #default="{ row }">
             <el-progress :percentage="Math.min(row.score * 10, 100)" :stroke-width="8" :color="row.score > 5 ? themeColors.good : row.score > 3 ? themeColors.warn : themeColors.bad" />
           </template>
         </el-table-column>
-        <el-table-column prop="reason" label="信号原因" min-width="180" show-overflow-tooltip />
-        <el-table-column prop="created_at" label="生成时间" width="170">
+        <el-table-column prop="reason" label="信号原因" min-width="140" show-overflow-tooltip class-name="hide-mobile" label-class-name="hide-mobile" />
+        <el-table-column prop="created_at" label="生成时间" width="160" class-name="hide-mobile" label-class-name="hide-mobile">
           <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
         </el-table-column>
         <template #empty>
@@ -156,7 +182,9 @@ const themeColors = computed(() => (isDark.value
 import type { TradeSignal } from '@/api/signal'
 import { ElMessage } from 'element-plus'
 import dayjs from 'dayjs'
+import { useBreakpoint } from '@/composables/useBreakpoint'
 
+const { isMobile } = useBreakpoint()
 const signalStore = useSignalStore()
 const strategyStore = useStrategyStore()
 const loading = ref(false)
@@ -191,7 +219,8 @@ async function fetchTodayStatus() {
 }
 
 const strategyLabelMap: Record<string, string> = { AGGRESSIVE: '激进', MODERATE: '稳健', CONSERVATIVE: '保守' }
-const strategyTagMap: Record<string, string> = { AGGRESSIVE: 'danger', MODERATE: 'warning', CONSERVATIVE: 'success' }
+type TagType = 'primary' | 'success' | 'warning' | 'info' | 'danger'
+const strategyTagMap: Record<string, TagType> = { AGGRESSIVE: 'danger', MODERATE: 'warning', CONSERVATIVE: 'success' }
 
 // Client-side filtering for direction (backend does not support direction filter)
 const filteredSignals = computed(() => {
@@ -322,8 +351,69 @@ onMounted(() => fetchSignals())
 .text-muted { color: var(--text-tertiary); }
 .pagination-bar { margin-top: 16px; justify-content: flex-end; display: flex; }
 
+/* ─── 手机端信号卡片：两行元信息，避免九列表格的横向滚动 ─── */
+.m-signal-cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.m-signal-card {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border-subtle);
+
+  &:last-child { border-bottom: none; }
+}
+
+.m-card-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+
+  .m-sector {
+    flex: 1;
+    min-width: 0;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .m-direction { font-size: 11px; }
+}
+
+.m-card-mid,
+.m-card-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 3px;
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+
+.m-card-mid { font-family: var(--font-mono); }
+.m-card-foot .m-date { margin-left: auto; }
+
+.m-card-empty {
+  padding: 24px 0;
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
 @media (max-width: 768px) {
-  .filter-form { flex-wrap: wrap; }
-  .pagination-bar { justify-content: center; }
+  .filter-form {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .pagination-bar { justify-content: center; flex-wrap: wrap; }
+}
+
+@media (max-width: 480px) {
+  .ws-status { font-size: 11px; gap: 6px; }
+  .pagination-bar { margin-top: 8px; gap: 0; }
 }
 </style>

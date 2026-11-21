@@ -18,9 +18,9 @@
     <div v-else class="alert-list">
       <div v-for="(alert, idx) in alerts" :key="idx" class="alert-item" :class="alert.level.toLowerCase()">
         <div class="alert-icon">
-          <el-icon v-if="alert.level === 'CRITICAL'" color="#f56c6c"><CircleCloseFilled /></el-icon>
-          <el-icon v-else-if="alert.level === 'WARNING'" color="#e6a23c"><WarningFilled /></el-icon>
-          <el-icon v-else color="#909399"><InfoFilled /></el-icon>
+          <el-icon v-if="alert.level === 'CRITICAL'" color="var(--accent-danger)"><CircleCloseFilled /></el-icon>
+          <el-icon v-else-if="alert.level === 'WARNING'" color="var(--accent-warning)"><WarningFilled /></el-icon>
+          <el-icon v-else color="var(--text-tertiary)"><InfoFilled /></el-icon>
         </div>
         <div class="alert-content">
           <div class="alert-title">{{ alert.title }}</div>
@@ -42,8 +42,13 @@ const loading = ref(false)
 const alerts = ref<RiskAlert[]>([])
 const overallRisk = ref('LOW')
 
-const overallRiskType = computed(() => {
-  const map: Record<string, string> = { LOW: 'success', MEDIUM: 'warning', HIGH: 'danger', CRITICAL: 'danger' }
+const overallRiskType = computed<'success' | 'warning' | 'danger' | 'info'>(() => {
+  const map: Record<string, 'success' | 'warning' | 'danger' | 'info'> = {
+    LOW: 'success',
+    MEDIUM: 'warning',
+    HIGH: 'danger',
+    CRITICAL: 'danger',
+  }
   return map[overallRisk.value] || 'info'
 })
 
@@ -75,32 +80,31 @@ defineExpose({ refresh: loadAlerts })
 
 <style lang="scss" scoped>
 .risk-alert-panel {
-  background: var(--bg-primary);
+  align-self: start;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-primary);
   border-radius: var(--radius-md);
-  border: 1px solid var(--border-secondary);
-  box-shadow: var(--shadow-card);
+  padding: 20px;
   overflow: hidden;
 
   .panel-header {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 12px 16px;
+    padding: 0 0 16px;
+    margin-bottom: 16px;
+    border-bottom: 1px solid var(--border-subtle);
     font-weight: 600;
-    font-size: 14px;
-    background: var(--bg-tertiary);
+    font-size: 16px;
+    color: var(--text-primary);
 
-    &.high, &.critical {
-      background: linear-gradient(135deg, var(--accent-danger) 0%, var(--accent-warning) 100%);
-      color: var(--text-inverse);
-    }
-    &.medium {
-      background: linear-gradient(135deg, var(--accent-warning) 0%, #f9ae3d 100%);
-      color: var(--text-inverse);
-    }
-    &.low {
-      background: linear-gradient(135deg, var(--accent-success) 0%, #95d475 100%);
-      color: var(--text-inverse);
+    &::before {
+      content: '';
+      width: 2px;
+      height: 14px;
+      border-radius: 1px;
+      background: var(--accent-primary);
+      flex-shrink: 0;
     }
   }
 
@@ -115,31 +119,24 @@ defineExpose({ refresh: loadAlerts })
   }
 
   .alert-list {
-    padding: 12px;
+    padding: 0;
 
     .alert-item {
       display: flex;
       gap: 10px;
-      padding: 10px 12px;
-      border-radius: 6px;
-      margin-bottom: 8px;
+      padding: 12px 14px;
+      border: 1px solid var(--border-primary);
+      border-radius: var(--radius-sm);
+      margin-bottom: 10px;
+      background: var(--bg-surface);
 
       &:last-child {
         margin-bottom: 0;
       }
 
-      &.critical {
-        background: var(--accent-danger-light);
-        border-left: 3px solid var(--accent-danger);
-      }
-      &.warning {
-        background: var(--accent-warning-light);
-        border-left: 3px solid var(--accent-warning);
-      }
-      &.info {
-        background: var(--bg-tertiary);
-        border-left: 3px solid var(--text-tertiary);
-      }
+      &.critical { border-left: 3px solid var(--accent-danger); }
+      &.warning { border-left: 3px solid var(--accent-warning); }
+      &.info { border-left: 3px solid var(--text-tertiary); }
 
       .alert-icon {
         flex-shrink: 0;
@@ -163,6 +160,41 @@ defineExpose({ refresh: loadAlerts })
           font-size: 12px;
           color: var(--accent-primary);
         }
+      }
+    }
+  }
+}
+
+/* 手机端：面板内边距与标题压到 10px 栅格，告警条目改为紧凑三行 */
+@media (max-width: 480px) {
+  .risk-alert-panel {
+    padding: 10px;
+
+    .panel-header {
+      gap: 6px;
+      padding-bottom: 8px;
+      margin-bottom: 8px;
+      font-size: 12px;
+
+      &::before { height: 11px; }
+    }
+
+    .safe-state {
+      padding: 14px;
+      font-size: 11px;
+    }
+
+    .alert-list .alert-item {
+      gap: 8px;
+      padding: 8px 9px;
+      margin-bottom: 6px;
+
+      .alert-icon { font-size: 13px; }
+
+      .alert-content {
+        .alert-title { font-size: 11px; margin-bottom: 2px; }
+        .alert-desc,
+        .alert-suggestion { font-size: 10px; line-height: 1.5; margin-bottom: 2px; }
       }
     }
   }

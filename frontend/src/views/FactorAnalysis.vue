@@ -76,7 +76,27 @@
         <div class="card-header">
           <span class="card-title">因子详情</span>
         </div>
-        <div class="responsive-table"><el-table :data="factorList" stripe size="small" style="margin-bottom: 16px">
+
+        <!-- 手机端：七列因子表改为可读条目 -->
+        <ul v-if="isMobile" class="m-factor-list">
+          <li v-for="row in factorList" :key="row.name" class="m-factor-row">
+            <div class="m-factor-top">
+              <span class="m-factor-name">{{ getFactorLabel(row.name) }}</span>
+              <el-tag size="small" :type="getCategoryType(row.category)">{{ getCategoryLabel(row.category) }}</el-tag>
+              <span class="m-factor-score" :style="{ color: getScoreColor(row.score) }">{{ row.score?.toFixed(2) }}</span>
+            </div>
+            <div class="m-factor-bar">
+              <span class="m-factor-weight">权重 {{ (row.weight * 100).toFixed(0) }}%</span>
+              <el-progress :percentage="Math.round(row.confidence * 100)" :stroke-width="4"
+                :color="row.confidence >= 0.7 ? themeColors.good : row.confidence >= 0.4 ? themeColors.warn : themeColors.bad" />
+            </div>
+            <div class="m-factor-meta">原始值 {{ formatRawValue(row) }}</div>
+            <div v-if="formatDetail(row)" class="m-factor-detail">{{ formatDetail(row) }}</div>
+          </li>
+          <li v-if="!factorList.length" class="m-factor-empty">暂无因子明细</li>
+        </ul>
+
+        <div v-else class="responsive-table"><el-table :data="factorList" stripe size="small" style="margin-bottom: 16px">
           <el-table-column prop="name" label="因子" width="160">
             <template #default="{ row }">
               <el-tooltip :content="getFactorDescription(row.name)" placement="top" :show-after="300">
@@ -89,12 +109,12 @@
               <el-tag size="small" :type="getCategoryType(row.category)">{{ getCategoryLabel(row.category) }}</el-tag>
             </template>
           </el-table-column>
-          <el-table-column prop="score" label="得分" width="80" align="center">
+          <el-table-column prop="score" label="得分" width="80" align="right">
             <template #default="{ row }">
               <span :style="{ color: getScoreColor(row.score), fontWeight: 600 }">{{ row.score?.toFixed(2) }}</span>
             </template>
           </el-table-column>
-          <el-table-column prop="weight" label="权重" width="80" align="center">
+          <el-table-column prop="weight" label="权重" width="80" align="right">
             <template #default="{ row }">{{ (row.weight * 100).toFixed(0) }}%</template>
           </el-table-column>
           <el-table-column prop="confidence" label="置信度" width="120" align="center">
@@ -104,7 +124,7 @@
                 style="width: 80px" />
             </template>
           </el-table-column>
-          <el-table-column prop="raw_value" label="原始值" width="100" align="right">
+          <el-table-column prop="raw_value" label="原始值" width="96" align="right">
             <template #default="{ row }">{{ formatRawValue(row) }}</template>
           </el-table-column>
           <el-table-column label="计算详情">
@@ -148,6 +168,9 @@ import {
 } from '@/api/strategy'
 import { useStrategyStore } from '@/stores/strategy'
 import { useThemeStore } from '@/stores/theme'
+import { useBreakpoint } from '@/composables/useBreakpoint'
+
+const { isMobile } = useBreakpoint()
 
 // 语义色随主题切换：暗色下提高明度，避免深色文字/浅色描边在暗背景上不可读
 const themeStore = useThemeStore()
@@ -252,8 +275,9 @@ function getScoreColor(score: number): string {
   return c.bad
 }
 
-function getCategoryType(category: string): string {
-  const map: Record<string, string> = {
+type TagType = 'primary' | 'success' | 'warning' | 'info' | 'danger' | ''
+function getCategoryType(category: string): TagType {
+  const map: Record<string, TagType> = {
     capital_flow: 'danger',
     momentum: 'warning',
     technical: 'primary',
@@ -357,8 +381,8 @@ loadSectors()
 .factor-analysis {
   .card-header {
     display: flex; justify-content: space-between; align-items: center;
-    margin-bottom: 12px; flex-wrap: wrap; gap: 8px;
-    .card-title { font-size: 15px; font-weight: 600; color: var(--text-primary); }
+    margin-bottom: 24px; flex-wrap: wrap; gap: 8px;
+    .card-title { font-size: 18px; font-weight: 600; color: var(--text-primary); }
     .header-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   }
   .score-section { margin-bottom: 24px; }
@@ -372,25 +396,81 @@ loadSectors()
     display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px;
   }
   .score-box {
-    text-align: center; padding: 16px;
-    background: var(--bg-tertiary); border-radius: var(--radius-sm);
-    border: 1px solid var(--border-secondary);
-    .score-value { font-size: 24px; font-weight: bold; }
+    text-align: center; padding: 16px 0;
+    border-bottom: 1px solid var(--border-primary);
+    .score-value { font-family: var(--font-mono); font-size: 24px; font-weight: 600; color: var(--text-primary); }
     .score-label { font-size: 12px; color: var(--text-tertiary); margin-top: 6px; }
     &.main-score {
-      background: linear-gradient(135deg, #637ee8 0%, #8b5cf6 100%);
-      border: none;
-      .score-value { color: #fff !important; font-size: 28px; }
-      .score-label { color: rgba(255,255,255,0.8); }
+      border-bottom: 2px solid var(--accent-primary);
+      .score-value { color: var(--accent-primary) !important; font-size: 28px; }
+      .score-label { color: var(--text-secondary); }
     }
   }
   .weight-item {
-    text-align: center; padding: 10px 6px;
-    background: var(--bg-tertiary); border-radius: var(--radius-sm);
-    border: 1px solid var(--border-secondary);
+    text-align: center; padding: 10px 0;
+    border-bottom: 1px solid var(--border-primary);
     .weight-label { font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; }
     .weight-value { font-size: 13px; font-weight: 600; color: var(--text-primary); margin-top: 4px; }
   }
+}
+
+/* ─── 手机端因子条目 ─── */
+.m-factor-list {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+}
+
+.m-factor-row {
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border-subtle);
+
+  &:last-child { border-bottom: none; }
+}
+
+.m-factor-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+
+  .m-factor-name {
+    flex: 1;
+    min-width: 0;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .m-factor-score { font-size: 13px; font-weight: 600; font-family: var(--font-mono); }
+}
+
+.m-factor-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 3px;
+
+  .m-factor-weight { flex: none; font-size: 10px; color: var(--text-tertiary); }
+  :deep(.el-progress) { flex: 1; }
+  :deep(.el-progress__text) { font-size: 9px !important; min-width: 26px; }
+}
+
+.m-factor-meta { margin-top: 2px; font-size: 10px; color: var(--text-secondary); font-family: var(--font-mono); }
+
+.m-factor-detail {
+  margin-top: 2px;
+  font-size: 9px;
+  color: var(--text-tertiary);
+  word-break: break-all;
+}
+
+.m-factor-empty {
+  padding: 20px 0;
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-tertiary);
 }
 
 @media (max-width: 768px) {
@@ -398,8 +478,21 @@ loadSectors()
   :deep(.el-select) { max-width: 100%; }
 }
 @media (max-width: 480px) {
-  .card-header { flex-direction: column; align-items: flex-start; }
-  .header-actions { width: 100%; }
+  .card-header { flex-direction: column; align-items: stretch; margin-bottom: 10px; gap: 6px; }
+  .header-actions { width: 100%; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .header-actions .el-button { grid-column: 1 / -1; }
   :deep(.el-select) { width: 100% !important; }
+
+  .score-section { margin-bottom: 10px; }
+  .score-meta { font-size: 10px; margin-bottom: 8px; .hint { display: block; margin: 3px 0 0; font-size: 9px; } }
+  .score-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+  .score-box {
+    padding: 8px 0;
+    .score-value { font-size: 18px; }
+    .score-label { font-size: 9px; margin-top: 2px; }
+    &.main-score .score-value { font-size: 20px; }
+  }
+  .weight-hint { display: none; }
+  .weight-item { padding: 6px 0; .weight-label { font-size: 10px; margin-bottom: 0; } .weight-value { font-size: 11px; } }
 }
 </style>
