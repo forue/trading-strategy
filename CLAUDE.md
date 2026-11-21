@@ -191,7 +191,7 @@ Always use `bp.labelInterval()` for ECharts `axisLabel.interval` and show fewer 
 Dialogs should always have responsive width:
 ```scss
 @media (max-width: 480px) {
-  :deep(.el-dialog) { width: 90% !important; }
+  :deep(.el-dialog) { width: calc(100vw - 16px) !important; }
 }
 ```
 
@@ -270,3 +270,5 @@ Design docs in `docs/` (01-overview.md through 13-implementation-guide.md). READ
 
 - 任何删除文件的动作执行前必须先确认：包括 `git clean`、`rm`/`del`、`Remove-Item`、Python `os.remove`、清理临时文件等所有形式，未获用户明确确认不得擅自删除。
 - 任何代码提交前必须先完成验证（构建/测试通过）：Java 服务需经 Docker 构建 `mvn package` 及其测试通过，Python 服务需语法检查与测试通过；未经验证的改动不得提交。
+- **前端改造必须严格遵循 v7 视觉规范（Icon Rail + Light Surface）**，任何涉及 `frontend/` 的样式、布局、组件改动都先对照规范执行，禁止回退到旧的「220px 深色侧栏 + 卡片网格」模式，也不要回到 v5 的无边框方案（真实界面反馈看不清边界、分不清主次）。核心约束：主色 `#637EE8`（深色模式 `#7B93F5`，用户偏好原始蓝色，勿用青绿）、页面底 `#F7F7F5`、辅助文字 `#71717A`；圆角仅 4/6/8px；页面内边距 40px、卡片间距 24px；**简约不等于砍功能——导航 11 项必须全部保留且可达**，桌面默认 200px 带文字侧栏（分组展示），折叠为 60px 图标轨只是用户可选能力，移动端底部标签栏的「更多」抽屉同样包含全部 11 项；内容区使用轻量卡片（白底 + 1px 边框 + 6px 圆角，**无阴影**），卡片标题带 2px 主色短条以区分主次；KPI 为 28px 等宽数字卡片；AI 面板桌面 640px 浮层、移动端全屏（宽度不可压缩，否则图表显示不完整）；动效只动 transform/opacity 并支持 `prefers-reduced-motion`。原生 `<button>` 必须显式 `border:none;background:transparent`，Element Plus 主色必须硬编码覆盖（`'--el-color-primary: #637EE8'`），避免浏览器默认样式或 `#409eff` 泄漏到界面。完整视觉稿见 artifact 目录 仓库根目录 `design-preview.html`（v7）。
+- **移动端（≤480px）改造必须先对照 `docs/02-frontend.md` 第 7.5 节强制规范**，禁止凭感觉调整。核心量化约束：页面标题 17px / 卡片标题 13px / 正文与按钮 12px / 辅助 10-11px / 图表轴 9-10px / KPI 数值 18px，非 KPI 一律不得 ≥14px（14px 在手机上已属大号）；卡片内边距与页面内边距 10px、卡片间距 8px、表单标签上置且控件全宽；列数超 4 的表格必须用 `v-if="isMobile"` 改为条目列表（`.m-*-list`），不得依赖横向滚动；K 线容器与画布 100% 视口宽，用 `dataZoom` 视窗（约 40 根）+ `dispatchAction` 平移，"下一根"必须自动平移保证当前K线可见；Element Plus 组件内部字号需用 `!important` 收敛（其 CSS 由异步 chunk 注入，顺序不稳定）。所有移动端规则只写在 `@media (max-width: 480px)` 内，桌面端零影响。任何移动端改动完成后必须用 Playwright 以 390×844 视口逐页测量（无横向溢出、无 ≥14px 正文）验证，未通过不得部署。
