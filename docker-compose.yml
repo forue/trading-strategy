@@ -10,8 +10,20 @@ services:
       POSTGRES_DB: ${DB_NAME:-rotation_db}
       POSTGRES_USER: ${DB_USER:-admin}
       POSTGRES_PASSWORD: ${DB_PASSWORD}
+    # 压测发现 max_connections=100 在 90 并发即被打满；shared_buffers 默认 128MB 偏小。
+    # 宿主 64GB/16 核资源充足，提高连接上限与缓存以降低高并发下的磁盘 IO 与连接排队。
+    command:
+      - postgres
+      - -c
+      - max_connections=200
+      - -c
+      - shared_buffers=384MB
+      - -c
+      - effective_cache_size=1GB
+      - -c
+      - work_mem=8MB
     ports:
-      - "${DB_PORT:-5432}:5432"
+      - "127.0.0.1:${DB_PORT:-5432}:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
       - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql
@@ -23,11 +35,11 @@ services:
     deploy:
       resources:
         reservations:
-          memory: 256M
-          cpus: '0.25'
-        limits:
           memory: 512M
           cpus: '0.5'
+        limits:
+          memory: 1536M
+          cpus: '2'
 
   redis:
     image: redis:7-alpine
@@ -38,7 +50,7 @@ services:
     environment:
       TZ: Asia/Shanghai
     ports:
-      - "${REDIS_PORT:-6380}:6379"
+      - "127.0.0.1:${REDIS_PORT:-6380}:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -46,14 +58,16 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    # 原 0.25 核配额导致 CFS 每 100ms 周期仅 25ms 可运行，压测 P95 长尾固定 ~90ms。
+    # 放宽到 1 核消除节流；单线程 Redis 不需要更多 CPU。
     deploy:
       resources:
         reservations:
-          memory: 128M
-          cpus: '0.125'
-        limits:
           memory: 256M
-          cpus: '0.25'
+          cpus: '0.5'
+        limits:
+          memory: 512M
+          cpus: '1'
 
   influxdb:
     image: influxdb:2.7
@@ -69,7 +83,7 @@ services:
       DOCKER_INFLUXDB_INIT_BUCKET: ${INFLUXDB_BUCKET:-market_data}
       DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUXDB_TOKEN}
     ports:
-      - "${INFLUXDB_PORT:-8086}:8086"
+      - "127.0.0.1:${INFLUXDB_PORT:-8086}:8086"
     volumes:
       - influxdb_data:/var/lib/influxdb2
     healthcheck:
@@ -77,14 +91,15 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    # 压测下 50 并发查询 p99 达 1.9s、内存逼近 512MB 上限；宿主资源充足，放宽配额。
     deploy:
       resources:
         reservations:
-          memory: 256M
-          cpus: '0.25'
-        limits:
           memory: 512M
           cpus: '0.5'
+        limits:
+          memory: 1536M
+          cpus: '2'
 
   rabbitmq:
     image: rabbitmq:3-management-alpine
@@ -96,8 +111,8 @@ services:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
     ports:
-      - "${RABBITMQ_PORT:-5672}:5672"
-      - "${RABBITMQ_MGMT_PORT:-15672}:15672"
+      - "127.0.0.1:${RABBITMQ_PORT:-5672}:5672"
+      - "127.0.0.1:${RABBITMQ_MGMT_PORT:-15672}:15672"
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
     healthcheck:
@@ -123,7 +138,7 @@ services:
     restart: unless-stopped
     env_file: .env
     ports:
-      - "${AUTH_PORT:-8001}:8001"
+      - "127.0.0.1:${AUTH_PORT:-8001}:8001"
     environment:
       TZ: Asia/Shanghai
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:${DB_PORT:-5432}/${DB_NAME:-rotation_db}
@@ -161,7 +176,7 @@ services:
     restart: unless-stopped
     env_file: .env
     ports:
-      - "${DATA_COLLECTOR_PORT:-8003}:8003"
+      - "127.0.0.1:${DATA_COLLECTOR_PORT:-8003}:8003"
     environment:
       TZ: Asia/Shanghai
       PYTHONUNBUFFERED: "1"
@@ -205,7 +220,7 @@ services:
     restart: unless-stopped
     env_file: .env
     ports:
-      - "${STRATEGY_PORT:-8002}:8002"
+      - "127.0.0.1:${STRATEGY_PORT:-8002}:8002"
     environment:
       TZ: Asia/Shanghai
       PYTHONUNBUFFERED: "1"
@@ -227,6 +242,8 @@ services:
       DB_USER: ${DB_USER:-admin}
       DB_PASSWORD: ${DB_PASSWORD}
       DATA_COLLECTOR_URL: http://backend-data-collector:8003
+      AUTH_SERVICE_URL: http://backend-auth:8001
+      JWT_SECRET: ${JWT_SECRET}
     depends_on:
       influxdb:
         condition: service_healthy
@@ -256,7 +273,7 @@ services:
     restart: unless-stopped
     env_file: .env
     ports:
-      - "${SIGNAL_PORT:-8004}:8004"
+      - "127.0.0.1:${SIGNAL_PORT:-8004}:8004"
     environment:
       TZ: Asia/Shanghai
       PYTHONUNBUFFERED: "1"
@@ -272,6 +289,7 @@ services:
       DINGTALK_SECRET: ${DINGTALK_SECRET:-}
       WECOM_ENABLED: ${WECOM_ENABLED:-false}
       WECOM_WEBHOOK_URL: ${WECOM_WEBHOOK_URL:-}
+      JWT_SECRET: ${JWT_SECRET}
     depends_on:
       redis:
         condition: service_healthy
@@ -299,7 +317,7 @@ services:
     restart: unless-stopped
     env_file: .env
     ports:
-      - "${FUND_PORT:-8005}:8005"
+      - "127.0.0.1:${FUND_PORT:-8005}:8005"
     environment:
       TZ: Asia/Shanghai
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:${DB_PORT:-5432}/${DB_NAME:-rotation_db}
@@ -348,7 +366,7 @@ services:
     restart: unless-stopped
     env_file: .env
     ports:
-      - "${SCHEDULER_PORT:-8006}:8006"
+      - "127.0.0.1:${SCHEDULER_PORT:-8006}:8006"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
@@ -400,7 +418,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
-      - "${AI_DECISION_PORT:-8007}:8007"
+      - "127.0.0.1:${AI_DECISION_PORT:-8007}:8007"
     environment:
       TZ: Asia/Shanghai
       PYTHONUNBUFFERED: "1"
@@ -412,6 +430,7 @@ services:
       AI_MAX_TOKENS: ${AI_MAX_TOKENS:-2000}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b}
+      JWT_SECRET: ${JWT_SECRET}
       REDIS_HOST: redis
       REDIS_PORT: 6379
       REDIS_PASSWORD: ${REDIS_PASSWORD}
@@ -457,7 +476,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
-      - "${MCP_PORT:-8008}:8008"
+      - "127.0.0.1:${MCP_PORT:-8008}:8008"
     environment:
       TZ: Asia/Shanghai
       PYTHONUNBUFFERED: "1"

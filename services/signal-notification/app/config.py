@@ -9,6 +9,13 @@ class Settings(BaseSettings):
     redis_password: str = ""
     redis_db: int = 1
 
+    # 与 auth 服务共用的 JWT 密钥，用于本地验签识别当前用户（推送配置按用户隔离）
+    jwt_secret: str = ""
+
+    # 服务间调用密钥：ai-decision / 调度器等内部服务没有用户登录态，
+    # 用它换取管理员身份读取信号；未配置时退回"无 token 视为管理员"
+    internal_token: str = ""
+
     # RabbitMQ
     rabbitmq_host: str = "localhost"
     rabbitmq_port: int = 5672

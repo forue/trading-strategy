@@ -15,6 +15,27 @@ CREATE TABLE IF NOT EXISTS users (
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- 页面访问权限表：角色 → 前端路由。缺行视为未授权，服务启动时按 RouteCatalog 补默认值
+CREATE TABLE IF NOT EXISTS route_permissions (
+    id BIGSERIAL PRIMARY KEY,
+    role VARCHAR(20) NOT NULL,
+    route_path VARCHAR(100) NOT NULL,
+    allowed BOOLEAN NOT NULL DEFAULT FALSE,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uk_route_permission UNIQUE (role, route_path)
+);
+
+-- 高级功能配额表：角色 × 功能 → 每日次数上限（0 = 不限次，enabled = false 表示不开放）
+CREATE TABLE IF NOT EXISTS feature_quotas (
+    id BIGSERIAL PRIMARY KEY,
+    feature_key VARCHAR(64) NOT NULL,
+    role VARCHAR(20) NOT NULL,
+    daily_limit INT NOT NULL DEFAULT 0,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uk_feature_quota UNIQUE (feature_key, role)
+);
+
 -- 策略配置表
 CREATE TABLE IF NOT EXISTS strategy_configs (
     id BIGSERIAL PRIMARY KEY,
@@ -27,9 +48,10 @@ CREATE TABLE IF NOT EXISTS strategy_configs (
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- 交易信号表
+-- 交易信号表：按账号隔离，同一账号同一天同板块同方向只留一条
 CREATE TABLE IF NOT EXISTS trade_signals (
     id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL DEFAULT 1,  -- 归属账号，历史数据归管理员
     signal_date DATE NOT NULL,
     strategy_type VARCHAR(20) NOT NULL,
     sector_code VARCHAR(20) NOT NULL,
@@ -39,13 +61,15 @@ CREATE TABLE IF NOT EXISTS trade_signals (
     score DECIMAL(10,4),  -- 评分
     reason TEXT,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(signal_date, strategy_type, sector_code, direction)
+    CONSTRAINT uk_trade_signals_user
+        UNIQUE(user_id, signal_date, strategy_type, sector_code, direction)
 );
 
 -- 信号收益评估表：信号后 N 个交易日的真实收益，用于复盘统计准确率/胜率
 -- 由 strategy 服务在行情到位后回填，见 services/strategy/app/signal_tracker.py
 CREATE TABLE IF NOT EXISTS signal_outcomes (
     id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL DEFAULT 1,  -- 归属账号，历史数据归管理员
     signal_date DATE NOT NULL,
     strategy_type VARCHAR(20) NOT NULL,
     sector_code VARCHAR(20) NOT NULL,
@@ -55,9 +79,13 @@ CREATE TABLE IF NOT EXISTS signal_outcomes (
     base_close DECIMAL(12,4) NOT NULL,
     end_close DECIMAL(12,4) NOT NULL,
     forward_return DECIMAL(10,6) NOT NULL,
+    direction_return DECIMAL(10,6),  -- 方向收益（卖出取反）
+    cost_rate DECIMAL(10,6),  -- 往返成本率
+    net_return DECIMAL(10,6),  -- 扣成本后的净收益
     is_win BOOLEAN NOT NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(signal_date, strategy_type, sector_code, direction, horizon_days)
+    CONSTRAINT uk_signal_outcomes_user
+        UNIQUE(user_id, signal_date, strategy_type, sector_code, direction, horizon_days)
 );
 
 -- 持仓记录表
@@ -122,6 +150,67 @@ CREATE TABLE IF NOT EXISTS bank_transfers (
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- 策略工坊：用户自定义策略、版本与运行记录
+CREATE TABLE IF NOT EXISTS user_strategies (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES users(id),
+    name VARCHAR(80) NOT NULL,
+    scenario VARCHAR(20) NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    condition_logic VARCHAR(4) NOT NULL DEFAULT 'AND',
+    conditions JSONB NOT NULL DEFAULT '[]'::jsonb,
+    actions JSONB NOT NULL DEFAULT '[]'::jsonb,
+    risk JSONB NOT NULL DEFAULT '{}'::jsonb,
+    is_public BOOLEAN NOT NULL DEFAULT FALSE,
+    status VARCHAR(20) NOT NULL DEFAULT 'draft',
+    version INT NOT NULL DEFAULT 1,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS user_strategy_versions (
+    id BIGSERIAL PRIMARY KEY,
+    strategy_id BIGINT NOT NULL REFERENCES user_strategies(id) ON DELETE CASCADE,
+    user_id BIGINT NOT NULL,
+    version INT NOT NULL,
+    snapshot JSONB NOT NULL,
+    change_note VARCHAR(200) NOT NULL DEFAULT '',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(strategy_id, version)
+);
+
+CREATE TABLE IF NOT EXISTS user_strategy_runs (
+    id BIGSERIAL PRIMARY KEY,
+    strategy_id BIGINT NOT NULL REFERENCES user_strategies(id) ON DELETE CASCADE,
+    user_id BIGINT NOT NULL,
+    mode VARCHAR(16) NOT NULL,
+    status VARCHAR(20) NOT NULL,
+    result JSONB,
+    error TEXT,
+    started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    finished_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 策略工坊：用户自建算法（可复用的触发条件组合）
+CREATE TABLE IF NOT EXISTS user_workshop_algorithms (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES users(id),
+    name VARCHAR(80) NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    conditions JSONB NOT NULL DEFAULT '[]'::jsonb,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 策略工坊：公开策略点赞（同一账号对同一策略唯一）
+CREATE TABLE IF NOT EXISTS user_strategy_likes (
+    id BIGSERIAL PRIMARY KEY,
+    strategy_id BIGINT NOT NULL REFERENCES user_strategies(id) ON DELETE CASCADE,
+    user_id BIGINT NOT NULL REFERENCES users(id),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(strategy_id, user_id)
+);
+
 -- 板块基础信息表
 CREATE TABLE IF NOT EXISTS sectors (
     id BIGSERIAL PRIMARY KEY,
@@ -161,8 +250,16 @@ ON CONFLICT DO NOTHING;
 -- 创建索引
 CREATE INDEX IF NOT EXISTS idx_trade_signals_date ON trade_signals(signal_date);
 CREATE INDEX IF NOT EXISTS idx_trade_signals_strategy ON trade_signals(strategy_type);
+CREATE INDEX IF NOT EXISTS idx_trade_signals_user ON trade_signals(user_id, signal_date);
 CREATE INDEX IF NOT EXISTS idx_signal_outcomes_perf ON signal_outcomes(strategy_type, horizon_days, signal_date);
+CREATE INDEX IF NOT EXISTS idx_signal_outcomes_user ON signal_outcomes(user_id, signal_date);
 CREATE INDEX IF NOT EXISTS idx_positions_user ON positions(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_trades_user_date ON trades(user_id, traded_at);
 CREATE INDEX IF NOT EXISTS idx_account_nav_user_date ON account_nav(user_id, nav_date);
 CREATE INDEX IF NOT EXISTS idx_bank_transfers_user_date ON bank_transfers(user_id, transfer_date);
+ALTER TABLE user_strategies ADD COLUMN IF NOT EXISTS condition_logic VARCHAR(4) NOT NULL DEFAULT 'AND';
+CREATE INDEX IF NOT EXISTS idx_user_strategies_user ON user_strategies(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_strategies_public ON user_strategies(is_public) WHERE is_public;
+CREATE INDEX IF NOT EXISTS idx_user_strategy_runs_user ON user_strategy_runs(user_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_workshop_algorithms_user ON user_workshop_algorithms(user_id);
+CREATE INDEX IF NOT EXISTS idx_strategy_likes_strategy ON user_strategy_likes(strategy_id);

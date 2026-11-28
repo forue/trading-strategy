@@ -23,3 +23,7 @@ spring:
 jwt:
   secret: my-jwt-secret-key-for-rotation-app-2026
   expiration: 86400000
+
+# 服务间凭证：删号时用它调用策略 / AI 服务清理该账号的个人数据
+internal:
+  token: ${INTERNAL_TOKEN:}

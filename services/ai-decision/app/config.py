@@ -38,6 +38,13 @@ class Settings(BaseSettings):
     data_collector_url: str = "http://backend-data-collector:8003"
     signal_url: str = "http://backend-signal:8004"
 
+    # 与 auth 服务共用的 JWT 密钥，用于本地验签识别当前用户（AI 配置与对话按用户隔离）
+    jwt_secret: str = ""
+
+    # 服务间调用密钥：本服务没有用户登录态，访问 strategy / signal 时用它
+    # 换取管理员身份（信号与策略参数已按账号隔离，匿名访问会被拒绝）
+    internal_token: str = ""
+
     # Service
     service_port: int = 8007
 

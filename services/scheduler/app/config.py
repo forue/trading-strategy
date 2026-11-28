@@ -19,6 +19,10 @@ class Settings(BaseSettings):
 
     service_port: int = 8006
 
+    # 服务间调用密钥：策略服务的策略参数已按账号隔离，调度器没有用户登录态，
+    # 用该密钥换取"内部调度"身份（数据归属管理员），不再依赖匿名访问
+    internal_token: str = ""
+
     # Logging
     log_level: str = "INFO"
 
