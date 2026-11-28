@@ -1,5 +1,6 @@
 """MCP 工具 - 信号分析"""
 import httpx
+from ..internal_auth import internal_headers
 from datetime import datetime
 from loguru import logger
 
@@ -10,7 +11,7 @@ class SignalTools:
     def __init__(self, signal_url: str, strategy_url: str):
         self.signal_url = signal_url.rstrip("/")
         self.strategy_url = strategy_url.rstrip("/")
-        self._client = httpx.AsyncClient(timeout=30)
+        self._client = httpx.AsyncClient(timeout=30, headers=internal_headers())
 
     async def get_today_signals(self, strategy_type: str = "MODERATE") -> dict:
         """获取今日信号"""

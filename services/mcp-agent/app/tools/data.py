@@ -1,5 +1,6 @@
 """MCP 工具 - 数据查询"""
 import httpx
+from ..internal_auth import internal_headers
 from datetime import datetime
 from loguru import logger
 
@@ -10,7 +11,7 @@ class DataTools:
     def __init__(self, data_collector_url: str, strategy_url: str):
         self.data_collector_url = data_collector_url.rstrip("/")
         self.strategy_url = strategy_url.rstrip("/")
-        self._client = httpx.AsyncClient(timeout=30)
+        self._client = httpx.AsyncClient(timeout=30, headers=internal_headers())
 
     async def query_sector_data(self, sector_code: str, start_date: str = "", end_date: str = "") -> dict:
         """查询板块历史数据"""

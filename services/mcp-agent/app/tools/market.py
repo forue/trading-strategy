@@ -1,5 +1,6 @@
 """MCP 工具 - 市场分析"""
 import httpx
+from ..internal_auth import internal_headers
 from datetime import datetime
 from loguru import logger
 
@@ -10,7 +11,7 @@ class MarketTools:
     def __init__(self, strategy_url: str, data_collector_url: str):
         self.strategy_url = strategy_url.rstrip("/")
         self.data_collector_url = data_collector_url.rstrip("/")
-        self._client = httpx.AsyncClient(timeout=30)
+        self._client = httpx.AsyncClient(timeout=30, headers=internal_headers())
 
     async def analyze_sector_flow(self, sector_code: str, date: str = None) -> dict:
         """分析板块资金流向"""

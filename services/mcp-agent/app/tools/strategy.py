@@ -1,5 +1,6 @@
 """MCP 工具 - 策略分析"""
 import httpx
+from ..internal_auth import internal_headers
 from datetime import datetime
 from loguru import logger
 
@@ -9,7 +10,7 @@ class StrategyTools:
 
     def __init__(self, strategy_url: str):
         self.strategy_url = strategy_url.rstrip("/")
-        self._client = httpx.AsyncClient(timeout=120)
+        self._client = httpx.AsyncClient(timeout=120, headers=internal_headers())
 
     async def get_strategy_signals(self, strategy_type: str = "MODERATE", date: str = None) -> dict:
         """获取策略信号"""
