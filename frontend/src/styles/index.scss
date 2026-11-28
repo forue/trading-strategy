@@ -165,9 +165,17 @@ html:root {
 
   .el-date-editor .el-input__wrapper { min-height: var(--ctrl-h-md); }
 
-  .el-radio-button__inner {
+  /* 分段选择统一用 flex 居中：height + line-height 组合会让文字固定下沉（实测 6.5px），
+     与 mobile.scss 的 --m-seg-h 模板保持同一口径 */
+  .el-radio-group .el-radio-button .el-radio-button__inner {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
     height: var(--ctrl-h-md);
-    line-height: calc(var(--ctrl-h-md) - 2px);
+    padding: 0 12px;
+    line-height: 1;
+    text-align: center;
   }
 }
 
@@ -193,11 +201,23 @@ html:root {
   .el-select .el-select__wrapper,
   .el-date-editor .el-input__wrapper { min-height: var(--ctrl-h-sm); }
 
-  .el-radio-button__inner {
+  .el-radio-group .el-radio-button .el-radio-button__inner {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
     height: var(--ctrl-h-sm);
-    line-height: calc(var(--ctrl-h-sm) - 2px);
+    padding: 0 11px;
+    line-height: 1;
+    text-align: center;
   }
 }
+
+/* 分段选择等分模式：与 mobile.scss 的 .fill 同语义，页面只需加 class="fill"，
+   不得再自己写 height / padding / line-height / width */
+.el-radio-group.fill { display: flex; }
+.el-radio-group.fill > .el-radio-button { flex: 1 1 0; min-width: 0; }
+.el-radio-group.fill > .el-radio-button > .el-radio-button__inner { width: 100%; }
 
 /* 3. 同排控件垂直居中 + 8px 间距，避免忽紧忽松
    gap 同时给出行/列间距：容器一旦换行，第 2 行不会贴着第 1 行，
@@ -364,14 +384,8 @@ a, button, label, input, select, textarea, [role="button"],
     .logo-mark {
       width: 28px;
       height: 28px;
-      border-radius: var(--radius-sm);
-      background: var(--accent-primary);
-      color: var(--text-inverse);
-      display: grid;
-      place-items: center;
-      font-size: 11px;
-      font-weight: 700;
       flex-shrink: 0;
+      cursor: pointer;
     }
     .logo-text {
       font-size: 14px;

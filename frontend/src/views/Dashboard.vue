@@ -187,10 +187,13 @@ import RiskAlertPanel from '@/components/RiskAlertPanel.vue'
 import { useThemeStore } from '@/stores/theme'
 import { useStrategyStore, STRATEGY_OPTIONS } from '@/stores/strategy'
 import { useBreakpoint } from '@/composables/useBreakpoint'
+import { useTradeCalendar } from '@/composables/useTradeCalendar'
+import { CAL_DATE_FONT, calendarItemStyle, calendarLabelBase, calendarSurfaceColor, calendarCellPalette, calendarEmphasisItemStyle } from '@/utils/calendarStyle'
 import { storeToRefs } from 'pinia'
 import type { TradeSignal } from '@/api/signal'
 
 const bp = useBreakpoint()
+const { ensureTradeDates, isTradeDay } = useTradeCalendar()
 
 use([HeatmapChart, ScatterChart, GridComponent, TooltipComponent, VisualMapComponent, CalendarComponent, LegendComponent, CanvasRenderer])
 
@@ -283,7 +286,7 @@ const heatmapOption = computed(() => {
       // 平滑发散色阶：蓝(流出/弱) → 中性灰(0) → 红(流入/强)，避免突兀的棕黄过渡
       inRange: {
         color: isDark
-          ? ['#2E5A8C', '#3D72A6', '#5A90BC', '#7CABC9', '#4A5560', '#C07F6E', '#D26A52', '#DE5339', '#E8422C']
+          ? ['#2E5A8C', '#3D72A6', '#5A90BC', '#7CABC9', '#4A5560', '#A86B61', '#AE5846', '#B64635', '#B03E2E']
           : ['#537DB4', '#7FA3CC', '#ACC5DF', '#D7E3EE', '#EDEFF1', '#F3D5CB', '#EDB29E', '#E28A6E', '#D86247'],
       },
       text: ['强', '弱'],
@@ -292,7 +295,15 @@ const heatmapOption = computed(() => {
     series: [{
       type: 'heatmap',
       data: buildHeatmapData(displaySectors),
-      label: { show: true, fontSize: bp.isMobile.value ? 8 : 10, formatter: (p: any) => p.value[2]?.toFixed(1) },
+      label: {
+        show: true,
+        fontFamily: CAL_DATE_FONT,
+        fontWeight: 700,
+        fontSize: bp.isMobile.value ? 10 : 12,
+        // 深色模式强制白字并加轻微阴影：否则 ECharts 按底色自动切黑字，浅蓝格上会参差
+        ...(isDark ? { color: '#FFFFFF', textShadowColor: 'rgba(0,0,0,0.55)', textShadowBlur: 3 } : {}),
+        formatter: (p: any) => p.value[2]?.toFixed(1),
+      },
       emphasis: { itemStyle: { shadowBlur: 10, shadowColor: 'rgba(0,0,0,0.3)' } },
     }],
   }
@@ -336,33 +347,11 @@ const heatmapLoading = ref(false)
 async function loadHeatmapData() {
   heatmapLoading.value = true
   try {
-    const end = dayjs().format('YYYY-MM-DD')
-    const start = dayjs().subtract(parseInt(heatmapPeriod.value), 'day').format('YYYY-MM-DD')
-    const dates = await settingsApi.getReplayDates(start, end)
-    if (dates && dates.length > 0) {
-      const sectorDataMap = new Map<string, { mainNetInflow: number[], indexChangePct: number[] }>()
-      for (const date of dates) {
-        const dayData = await settingsApi.getReplayDayData(date)
-        if (dayData?.sectors) {
-          for (const sector of dayData.sectors) {
-            const name = sector.sector_name
-            if (!sectorDataMap.has(name)) sectorDataMap.set(name, { mainNetInflow: [], indexChangePct: [] })
-            const d = sectorDataMap.get(name)!
-            d.mainNetInflow.push(sector.main_net_inflow || 0)
-            d.indexChangePct.push(sector.index_change_pct || 0)
-          }
-        }
-      }
-      const aggregated = Array.from(sectorDataMap.entries()).map(([name, data]) => ({
-        sector_name: name,
-        main_net_inflow: data.mainNetInflow.reduce((a, b) => a + b, 0) / data.mainNetInflow.length,
-        index_change_pct: data.indexChangePct.reduce((a, b) => a + b, 0) / data.indexChangePct.length,
-      }))
-      if (aggregated.length > 0) {
-        heatmapRawData.value = aggregated.sort((a: any, b: any) => (b.main_net_inflow || 0) - (a.main_net_inflow || 0))
-        sectorNames.value = heatmapRawData.value.map((s: any) => s.sector_name)
-      } else { heatmapRawData.value = []; sectorNames.value = [] }
-    } else { heatmapRawData.value = []; sectorNames.value = [] }
+    // 一次请求拿回区间聚合结果：原来按交易日逐日串行拉取，20 日要发 15 个请求
+    const data = await settingsApi.getReplayHeatmap(parseInt(heatmapPeriod.value))
+    const sectors = data?.sectors || []
+    heatmapRawData.value = sectors
+    sectorNames.value = sectors.map(s => s.sector_name)
   } catch { heatmapRawData.value = []; sectorNames.value = [] }
   finally { heatmapLoading.value = false }
 }
@@ -391,30 +380,53 @@ const calendarOption = computed(() => {
     dateSignalsMap[d].push(sig)
   }
   const calData = Object.entries(dateSignalsMap).map(([date, signals]) => [date, signals.length])
-  // 固定 6 周（42 格）网格，消除不同月份 5/6 周导致的列数抖动
+  // 固定 6 周（42 格）网格，周日为一周起点：消除不同月份 5/6 周导致的行数抖动
   const firstOfMonth = dayjs(calendarMonth.value + '-01')
-  const offsetToMonday = (firstOfMonth.day() + 6) % 7
-  const rangeStart = firstOfMonth.subtract(offsetToMonday, 'day')
+  const rangeStart = firstOfMonth.subtract(firstOfMonth.day(), 'day')
   const rangeEnd = rangeStart.add(41, 'day')
   const calRange: [string, string] = [rangeStart.format('YYYY-MM-DD'), rangeEnd.format('YYYY-MM-DD')]
   const monthPrefix = calendarMonth.value
   const filledData: any[] = []
   const outsideDates: string[] = []
+  const closedDates: string[] = []
   for (let i = 0; i < 42; i++) {
     const d = rangeStart.add(i, 'day').format('YYYY-MM-DD')
     if (!d.startsWith(monthPrefix)) { outsideDates.push(d); continue }
     if (emptyDateMap[d]) continue // 空仓日由下方独立蓝色系列渲染
     const existing = calData.find(item => item[0] === d)
     if (existing) filledData.push(existing)
-    else if (dayjs(d).isBefore(dayjs()) || dayjs(d).isSame(dayjs(), 'day')) filledData.push([d, 0])
+    // 真实交易日历判定：休市日单独渲染，避免与「交易日无信号」混成一片灰格
+    else if (!isTradeDay(d)) closedDates.push(d)
+    // 未来交易日也要有格子，否则月中会出现一块空白（如 30 号）
+    else filledData.push([d, 0])
+  }
+  const cellLabel = (badge?: string) => (p: any) => {
+    const date = Array.isArray(p.data) ? p.data[0] : p.data?.value?.[0]
+    const day = date ? String(Number(String(date).slice(-2))) : ''
+    if (!badge) return day
+    const rich = badge === '休' ? 'rest' : badge === '空' ? 'empty' : 'rebalance'
+    return `${day}\n{${rich}|${badge}}`
+  }
+  const signalLabel = (p: any) => {
+    const date = Array.isArray(p.data) ? p.data[0] : p.data?.value?.[0]
+    return dateSignalsMap[date] ? cellLabel('调')(p) : cellLabel()(p)
   }
   const isDark = themeStore.mode === 'dark'
-  const calTextColor = isDark ? '#9da1b0' : '#5a5f6e'
-  const calBorderColor = isDark ? '#2a2d38' : '#dcdee0'
-  const calEmptyColor = isDark ? '#1e2130' : '#f5f5f5'
+  const mobile = bp.isMobile.value
+  const cellStyle = calendarItemStyle(isDark, mobile)
+  // 三档底色与文字色走共用 palette，和盈亏日历保持同一套观感
+  const palette = calendarCellPalette(isDark)
+  const emphasisStyle = calendarEmphasisItemStyle(isDark)
+  const calTextColor = palette.axisText
+  const calEmptyColor = palette.neutral
+  const calClosedColor = palette.closed
+  const calOutsideColor = palette.outside
   const calEmptyPositionColor = isDark ? '#2b4a7d' : '#a0cfff'
-  // 非本月格子：必须比"本月无数据"的 calEmptyColor 再深一档，否则两者同色，月份边界看不出来
-  const calOutsideColor = isDark ? '#15161c' : '#e9eaec'
+  const labelBase = calendarLabelBase(isDark, mobile, {
+    rest: { color: palette.closedSub },
+    empty: { color: isDark ? '#dbeafe' : '#1d4ed8' },
+    rebalance: { color: isDark ? '#bbf7d0' : '#166534' },
+  })
   const emptyDates = Object.keys(emptyDateMap)
   return {
     tooltip: {
@@ -428,6 +440,7 @@ const calendarOption = computed(() => {
         const date = p.data[0]
         if (!String(date).startsWith(monthPrefix)) return `${date}<br/>非本月`
         const count = p.data[1]
+        if (closedDates.includes(date)) return `${date}<br/>休市`
         if (emptyDateMap[date]) {
           return `${date}: 空仓<br/>${emptyDateMap[date]}`
         }
@@ -437,7 +450,7 @@ const calendarOption = computed(() => {
             `<br/>${s.sector_name} - ${s.direction === 'BUY' ? '买入' : '卖出'}`
           ).join('')
           const more = signals.length > 5 ? `<br/>...还有${signals.length - 5}个信号` : ''
-          return `${date}: ${count}个信号${details}${more}`
+          return `${date}: 调仓 · ${count}个信号${details}${more}`
         }
         return `${date}: ${count}个信号`
       },
@@ -445,49 +458,65 @@ const calendarOption = computed(() => {
     visualMap: {
       // 仅作用于真实的信号数量系列，空仓标记系列不参与着色
       seriesIndex: 0,
-      min: 0, max: 10, orient: 'horizontal', bottom: 0,
+      min: 0, max: 10, orient: 'horizontal', left: 'center', bottom: 0,
       itemWidth: bp.isMobile.value ? 8 : 20,
       itemHeight: bp.isMobile.value ? 80 : 140,
       inRange: { color: [calEmptyColor, '#9be9a8', '#40c463', '#30a14e', '#216e39'] },
       textStyle: { color: calTextColor, fontSize: bp.isMobile.value ? 9 : 12 },
     },
     calendar: {
-      top: 18, left: 'center', right: 'auto', range: calRange,
-      // 手机端放大格子：22px 在 390 宽下每天只剩 3px 间隙，点选困难
-      cellSize: bp.isMobile.value ? [28, 28] : [22, 22],
-      itemStyle: { borderWidth: 2, borderColor: calBorderColor, color: calEmptyColor },
+      top: 30, left: 12, right: 12, range: calRange,
+      // vertical = 七天横向排成 7 列、周向下排；horizontal 是 6 列周视图，格子会被拉宽
+      orient: 'vertical',
+      // 列宽交给容器自适应（左右留 12px），行高固定，手机上也能铺满卡片宽度
+      cellSize: ['auto', mobile ? 36 : bp.isTablet.value ? 34 : 44],
+      // 底层格子必须与卡片同色：否则圆角缺口会露出中性色，在格子交叉处形成杂色斑点
+      itemStyle: { ...cellStyle, color: calendarSurfaceColor(isDark) },
       splitLine: { show: false },
       yearLabel: { show: false },
-      dayLabel: { firstDay: 1, nameMap: 'cn', color: calTextColor, margin: bp.isMobile.value ? 12 : 10, fontSize: bp.isMobile.value ? 9 : 12 },
+      dayLabel: {
+        firstDay: 0, nameMap: ['日', '一', '二', '三', '四', '五', '六'],
+        color: calTextColor, margin: mobile ? 8 : 10, fontSize: mobile ? 10 : 12,
+      },
       monthLabel: { show: false },
     },
     series: [
       {
+        // 调仓日 / 交易日无信号：颜色由 visualMap 决定，日期下方标「调」
         type: 'heatmap',
         coordinateSystem: 'calendar',
         data: filledData,
+        // 每个系列都必须显式带 itemStyle，否则会走 ECharts 默认样式，圆角和间隙与其他系列不一致
+        itemStyle: { ...cellStyle },
+        emphasis: { itemStyle: emphasisStyle },
+        label: { ...labelBase, color: palette.neutralDate, formatter: signalLabel },
       },
       {
         // 空仓日：固定蓝色，区别于"未计算/无数据"的灰色底
         type: 'heatmap',
         coordinateSystem: 'calendar',
         data: emptyDates.map(d => [d, 0]),
-        itemStyle: {
-          color: calEmptyPositionColor,
-          borderWidth: 1,
-          borderColor: calBorderColor,
-        },
+        itemStyle: { ...cellStyle, color: calEmptyPositionColor },
+        emphasis: { itemStyle: emphasisStyle },
+        label: { ...labelBase, color: isDark ? '#dbeafe' : '#1d4ed8', formatter: cellLabel('空') },
+      },
+      {
+        // 休市日：真实交易日历判定，非交易日标「休」
+        type: 'heatmap',
+        coordinateSystem: 'calendar',
+        data: closedDates.map(d => [d, 0]),
+        itemStyle: { ...cellStyle, color: calClosedColor },
+        emphasis: { itemStyle: emphasisStyle },
+        label: { ...labelBase, color: palette.closedDate, formatter: cellLabel('休') },
       },
       {
         // 非本月：单独一个系列，visualMap 的 seriesIndex 只作用于 0，这里不会被染色
         type: 'heatmap',
         coordinateSystem: 'calendar',
         data: outsideDates.map(d => [d, 0]),
-        itemStyle: {
-          color: calOutsideColor,
-          borderWidth: 2,
-          borderColor: calBorderColor,
-        },
+        itemStyle: { ...cellStyle, color: calOutsideColor },
+        emphasis: { itemStyle: emphasisStyle },
+        label: { ...labelBase, color: palette.outsideDate, formatter: cellLabel() },
       },
     ],
   }
@@ -568,6 +597,7 @@ onMounted(async () => {
 })
 
 async function loadCalendarData() {
+  ensureTradeDates()
   try {
     const data = await signalApi.getSignalCalendar({
       strategyType: currentStrategy.value,
@@ -605,7 +635,7 @@ watch(calendarMonth, () => loadCalendarData())
   max-width: 100%;
 }
 .calendar-chart {
-  height: var(--chart-h-md); width: 100%;
+  height: var(--chart-h-lg); width: 100%;
 }
 
 .signal-list {
@@ -681,14 +711,13 @@ watch(calendarMonth, () => loadCalendarData())
   .stat-grid { gap: 12px; }
   .heatmap-chart { height: var(--chart-h-md); }
   .signal-list { max-height: 240px; }
-  /* 22px 格子 × 6 行 = 132 + top 18 + 星期头 ≈ 171，200px 刚好放得下 */
-  .calendar-chart { height: var(--chart-h-sm); }
+  /* 34px 格子 × 6 行 = 204 + top 18 + 星期头 18 + 色阶 20 ≈ 260 */
+  .calendar-chart { height: var(--chart-h-md); }
 }
 
-/* 手机端日历格子放大到 28px，6 行就是 168，再让色阶贴底不遮挡：
-   固定 232px（18 + 星期头 21 + 168 + 色阶 8 + 余量），否则色阶压在最后一行日期上 */
+/* 手机端 36px 格子 × 6 行 = 216 + top 18 + 星期头 18 + 色阶 8 ≈ 260，留 20px 余量 */
 @media (max-width: 480px) {
-  .calendar-chart { height: 232px; }
+  .calendar-chart { height: 280px; }
 }
 
 /* 手机端：热力图沿用 ≤768 的 260px，信号列表改为不限高，卡片间距压缩到 8px */

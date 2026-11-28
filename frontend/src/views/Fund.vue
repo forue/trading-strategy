@@ -230,8 +230,11 @@ import type { Position, NavRecord, DailyPnl, BankTransfer, ProfitCurveData } fro
 import dayjs from 'dayjs'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useBreakpoint } from '@/composables/useBreakpoint'
+import { useTradeCalendar } from '@/composables/useTradeCalendar'
+import { calendarItemStyle, calendarLabelBase, calendarSurfaceColor, calendarCellPalette, calendarEmphasisItemStyle } from '@/utils/calendarStyle'
 
-const { isMobile } = useBreakpoint()
+const { isMobile, isTablet } = useBreakpoint()
+const { ensureTradeDates, isTradeDay } = useTradeCalendar()
 
 use([LineChart, BarChart, PieChart, HeatmapChart, CalendarComponent, GridComponent, TooltipComponent, LegendComponent, VisualMapComponent, CanvasRenderer])
 
@@ -355,41 +358,75 @@ const monthlyBarOption = computed(() => {
 })
 
 const pnlCalendarOption = computed(() => {
-  // 固定 6 周（42 格）网格：从不同月份导致的 5/6 列抖动改为恒定 6 列
+  // 固定 6 周（42 格）网格，周日为一周起点：7 列 × 6 行，不再出现列数抖动
   const firstOfMonth = dayjs(calendarMonth.value + '-01')
-  const offsetToMonday = (firstOfMonth.day() + 6) % 7
-  const rangeStart = firstOfMonth.subtract(offsetToMonday, 'day')
+  const rangeStart = firstOfMonth.subtract(firstOfMonth.day(), 'day')
   const rangeEnd = rangeStart.add(41, 'day')
   const range: [string, string] = [rangeStart.format('YYYY-MM-DD'), rangeEnd.format('YYYY-MM-DD')]
   const monthPrefix = calendarMonth.value
   const retMap = new Map(dailyPnlData.value.map(d => [d.date, d.daily_return]))
 
-  // 统一主题语义色（红=盈利、绿=亏损），中位色贴近卡片底色；
-  // ±2% 量程让常见的 ±1% 收益有明显色差，不再压成同一块灰紫
-  const profitColor = isDark.value ? '#E5484D' : '#D92D20'
-  const lossColor = isDark.value ? '#3FA372' : '#12805C'
-  const neutralColor = isDark.value ? '#333842' : '#F1F1EF'
-  const outsideColor = isDark.value ? '#1E2128' : '#F9F9F8'
-  const borderColor = isDark.value ? '#2A2A30' : '#E4E4E1'
-  const labelColor = isDark.value ? '#9DA1B0' : '#71717A'
-  const monthLabelColor = isDark.value ? '#FAFAFA' : '#18181B'
+  // 红涨绿跌直接取页面主题语义色，格子与下方色阶条用同一套，不再各写一套硬编码值
+  const profitColor = themeColors.value.profit
+  const lossColor = themeColors.value.loss
+  // 底色由深到浅：本月交易日有收益(红/绿) > 本月交易日无数据 > 本月休市 > 非本月
+  // 三档底色与文字色走共用 palette，和信号日历保持同一套观感
+  const palette = calendarCellPalette(isDark.value)
+  const emphasisStyle = calendarEmphasisItemStyle(isDark.value)
+  const { neutral: neutralColor, closed: closedColor, outside: outsideColor } = palette
+  const cellStyle = calendarItemStyle(isDark.value, isMobile.value)
+  const labelColor = palette.axisText
 
-  const data: any[] = []
+  const pnlData: any[] = []
+  const neutralDates: string[] = []
+  const closedDates: string[] = []
+  const outsideDates: string[] = []
   for (let i = 0; i < 42; i++) {
     const date = rangeStart.add(i, 'day').format('YYYY-MM-DD')
-    const inMonth = date.startsWith(monthPrefix)
-    if (!inMonth) {
-      data.push({ value: [date, 0], itemStyle: { color: outsideColor } })
-    } else {
-      data.push([date, retMap.has(date) ? retMap.get(date) : 0])
-    }
+    if (!date.startsWith(monthPrefix)) { outsideDates.push(date); continue }
+    // 休市日不参与收益着色，单独一层浅色，与交易日拉开深浅
+    if (!isTradeDay(date)) { closedDates.push(date); continue }
+    if (retMap.has(date)) pnlData.push([date, retMap.get(date)])
+    else neutralDates.push(date)
   }
+
+  const dayOf = (p: any) => {
+    const raw = Array.isArray(p.data) ? p.data : p.data?.value
+    const date = raw?.[0]
+    return date ? String(Number(String(date).slice(-2))) : ''
+  }
+  // 格子内两行：第一行日号，第二行当日收益率；无数据显示「—」
+  const labelBase = calendarLabelBase(isDark.value, isMobile.value, {
+    up: { color: isDark.value ? '#FF8B85' : '#B42318' },
+    down: { color: isDark.value ? '#6FD1A5' : '#067647' },
+    flat: { color: palette.neutralSub },
+    closed: { color: palette.closedSub },
+    outside: { color: palette.outsideSub },
+  })
+  const pnlLabel = {
+    ...labelBase,
+    color: isDark.value ? '#FAFAFA' : '#18181B',
+    formatter: (p: any) => {
+      const raw = Array.isArray(p.data) ? p.data : p.data?.value
+      const ret = retMap.get(raw?.[0]) ?? 0
+      const key = ret > 0 ? 'up' : ret < 0 ? 'down' : 'flat'
+      const text = `${ret > 0 ? '+' : ''}${Number(ret).toFixed(1)}%`
+      return `${dayOf(p)}\n{${key}|${text}}`
+    },
+  }
+  // 无收益格子：日期数字也按层级降对比，本月无数据 > 休市 > 非本月
+  const dashedLabel = (color: string, richKey: string) => ({
+    ...labelBase,
+    color,
+    formatter: (p: any) => `${dayOf(p)}\n{${richKey}|—}`,
+  })
 
   return {
     tooltip: {
       formatter: (p: any) => {
         const date = Array.isArray(p.data) ? p.data[0] : p.data.value[0]
         if (!date.startsWith(monthPrefix)) return `${date}<br/>非本月`
+        if (closedDates.includes(date)) return `${date}<br/>休市`
         const ret = retMap.get(date)
         const amount = pnlAmountMap.value[date]
         const retText = ret !== undefined
@@ -406,6 +443,8 @@ const pnlCalendarOption = computed(() => {
     },
     visualMap: {
       min: -2, max: 2, show: true, orient: 'horizontal', left: 'center', bottom: 0,
+      // 只给 0 号系列（本月有收益的交易日）着色，其他三层用固定底色
+      seriesIndex: 0,
       // visualMap.text 为 [高端, 低端]：高端是盈利（红），低端是亏损（绿）
       inRange: { color: [lossColor, neutralColor, profitColor] },
       text: ['盈利', '亏损'],
@@ -415,13 +454,53 @@ const pnlCalendarOption = computed(() => {
       itemHeight: isMobile.value ? 90 : 140,
     },
     calendar: {
-      top: 28, left: 'center', right: 'auto', range, cellSize: [22, 22],
-      itemStyle: { borderWidth: 2, borderColor, color: neutralColor },
-      dayLabel: { firstDay: 1, nameMap: 'cn', color: labelColor, margin: 10 },
+      top: 32, left: 12, right: 12, range,
+      // 七天横向排列（周日→周六），周向下排；horizontal 会把 6 周排成 6 列并把格子拉宽
+      orient: 'vertical',
+      // 列宽自适应卡片宽度，行高固定，日历不会再缩成 308px 的一小块
+      cellSize: ['auto', isMobile.value ? 36 : isTablet.value ? 34 : 44],
+      // 底层格子必须与卡片同色：否则圆角缺口会露出中性色，在格子交叉处形成杂色斑点
+      itemStyle: { ...cellStyle, color: calendarSurfaceColor(isDark.value) },
+      dayLabel: {
+        firstDay: 0, nameMap: ['日', '一', '二', '三', '四', '五', '六'],
+        color: labelColor, margin: isMobile.value ? 8 : 10, fontSize: isMobile.value ? 10 : 12,
+      },
       monthLabel: { show: false },
       splitLine: { show: false },
     },
-    series: [{ type: 'heatmap', coordinateSystem: 'calendar', data }],
+    series: [
+      {
+        // 本月交易日且有收益：颜色由 visualMap 决定
+        type: 'heatmap', coordinateSystem: 'calendar', data: pnlData,
+        itemStyle: { ...cellStyle },
+        emphasis: { itemStyle: emphasisStyle },
+        label: pnlLabel,
+      },
+      {
+        // 本月交易日但无收益数据
+        type: 'heatmap', coordinateSystem: 'calendar',
+        data: neutralDates.map(d => [d, 0]),
+        itemStyle: { ...cellStyle, color: neutralColor },
+        emphasis: { itemStyle: emphasisStyle },
+        label: dashedLabel(palette.neutralDate, 'flat'),
+      },
+      {
+        // 本月休市：真实交易日历判定，比交易日浅一档
+        type: 'heatmap', coordinateSystem: 'calendar',
+        data: closedDates.map(d => [d, 0]),
+        itemStyle: { ...cellStyle, color: closedColor },
+        emphasis: { itemStyle: emphasisStyle },
+        label: dashedLabel(palette.closedDate, 'closed'),
+      },
+      {
+        // 非本月：最浅，visualMap.seriesIndex 只作用于 0，这里不会被染色
+        type: 'heatmap', coordinateSystem: 'calendar',
+        data: outsideDates.map(d => [d, 0]),
+        itemStyle: { ...cellStyle, color: outsideColor },
+        emphasis: { itemStyle: emphasisStyle },
+        label: dashedLabel(palette.outsideDate, 'outside'),
+      },
+    ],
   }
 })
 
@@ -477,7 +556,9 @@ function loadProfitCurve() {
   }).catch(() => {})
 }
 
-function loadDailyPnl() {
+async function loadDailyPnl() {
+  // 交易日历全局只拉一次；computed 里 isTradeDay 读取的 ref 会触发响应式重算
+  await ensureTradeDates()
   fundApi.getDailyPnl(calendarMonth.value).then(data => {
     dailyPnlData.value = data
   }).catch(() => {})
@@ -551,9 +632,8 @@ onMounted(() => {
 }
 .fill-chart { flex: 1; min-height: 0; width: 100%; }
 .nav-chart { min-height: var(--chart-h-md); }
-/* 桌面：日历本体 6 行 × 22 + 星期头 ≈ 182，底部还要放 20px 色阶条（visualMap bottom:0），
-   200px 时色阶压住最后一行日期；留 40px 余量 */
-.calendar-chart { min-height: calc(var(--chart-h-sm) + 40px); }
+/* 七天横向日历：桌面 44px × 6 行 = 264，加星期头/色阶约 320；平板与手机用 34/36px 格子 */
+.calendar-chart { min-height: var(--chart-h-lg); height: var(--chart-h-lg); }
 
 .summary-row { margin-bottom: 16px; }
 .summary-card {
@@ -656,7 +736,7 @@ onMounted(() => {
     background: var(--bg-tertiary);
     border-radius: 4px;
 
-    em { font-style: normal; font-size: 9px; color: var(--text-tertiary); }
+    em { font-style: normal; font-size: 10px; color: var(--text-tertiary); }
     b { font-size: 11px; font-weight: 600; font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; }
   }
 }
@@ -689,8 +769,8 @@ onMounted(() => {
   /* 单列堆叠后卡片失去等高约束，图表必须有确定高度，否则 flex:1 会塌成 0 */
   .fill-chart { flex: none; height: var(--chart-h-sm); min-height: var(--chart-h-sm); }
   .nav-chart { height: var(--chart-h-sm); }
-  /* 22px 格子 × 6 行 + 月份头 28 + 星期头 22 = 182，200px 时贴底的色阶会压住最后一行日期 */
-  .calendar-chart { height: 216px; min-height: 216px; }
+  /* 34/36px 格子 × 6 行 + 月份头 28 + 星期头 20 + 色阶 20 ≈ 280 */
+  .calendar-chart { height: 280px; min-height: 280px; }
 }
 
 @media (max-width: 480px) {

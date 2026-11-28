@@ -137,7 +137,7 @@
         </el-table-column>
         <el-table-column prop="score" label="评分" width="96" class-name="hide-mobile" label-class-name="hide-mobile" align="right">
           <template #default="{ row }">
-            <el-progress :percentage="Math.min(row.score * 10, 100)" :stroke-width="8" :color="row.score > 5 ? themeColors.good : row.score > 3 ? themeColors.warn : themeColors.bad" />
+            <el-progress :percentage="Math.min(row.score * 10, 100)" :format="formatScorePercent" :stroke-width="8" :color="row.score > 5 ? themeColors.good : row.score > 3 ? themeColors.warn : themeColors.bad" />
           </template>
         </el-table-column>
         <el-table-column prop="reason" label="信号原因" min-width="140" show-overflow-tooltip class-name="hide-mobile" label-class-name="hide-mobile" />
@@ -334,6 +334,10 @@ function copyEtf(code: string) {
 function formatTime(val: string | null | undefined): string {
   if (!val) return '--'
   return val.replace('T', ' ').substring(0, 19)
+}
+
+function formatScorePercent(percentage: number): string {
+  return `${Number(percentage).toFixed(1)}%`
 }
 
 // 全局策略切换时联动刷新信号列表
