@@ -151,6 +151,23 @@ export interface BacktestHistoryItem {
   created_at: string
 }
 
+// 异步回测任务状态：提交后按 task_id 轮询，直到 done 或 failed
+export interface BacktestTask {
+  task_id: string
+  status: 'queued' | 'running' | 'done' | 'failed'
+  bt_id?: string
+  error?: string
+  reused?: boolean
+  strategy_type?: string
+  start_date?: string
+  end_date?: string
+  // 逐日回放进度：progress 为 1~100 百分比，progress_done / progress_total 是已回放的交易日数
+  progress?: number
+  progress_done?: number
+  progress_total?: number
+  elapsed_seconds?: number
+}
+
 export const strategyApi = {
   checkTradeDay(date: string): Promise<{ date: string; is_trade_day: boolean }> {
     return request.get('/strategy/trade-day/check', { params: { date } })
@@ -236,13 +253,14 @@ export const strategyApi = {
     return request.post('/strategy/factors/batch', data)
   },
 
-  runBacktest(data: {
+  // 提交异步回测：返回很快，相同参数在任务结束前重复提交会复用同一 task_id
+  submitBacktest(data: {
     strategyType: string
     startDate: string
     endDate: string
     initialCapital: number
     strategyParams?: Record<string, any>
-  }): Promise<any> {
+  }): Promise<BacktestTask> {
     const body: any = {
       strategy_type: data.strategyType,
       start_date: data.startDate,
@@ -252,7 +270,12 @@ export const strategyApi = {
     if (data.strategyParams) {
       body.params = data.strategyParams
     }
-    return request.post('/strategy/backtest', body)
+    return request.post('/strategy/backtest/async', body)
+  },
+
+  // 轮询任务状态。轮询期间的网络抖动由调用方容忍，故用 X-Silent 关闭全局错误提示
+  getBacktestTask(taskId: string): Promise<BacktestTask> {
+    return request.get(`/strategy/backtest/task/${taskId}`, { headers: { 'X-Silent': '1' } })
   },
 
   getBacktestHistory(strategyType?: string): Promise<BacktestHistoryItem[]> {
