@@ -9,7 +9,8 @@ from loguru import logger
 class RabbitMQManager:
     """RabbitMQ 连接管理器（单例）
 
-    发布和消费使用独立的 channel，避免 pika 线程安全问题。
+    发布使用单例内部的连接与 channel；每次 consume() 另建独立连接，
+    避免 pika 线程安全问题（BlockingConnection 非线程安全）。
     """
 
     _instance: Optional["RabbitMQManager"] = None
@@ -17,7 +18,6 @@ class RabbitMQManager:
 
     _connection: Optional[pika.BlockingConnection] = None
     _publish_channel: Optional[pika.channel.Channel] = None
-    _consume_channel: Optional[pika.channel.Channel] = None
 
     _host: str = "localhost"
     _port: int = 5672
@@ -46,36 +46,36 @@ class RabbitMQManager:
         self._password = password
         self._do_connect()
 
+    def _create_connection(self) -> pika.BlockingConnection:
+        """按当前连接参数新建一个阻塞连接"""
+        credentials = pika.PlainCredentials(self._user, self._password)
+        parameters = pika.ConnectionParameters(
+            host=self._host,
+            port=self._port,
+            credentials=credentials,
+            heartbeat=60,
+            blocked_connection_timeout=300,
+        )
+        return pika.BlockingConnection(parameters)
+
     def _do_connect(self) -> None:
         """实际建立连接，仅为发布 channel 声明交换机"""
         try:
             if self._connection and self._connection.is_open:
                 return
 
-            credentials = pika.PlainCredentials(self._user, self._password)
-            parameters = pika.ConnectionParameters(
-                host=self._host,
-                port=self._port,
-                credentials=credentials,
-                heartbeat=60,
-                blocked_connection_timeout=300,
-            )
-            self._connection = pika.BlockingConnection(parameters)
+            self._connection = self._create_connection()
             self._publish_channel = self._connection.channel()
-            self._consume_channel = None
             self._exchange_declared = False
             logger.info("RabbitMQ 连接已建立")
         except Exception as e:
             logger.error(f"RabbitMQ 连接失败: {e}")
             self._connection = None
             self._publish_channel = None
-            self._consume_channel = None
 
     def close(self) -> None:
         """关闭连接"""
         try:
-            if self._consume_channel and self._consume_channel.is_open:
-                self._consume_channel.close()
             if self._publish_channel and self._publish_channel.is_open:
                 self._publish_channel.close()
             if self._connection and self._connection.is_open:
@@ -85,7 +85,6 @@ class RabbitMQManager:
         finally:
             self._connection = None
             self._publish_channel = None
-            self._consume_channel = None
             self._exchange_declared = False
 
     def _get_publish_channel(self) -> Optional[pika.channel.Channel]:
@@ -93,12 +92,12 @@ class RabbitMQManager:
         try:
             if self._connection is None or self._connection.is_closed:
                 self._do_connect()
-            elif self._consume_channel is None:
+            else:
                 # 纯发布场景长时间空闲后，broker 会按心跳超时关闭连接，而本地
                 # is_open 仍为 True，此时 basic_publish 会写到已失效的 socket 上
                 # （表现为 ConnectionReset，需重试才能成功）。发布前非阻塞处理一次
                 # I/O：读出对端关闭事件并顺带发送心跳，使首次发布即可成功。
-                # 该连接同时存在消费者时不执行，避免与消费线程并发 I/O。
+                # 消费者使用独立连接（见 consume），该连接只被发布线程使用。
                 try:
                     self._connection.process_data_events(time_limit=0)
                 except Exception as e:
@@ -111,20 +110,6 @@ class RabbitMQManager:
         except Exception:
             self._do_connect()
             return self._publish_channel
-
-    def _get_consume_channel(self) -> Optional[pika.channel.Channel]:
-        """获取消费 channel（独立于发布 channel），必要时重连"""
-        try:
-            if self._connection is None or self._connection.is_closed:
-                self._do_connect()
-            if self._consume_channel is None or self._consume_channel.is_closed:
-                self._consume_channel = self._connection.channel()
-            return self._consume_channel
-        except Exception:
-            self._do_connect()
-            if self._connection and self._connection.is_open:
-                self._consume_channel = self._connection.channel()
-            return self._consume_channel
 
     def _ensure_exchange(self, exchange: str = "rotation", exchange_type: str = "topic"):
         """声明交换机（仅首次调用时执行，后续幂等跳过）"""
@@ -172,27 +157,22 @@ class RabbitMQManager:
         routing_key: str = "#",
         durable: bool = True,
     ) -> None:
-        """消费消息（阻塞式，自动重连，使用独立 channel，手动确认）"""
+        """消费消息（阻塞式，自动重连，使用独立连接，手动确认）
+
+        pika 的 BlockingConnection 不是线程安全的。同一进程内存在多个消费者线程时
+        （如信号服务同时消费 signal.# 与 ai.#），共用连接会出现
+        "second 'channel.open' seen"、IndexError('pop from an empty deque') 等
+        协议错乱，因此每次 consume() 使用自己的连接与 channel。
+        """
         import time as _time
         retry_delay = 5  # 初始重连间隔（秒）
         max_delay = 60   # 最大重连间隔
 
         while True:
+            connection = None
             try:
-                # 重连前先重置消费 channel
-                if self._consume_channel and not self._consume_channel.is_closed:
-                    try:
-                        self._consume_channel.close()
-                    except Exception:
-                        pass
-                self._consume_channel = None
-
-                channel = self._get_consume_channel()
-                if not channel:
-                    logger.error(f"RabbitMQ 消费通道不可用，{retry_delay}秒后重试")
-                    _time.sleep(retry_delay)
-                    retry_delay = min(retry_delay * 2, max_delay)
-                    continue
+                connection = self._create_connection()
+                channel = connection.channel()
 
                 channel.exchange_declare(exchange=exchange, exchange_type="topic", durable=True)
                 result = channel.queue_declare(queue=queue, durable=durable)
@@ -223,5 +203,13 @@ class RabbitMQManager:
                 channel.start_consuming()
             except Exception as e:
                 logger.error(f"RabbitMQ 消费断开: {e}，{retry_delay}秒后重连")
-                _time.sleep(retry_delay)
-                retry_delay = min(retry_delay * 2, max_delay)
+            finally:
+                # 消费连接独立于发布连接，断开时只清理自身，不影响发布通道
+                try:
+                    if connection is not None and connection.is_open:
+                        connection.close()
+                except Exception as e:
+                    logger.debug(f"RabbitMQ 消费连接关闭: {e}")
+
+            _time.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, max_delay)
