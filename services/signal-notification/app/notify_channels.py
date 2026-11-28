@@ -332,7 +332,3 @@ class NotifyChannelManager:
             await self.wecom.send(signals, strategy_type, signal_date, is_test=is_test, ai_analyses=ai_analyses)
 
         logger.info(f"外部推送完成: strategy={strategy_type}, 钉钉={'✓' if self.dingtalk.enabled else '✗'}, 企业微信={'✓' if self.wecom.enabled else '✗'}")
-
-
-# 全局实例
-notify_manager = NotifyChannelManager()

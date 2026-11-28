@@ -42,8 +42,12 @@ class ConnectionManager:
         """广播单个信号（兼容旧调用，内部转为批量）"""
         return await self.broadcast_signals([signal], strategy_type)
 
-    async def broadcast_signals(self, signals: list, strategy_type: str = None):
-        """批量广播信号给订阅了该策略的用户（一次WebSocket消息含该策略全部信号）"""
+    async def broadcast_signals(self, signals: list, strategy_type: str = None, prefs: dict = None):
+        """批量广播信号给订阅了该策略的用户（一次WebSocket消息含该策略全部信号）
+
+        prefs: {user_id: {"enabled": bool, "types": set}} 由调用方按用户的
+        实时推送偏好加载；关闭推送或不在订阅档位内的用户不下发。
+        """
         sent_count = 0
         message = {
             "type": "signals",
@@ -51,12 +55,42 @@ class ConnectionManager:
             "signals": signals,
             "count": len(signals),
         }
-        for user_id, subscriptions in self.user_subscriptions.items():
+        for user_id, subscriptions in list(self.user_subscriptions.items()):
+            pref = (prefs or {}).get(str(user_id))
+            if pref is not None:
+                if not pref.get("enabled", True):
+                    continue
+                types = pref.get("types") or set()
+                if strategy_type and types and strategy_type not in types:
+                    continue
             if strategy_type is None or not subscriptions or strategy_type in subscriptions:
                 await self.send_personal_message(message, user_id)
                 sent_count += 1
         logger.info(f"信号广播完成: strategy={strategy_type}, 信号{len(signals)}条, 发送{sent_count}个客户端")
         return sent_count
+
+    async def send_signals_to_user(
+        self, signals: list, strategy_type: str, user_id, prefs: dict | None = None,
+    ) -> bool:
+        """只把信号下发给指定用户
+
+        信号已按账号隔离计算，甲账号的信号不能广播给乙账号；是否下发仍尊重
+        该用户自己的实时推送开关与订阅档位。
+        """
+        pref = (prefs or {}).get(str(user_id))
+        if pref is not None:
+            if not pref.get("enabled", True):
+                return False
+            types = pref.get("types") or set()
+            if strategy_type and types and strategy_type not in types:
+                return False
+        await self.send_personal_message({
+            "type": "signals",
+            "strategy_type": strategy_type,
+            "signals": signals,
+            "count": len(signals),
+        }, str(user_id))
+        return True
 
     def subscribe(self, user_id: str, strategy_type: str):
         """用户订阅策略信号"""
