@@ -7,7 +7,15 @@ from typing import Optional
 
 import httpx
 from pydantic import BaseModel
+import os
+
 from loguru import logger
+
+
+def _internal_headers() -> dict:
+    """访问 strategy / signal 服务的服务间凭证（无用户登录态时视为管理员口径）"""
+    token = os.getenv("INTERNAL_TOKEN", "")
+    return {"X-Internal-Token": token} if token else {}
 
 from .model_adapter import BaseLLMClient
 from .prompt_templates import get_template
@@ -245,7 +253,10 @@ class DailyReviewDataCollector:
     async def _collect_signals(self, date: str) -> str:
         """从 signal-notification 服务读取当日各策略信号"""
         lines = []
-        async with httpx.AsyncClient(timeout=20) as client:
+        # signal 服务的信号已按账号隔离，内部服务用共享密钥读取管理员口径
+        async with httpx.AsyncClient(
+            timeout=20, headers=_internal_headers(),
+        ) as client:
             for st in self.STRATEGIES:
                 try:
                     resp = await client.get(
@@ -272,7 +283,9 @@ class DailyReviewDataCollector:
     async def _collect_positions(self, name_map: dict) -> str:
         """从 strategy 服务读取各策略当前持仓"""
         lines = []
-        async with httpx.AsyncClient(timeout=20) as client:
+        async with httpx.AsyncClient(
+            timeout=20, headers=_internal_headers(),
+        ) as client:
             for st in self.STRATEGIES:
                 try:
                     resp = await client.get(

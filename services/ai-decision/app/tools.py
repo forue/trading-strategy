@@ -9,7 +9,15 @@ import asyncio
 import httpx
 from datetime import datetime, timedelta
 from typing import Any
+import os
+
 from loguru import logger
+
+
+def _internal_headers() -> dict:
+    """访问 strategy / signal 服务的服务间凭证"""
+    token = os.getenv("INTERNAL_TOKEN", "")
+    return {"X-Internal-Token": token} if token else {}
 
 
 MAX_FALLBACK_DAYS = 7  # 最多回退天数
@@ -721,7 +729,9 @@ class MCPToolExecutor:
         self.strategy_url = strategy_url.rstrip("/")
         self.data_collector_url = data_collector_url.rstrip("/")
         self.signal_url = signal_url.rstrip("/")
-        self._client = httpx.AsyncClient(timeout=30)
+        # 工具要访问 strategy / signal 服务，这两个服务的数据已按账号隔离，
+        # 内部调用统一带服务间凭证（视为管理员口径）
+        self._client = httpx.AsyncClient(timeout=30, headers=_internal_headers())
 
     async def close(self):
         """关闭 HTTP 客户端"""

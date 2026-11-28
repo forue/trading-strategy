@@ -7,7 +7,7 @@ import threading
 from typing import Optional
 from datetime import datetime
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 from loguru import logger
 
@@ -16,7 +16,16 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from .config import settings
 from .model_adapter import ModelAdapterFactory, BaseLLMClient
 from .signal_analyzer import SignalAnalyzer, SignalAnalysis, MarketContext
-from shared import RabbitMQManager, RedisManager, success_response
+from shared import (
+    ADMIN_USER_ID,
+    AuthError,
+    RabbitMQManager,
+    RedisManager,
+    get_current_user,
+    set_jwt_secret,
+    success_response,
+    user_scope,
+)
 
 logger.remove()
 logger.add(sys.stderr, level=settings.log_level)
@@ -25,12 +34,33 @@ rmq = RabbitMQManager()
 redis_mgr = RedisManager()
 _mq_thread = None
 llm_client: BaseLLMClient = None
-signal_llm_client: BaseLLMClient = None  # 信号分析专用 LLM 客户端
+signal_llm_client: BaseLLMClient = None  # 信号分析专用 LLM 客户端（管理员配置，供后台任务使用）
 analyzer: SignalAnalyzer = None
 _main_loop: asyncio.AbstractEventLoop = None
 
+# 与 auth 服务共用密钥，本地验签识别当前用户（AI 配置与对话按用户隔离）
+set_jwt_secret(settings.jwt_secret)
 
-def _resolve_default_llm_args(config: dict) -> Optional[dict]:
+
+def _require_user(authorization: str | None):
+    try:
+        return get_current_user(authorization)
+    except AuthError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+
+
+def _analysis_key(user_id: int, strategy_type: str, signal_date: str) -> str:
+    """AI 解读缓存键（跟随账号）：信号按账号计算，解读不能跨账号复用"""
+    return f"user:{int(user_id)}:ai:analysis:{strategy_type}:{signal_date}"
+
+
+def _internal_headers() -> dict:
+    """访问 strategy / signal 服务时带上服务间凭证"""
+    token = getattr(settings, "internal_token", "") or ""
+    return {"X-Internal-Token": token} if token else {}
+
+
+def _resolve_default_llm_args(config: dict, provider_mgr) -> Optional[dict]:
     """解析默认 LLM 客户端的创建参数（不含 ollama_* 参数）
 
     ai:config 里的 provider / api_key / base_url 是前端设置页不再写入的遗留字段
@@ -41,7 +71,6 @@ def _resolve_default_llm_args(config: dict) -> Optional[dict]:
 
     非 ollama 的提供商统一走 OpenAI 兼容协议分支（与信号分析专用客户端一致）。
     """
-    provider_mgr = _get_provider_mgr()
     provider_id = config.get("provider", "")
     if provider_id == "ollama":
         return {"provider": "ollama", "model": config.get("ollama_model", settings.ollama_model)}
@@ -78,14 +107,16 @@ def _resolve_default_llm_args(config: dict) -> Optional[dict]:
     return None
 
 
-def _init_llm():
-    """初始化 LLM 客户端（优先从 Redis 加载配置）
+def _build_llm_stack(user_id: int) -> dict:
+    """按指定用户的配置构建 LLM 客户端组合
 
     初始化顺序：先尝试信号分析专用模型，再尝试默认模型。
-    至少一个成功即视为就绪，默认模型失败不阻断专用模型的初始化。
+    用户没有任何可用凭据时各项为 None（不会回退到别人的 key）。
     """
-    global llm_client, signal_llm_client, analyzer
-    config = _load_ai_config()
+    config = _load_ai_config(user_id)
+    provider_mgr = _get_provider_mgr(user_id)
+    client = None
+    signal_client = None
 
     # 1. 信号分析专用 LLM 客户端（优先）
     signal_provider = config.get("signal_analysis_provider", "")
@@ -93,48 +124,97 @@ def _init_llm():
     if signal_provider and signal_model:
         try:
             if signal_provider == "ollama":
-                signal_llm_client = ModelAdapterFactory.create(
+                signal_client = ModelAdapterFactory.create(
                     provider="ollama",
                     ollama_base_url=config.get("ollama_base_url", settings.ollama_base_url),
                     ollama_model=signal_model,
                 )
             else:
-                provider_mgr = _get_provider_mgr()
                 provider_config = provider_mgr.get(signal_provider)
                 if provider_config and provider_config.api_key:
-                    signal_llm_client = ModelAdapterFactory.create(
+                    signal_client = ModelAdapterFactory.create(
                         provider="openai",
                         api_key=provider_config.api_key,
                         base_url=provider_config.base_url,
                         model=signal_model,
                     )
-            if signal_llm_client:
-                logger.info(f"信号分析专用 LLM 客户端初始化完成: provider={signal_provider}, model={signal_model}")
         except Exception as e:
-            logger.warning(f"信号分析专用 LLM 客户端初始化失败: {e}")
+            logger.warning(f"信号分析专用 LLM 客户端初始化失败(user={user_id}): {e}")
 
     # 2. 默认 LLM 客户端（辅助用，失败不阻断）
-    if not llm_client:
-        try:
-            llm_args = _resolve_default_llm_args(config)
-            if not llm_args:
-                logger.warning("默认 LLM 客户端未初始化：ai:providers 中没有可用凭据的提供商")
-            else:
-                llm_client = ModelAdapterFactory.create(
-                    ollama_base_url=config.get("ollama_base_url", settings.ollama_base_url),
-                    ollama_model=config.get("ollama_model", settings.ollama_model),
-                    **llm_args,
-                )
-                logger.info(f"默认 LLM 客户端初始化完成: provider={llm_args['provider']}, model={llm_args['model']}")
-        except Exception as e:
-            logger.warning(f"默认 LLM 客户端初始化失败（信号分析不受影响）: {e}")
+    try:
+        llm_args = _resolve_default_llm_args(config, provider_mgr)
+        if llm_args:
+            client = ModelAdapterFactory.create(
+                ollama_base_url=config.get("ollama_base_url", settings.ollama_base_url),
+                ollama_model=config.get("ollama_model", settings.ollama_model),
+                **llm_args,
+            )
+    except Exception as e:
+        logger.warning(f"默认 LLM 客户端初始化失败(user={user_id}): {e}")
 
-    # 3. 使用专用客户端或默认客户端
-    if signal_llm_client or llm_client:
-        analyzer = SignalAnalyzer(signal_llm_client or llm_client)
-        logger.info("信号分析器初始化完成")
+    analyzer = SignalAnalyzer(signal_client or client) if (signal_client or client) else None
+    return {"client": client, "signal_client": signal_client, "analyzer": analyzer}
+
+
+# 普通用户的 LLM 运行时缓存（管理员复用全局客户端）
+_user_stack_cache: dict[int, dict] = {}
+
+
+def _get_stack(user_id: int) -> dict:
+    """获取指定用户的 LLM 运行时"""
+    if user_id == ADMIN_USER_ID and (llm_client or signal_llm_client):
+        return {"client": llm_client, "signal_client": signal_llm_client, "analyzer": analyzer}
+
+    stack = _user_stack_cache.get(user_id)
+    if stack is None:
+        stack = _build_llm_stack(user_id)
+        _user_stack_cache[user_id] = stack
+        if stack["analyzer"]:
+            logger.info(f"用户 LLM 配置已加载: user={user_id}")
+    return stack
+
+
+async def _invalidate_stack(user_id: int):
+    """配置变更后丢弃该用户的运行时缓存"""
+    stack = _user_stack_cache.pop(user_id, None)
+    if not stack:
+        return
+    for key in ("client", "signal_client"):
+        client = stack.get(key)
+        if client and hasattr(client, "close"):
+            try:
+                await client.close()
+            except Exception:
+                pass
+
+
+def _init_llm():
+    """初始化后台任务使用的 LLM 客户端（取管理员账号的配置）
+
+    后台任务（每日复盘、信号解读、风控巡检）没有用户上下文，统一用管理员配置。
+    """
+    global llm_client, signal_llm_client, analyzer
+    stack = _build_llm_stack(ADMIN_USER_ID)
+    llm_client = stack["client"]
+    signal_llm_client = stack["signal_client"]
+    analyzer = stack["analyzer"]
+    if analyzer:
+        logger.info("管理员 LLM 配置已加载，后台任务可用")
     else:
-        logger.error("所有 LLM 客户端初始化均失败，信号解读不可用")
+        logger.error("管理员 AI 配置不可用：每日复盘与信号解读将跳过（请在设置页为管理员配置提供商）")
+
+
+async def _reinit_admin_llm():
+    """管理员配置更新后重建全局客户端，先关闭旧连接避免泄漏"""
+    global llm_client, signal_llm_client
+    for client in (llm_client, signal_llm_client):
+        if client and hasattr(client, "close"):
+            try:
+                await client.close()
+            except Exception:
+                pass
+    _init_llm()
 
 
 @asynccontextmanager
@@ -153,6 +233,7 @@ async def lifespan(app: FastAPI):
         password=settings.redis_password,
         db=settings.redis_db,
     )
+    _migrate_legacy_ai_data()
     _init_llm()
     global _mq_thread
     _mq_thread = threading.Thread(target=_start_consumer, daemon=True)
@@ -218,7 +299,7 @@ async def _fetch_signals_from_signal_service(strategy_type: str, signal_date: st
     """
     import httpx
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=10, headers=_internal_headers()) as client:
             resp = await client.get(
                 f"{settings.signal_url}/signals/today",
                 params={"strategy_type": strategy_type},
@@ -246,14 +327,22 @@ async def _handle_signals(message: dict):
     signals = message.get("signals", [])
     strategy_type = message.get("strategy_type", "")
     signal_date = message.get("signal_date", "")
+    user_id = int(message.get("user_id") or ADMIN_USER_ID)
 
     if not signal_date:
         logger.warning("信号事件缺少 signal_date，跳过解读")
         return
 
+    # 信号已按账号隔离计算，自动解读只跑管理员（基准账号）那一套：
+    # N 个账号 × 3 档策略全量调用 LLM 会把成本放大 N 倍，普通用户的解读
+    # 走各自的 AI 页面按需触发，不参与自动批处理
+    if user_id != ADMIN_USER_ID:
+        logger.debug(f"跳过非管理员账号的自动解读: user={user_id}")
+        return
+
     # 无论本次是否有信号，先作废该日期的旧 AI 分析。
     # 否则信号被重算/清空（如改为空仓、清仓）后，日历回放仍会展示过期的历史解读。
-    cache_key = f"ai:analysis:{strategy_type}:{signal_date}"
+    cache_key = _analysis_key(user_id, strategy_type, signal_date)
     try:
         if redis_mgr.delete(cache_key):
             logger.info(f"已清除过期AI分析: {cache_key}（信号已重新生成）")
@@ -277,11 +366,12 @@ async def _handle_signals(message: dict):
 
     analysis_dicts = [a.model_dump() for a in analyses]
 
-    cache_key = f"ai:analysis:{strategy_type}:{signal_date}"
+    cache_key = _analysis_key(user_id, strategy_type, signal_date)
     redis_mgr.setex(cache_key, 30 * 86400, json.dumps(analysis_dicts, ensure_ascii=False))
 
     rmq.publish("ai.signal.analyzed", {
         "event": "signal_analyzed",
+        "user_id": user_id,
         "strategy_type": strategy_type,
         "signal_date": signal_date,
         "analyses": analysis_dicts,
@@ -298,6 +388,7 @@ async def _fetch_recent_signals(client, strategy_type: str, start_date: str, end
     try:
         resp = await client.get(
             f"{settings.signal_url}/signals/history",
+            headers=_internal_headers(),
             params={"strategy_type": strategy_type, "start_date": start_date, "end_date": end_date},
         )
         body = resp.json()
@@ -561,6 +652,46 @@ async def _build_signal_contexts(signals: list[dict], strategy_type: str = "") -
 # REST API
 # ============================================================
 
+@app.post("/internal/users/{user_id}/purge")
+async def purge_user_data(
+    user_id: int,
+    x_internal_token: str | None = Header(None, alias="X-Internal-Token"),
+):
+    """清理已删除账号在 AI 库里的个人数据（仅服务间调用）
+
+    AI 配置、对话记录、解读缓存都存放在 db3 的 user:{id}: 前缀下；账号删除后 id
+    可能被再次分配（库还原、序列回退），残留数据会让新账号看到别人的分析与对话。
+    """
+    token = getattr(settings, "internal_token", "") or ""
+    if not token or x_internal_token != token:
+        raise HTTPException(status_code=401, detail="缺少内部凭证")
+    if int(user_id) <= 0:
+        raise HTTPException(status_code=400, detail="用户 ID 非法")
+    pattern = f"{user_scope(int(user_id))}:*"
+    deleted = 0
+    try:
+        # delete 失败只返回 0 不抛异常，每轮删完再扫一次确认，有残留就报错
+        for _ in range(3):
+            batch: list[str] = []
+            for key in redis_mgr.scan_iter(match=pattern, count=200):
+                batch.append(key)
+                if len(batch) >= 200:
+                    deleted += redis_mgr.delete(*batch)
+                    batch.clear()
+            if batch:
+                deleted += redis_mgr.delete(*batch)
+            if next(iter(redis_mgr.scan_iter(match=pattern, count=10)), None) is None:
+                break
+        else:
+            raise RuntimeError("AI 个人数据未清理干净")
+    except Exception as e:
+        logger.error(f"清理账号 AI 数据失败: user={user_id}, {e}")
+        raise HTTPException(status_code=500, detail=f"清理账号 AI 数据失败: {e}")
+    deleted = int(deleted or 0)
+    logger.info(f"账号 AI 数据已清理: user={user_id} redis_keys={deleted}")
+    return {"code": 200, "data": {"redis_keys": deleted}}
+
+
 @app.get("/health")
 async def health_check():
     checks = {}
@@ -605,17 +736,20 @@ class AnalyzeRequest(BaseModel):
 
 
 @app.post("/api/ai/analyze-signal")
-async def analyze_signal(request: AnalyzeRequest):
-    """解读信号"""
+async def analyze_signal(request: AnalyzeRequest, authorization: str | None = Header(None, alias="Authorization")):
+    """解读信号（缓存未命中时用当前用户自己的模型）"""
+    user = _require_user(authorization)
     try:
-        if not analyzer:
-            raise HTTPException(status_code=503, detail="AI 服务未就绪，请检查 LLM 配置")
-
         signal_date = request.signal_date or datetime.now().strftime("%Y-%m-%d")
-        cache_key = f"ai:analysis:{request.strategy_type}:{signal_date}"
+        # 解读结果跟随账号：信号本身按账号计算，解读不能跨账号复用
+        cache_key = _analysis_key(user.user_id, request.strategy_type, signal_date)
         cached = redis_mgr.get(cache_key)
         if cached:
             return success_response(data={"analyses": json.loads(cached)})
+
+        analyzer_for_user = _get_stack(user.user_id)["analyzer"]
+        if not analyzer_for_user:
+            raise HTTPException(status_code=503, detail="AI 服务未就绪，请先在设置页配置自己的模型提供商")
 
         # 从信号通知服务获取信号（信号存在其 Redis DB 1 中）
         signals = await _fetch_signals_from_signal_service(request.strategy_type, signal_date)
@@ -623,7 +757,7 @@ async def analyze_signal(request: AnalyzeRequest):
             return success_response(data={"analyses": [], "message": "当日无信号"})
 
         contexts = await _build_signal_contexts(signals, request.strategy_type)
-        analyses = await analyzer.analyze_signals(signals, contexts=contexts)
+        analyses = await analyzer_for_user.analyze_signals(signals, contexts=contexts)
         analysis_dicts = [a.model_dump() for a in analyses]
 
         redis_mgr.setex(cache_key, 30 * 86400, json.dumps(analysis_dicts, ensure_ascii=False))
@@ -637,8 +771,14 @@ async def analyze_signal(request: AnalyzeRequest):
 
 
 @app.get("/api/ai/analysis-history")
-async def get_analysis_history(strategy_type: str = "AGGRESSIVE", start_date: str = "", end_date: str = ""):
-    """获取历史AI分析结果（供日历回放）"""
+async def get_analysis_history(
+    strategy_type: str = "AGGRESSIVE",
+    start_date: str = "",
+    end_date: str = "",
+    authorization: str | None = Header(None, alias="Authorization"),
+):
+    """获取当前账号的历史AI分析结果（供日历回放）"""
+    user = _require_user(authorization)
     try:
         results = []
         # 遍历日期范围，从 Redis 缓存读取
@@ -648,7 +788,7 @@ async def get_analysis_history(strategy_type: str = "AGGRESSIVE", start_date: st
         current = start
         while current <= end:
             date_str = current.strftime("%Y-%m-%d")
-            cache_key = f"ai:analysis:{strategy_type}:{date_str}"
+            cache_key = _analysis_key(user.user_id, strategy_type, date_str)
             cached = redis_mgr.get(cache_key)
             if cached:
                 analyses = json.loads(cached)
@@ -775,13 +915,10 @@ class DailyReviewRequest(BaseModel):
 
 
 @app.post("/api/ai/daily-review")
-async def daily_review(request: DailyReviewRequest):
-    """生成每日复盘报告"""
+async def daily_review(request: DailyReviewRequest, authorization: str | None = Header(None, alias="Authorization")):
+    """生成每日复盘报告（缓存未命中时用当前用户自己的模型）"""
+    user = _require_user(authorization)
     try:
-        # 复盘走默认客户端（analyzer 可能由信号专用客户端兜底而存在），两者都要就绪
-        if not analyzer or not llm_client:
-            raise HTTPException(status_code=503, detail="AI 服务未就绪，请检查 LLM 配置")
-
         review_date = request.date or datetime.now().strftime("%Y-%m-%d")
 
         cache_key = f"ai:review:{review_date}"
@@ -789,13 +926,18 @@ async def daily_review(request: DailyReviewRequest):
         if cached:
             return success_response(data=json.loads(cached))
 
+        stack = _get_stack(user.user_id)
+        review_client = stack["client"]
+        if not review_client:
+            raise HTTPException(status_code=503, detail="AI 服务未就绪，请先在设置页配置自己的模型提供商")
+
         from .daily_reviewer import DailyReviewer, DailyReviewDataCollector
         collector = DailyReviewDataCollector(
             settings.strategy_url, settings.data_collector_url, settings.signal_url
         )
         market_data = await collector.collect(review_date)
 
-        reviewer = DailyReviewer(llm_client)
+        reviewer = DailyReviewer(review_client)
         report = await reviewer.generate_review(market_data)
 
         # 生成失败的报告（model=error）只含错误文本，缓存 30 天会让偶发故障长期固化
@@ -812,28 +954,49 @@ async def daily_review(request: DailyReviewRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-AI_CONFIG_KEY = "ai:config"
+# 历史全局键，仅用于迁移到管理员账号
+LEGACY_AI_CONFIG_KEY = "ai:config"
 
 
-def _load_ai_config() -> dict:
-    """从 Redis 加载 AI 配置，合并环境变量默认值"""
-    defaults = {
-        "provider": settings.ai_provider,
-        "api_key": settings.ai_api_key,
-        "base_url": settings.ai_base_url,
-        "model": settings.ai_model,
-        "temperature": settings.ai_temperature,
-        "max_tokens": settings.ai_max_tokens,
-        "ollama_base_url": settings.ollama_base_url,
-        "ollama_model": settings.ollama_model,
-    }
+def _ai_config_key(user_id: int) -> str:
+    return f"{user_scope(user_id)}:ai:config"
+
+
+def _load_ai_config(user_id: int = ADMIN_USER_ID) -> dict:
+    """从 Redis 加载指定用户的 AI 配置，合并默认值
+
+    管理员默认值取环境变量（语义等同系统默认）；普通用户不继承管理员的
+    api_key/base_url/model，只共享 Ollama 服务地址（本地基础设施，不是个人凭据）。
+    """
+    if user_id == ADMIN_USER_ID:
+        defaults = {
+            "provider": settings.ai_provider,
+            "api_key": settings.ai_api_key,
+            "base_url": settings.ai_base_url,
+            "model": settings.ai_model,
+            "temperature": settings.ai_temperature,
+            "max_tokens": settings.ai_max_tokens,
+            "ollama_base_url": settings.ollama_base_url,
+            "ollama_model": settings.ollama_model,
+        }
+    else:
+        defaults = {
+            "provider": "",
+            "api_key": "",
+            "base_url": "",
+            "model": "",
+            "temperature": settings.ai_temperature,
+            "max_tokens": settings.ai_max_tokens,
+            "ollama_base_url": settings.ollama_base_url,
+            "ollama_model": settings.ollama_model,
+        }
     try:
-        raw = redis_mgr.get(AI_CONFIG_KEY)
+        raw = redis_mgr.get(_ai_config_key(user_id))
         if raw:
             saved = json.loads(raw)
             defaults.update(saved)
     except Exception as e:
-        logger.warning(f"加载 AI 配置失败: {e}")
+        logger.warning(f"加载 AI 配置失败(user={user_id}): {e}")
 
     # 修复 Ollama URL：Docker 容器内 localhost 指向容器自身，需替换为宿主机地址
     _ollama_host = os.environ.get("OLLAMA_HOST", "host.docker.internal")
@@ -843,15 +1006,55 @@ def _load_ai_config() -> dict:
     return defaults
 
 
-def _save_ai_config(config: dict):
-    """保存 AI 配置到 Redis"""
-    redis_mgr.set(AI_CONFIG_KEY, json.dumps(config, ensure_ascii=False))
+def _save_ai_config(user_id: int, config: dict):
+    """保存指定用户的 AI 配置"""
+    redis_mgr.set(_ai_config_key(user_id), json.dumps(config, ensure_ascii=False))
+
+
+def _migrate_legacy_ai_data():
+    """历史全局 AI 配置、提供商、对话归并到管理员账号（幂等）"""
+    try:
+        raw = redis_mgr.get(LEGACY_AI_CONFIG_KEY)
+        if raw:
+            target = _ai_config_key(ADMIN_USER_ID)
+            if redis_mgr.get(target) is None:
+                redis_mgr.set(target, raw)
+                logger.info("历史 AI 配置已迁移到管理员账号")
+            redis_mgr.delete(LEGACY_AI_CONFIG_KEY)
+
+        from .provider_manager import LEGACY_PROVIDERS_KEY, providers_key
+        raw = redis_mgr.get(LEGACY_PROVIDERS_KEY)
+        if raw:
+            target = providers_key(ADMIN_USER_ID)
+            if redis_mgr.get(target) is None:
+                redis_mgr.set(target, raw)
+                logger.info("历史提供商配置已迁移到管理员账号")
+            redis_mgr.delete(LEGACY_PROVIDERS_KEY)
+
+        # 历史对话：ai:conversations / ai:conv:{id} -> user:1:ai:*
+        legacy_list = "ai:conversations"
+        conv_entries = redis_mgr.client.zrange(legacy_list, 0, -1, withscores=True)
+        if conv_entries:
+            admin_prefix = f"{user_scope(ADMIN_USER_ID)}:ai:conv:"
+            admin_list = f"{user_scope(ADMIN_USER_ID)}:ai:conversations"
+            for raw_id, score in conv_entries:
+                conv_id = raw_id.decode() if isinstance(raw_id, bytes) else raw_id
+                payload = redis_mgr.get(f"ai:conv:{conv_id}")
+                if payload and redis_mgr.get(f"{admin_prefix}{conv_id}") is None:
+                    redis_mgr.setex(f"{admin_prefix}{conv_id}", 30 * 86400, payload)
+                redis_mgr.delete(f"ai:conv:{conv_id}")
+                redis_mgr.client.zadd(admin_list, {conv_id: score})
+            redis_mgr.delete(legacy_list)
+            logger.info(f"历史 AI 对话已迁移到管理员账号: {len(conv_entries)} 个")
+    except Exception as e:
+        logger.warning(f"迁移历史 AI 数据失败: {e}")
 
 
 @app.get("/api/ai/config")
-async def get_config():
-    """获取 AI 配置"""
-    config = _load_ai_config()
+async def get_config(authorization: str | None = Header(None, alias="Authorization")):
+    """获取当前用户自己的 AI 配置"""
+    user = _require_user(authorization)
+    config = _load_ai_config(user.user_id)
     api_key = config.get("api_key", "")
     masked_key = ""
     if api_key:
@@ -888,9 +1091,9 @@ class UpdateConfigRequest(BaseModel):
 
 
 @app.put("/api/ai/config")
-async def update_config(request: UpdateConfigRequest):
-    """更新 AI 配置"""
-    global llm_client, signal_llm_client, analyzer
+async def update_config(request: UpdateConfigRequest, authorization: str | None = Header(None, alias="Authorization")):
+    """更新当前用户自己的 AI 配置"""
+    user = _require_user(authorization)
     try:
         config = request.model_dump()
 
@@ -899,58 +1102,13 @@ async def update_config(request: UpdateConfigRequest):
         if "localhost:11434" in config.get("ollama_base_url", ""):
             config["ollama_base_url"] = f"http://{_ollama_host}:11434"
 
-        _save_ai_config(config)
+        _save_ai_config(user.user_id, config)
 
-        # 重新初始化 LLM 客户端（信号分析专用模型优先，默认模型失败不阻断）
-        signal_llm_client_temp = None
-        llm_client_temp = None
-
-        # 1. 信号分析专用客户端
-        signal_provider = config.get("signal_analysis_provider", "")
-        signal_model = config.get("signal_analysis_model", "")
-        if signal_provider and signal_model:
-            try:
-                if signal_provider == "ollama":
-                    signal_llm_client_temp = ModelAdapterFactory.create(
-                        provider="ollama",
-                        ollama_base_url=config["ollama_base_url"],
-                        ollama_model=signal_model,
-                    )
-                else:
-                    provider_mgr = _get_provider_mgr()
-                    provider_config = provider_mgr.get(signal_provider)
-                    if provider_config and provider_config.api_key:
-                        signal_llm_client_temp = ModelAdapterFactory.create(
-                            provider="openai",
-                            api_key=provider_config.api_key,
-                            base_url=provider_config.base_url,
-                            model=signal_model,
-                        )
-            except Exception as e:
-                logger.warning(f"信号分析专用客户端更新失败: {e}")
-
-        # 2. 默认客户端
-        try:
-            llm_args = _resolve_default_llm_args(config)
-            if llm_args:
-                llm_client_temp = ModelAdapterFactory.create(
-                    ollama_base_url=config["ollama_base_url"],
-                    ollama_model=config["ollama_model"],
-                    **llm_args,
-                )
-        except Exception as e:
-            logger.warning(f"默认 LLM 客户端更新失败（信号分析不受影响）: {e}")
-
-        # 3. 应用更新
-        if signal_llm_client_temp:
-            signal_llm_client = signal_llm_client_temp
-        if llm_client_temp:
-            llm_client = llm_client_temp
-        if signal_llm_client or llm_client:
-            analyzer = SignalAnalyzer(signal_llm_client or llm_client)
-            logger.info(f"LLM 客户端已更新: signal_analyzer={'ready' if signal_llm_client else 'fallback'}")
-        else:
-            logger.error("所有 LLM 客户端更新均失败")
+        # 丢弃该用户的运行时缓存；管理员额外重建后台任务使用的全局客户端
+        await _invalidate_stack(user.user_id)
+        if user.user_id == ADMIN_USER_ID:
+            await _reinit_admin_llm()
+            logger.info("管理员 AI 配置已更新，后台任务客户端已重建")
 
         api_key = config.get("api_key", "")
         masked_key = ""
@@ -984,21 +1142,18 @@ async def list_models(base_url: str = ""):
 # 提供商管理
 # ============================================================
 
-provider_mgr = None
-
-def _get_provider_mgr():
-    global provider_mgr
-    if provider_mgr is None:
-        from .provider_manager import ProviderManager, ProviderConfig
-        provider_mgr = ProviderManager(redis_mgr.client)
-    return provider_mgr
+def _get_provider_mgr(user_id: int):
+    """提供商管理器按用户创建（轻量对象，只持有 redis 连接与 user_id）"""
+    from .provider_manager import ProviderManager
+    return ProviderManager(redis_mgr.client, user_id)
 
 
 @app.get("/api/ai/providers")
-async def list_providers(configured_only: bool = False):
-    """获取提供商列表"""
+async def list_providers(configured_only: bool = False, authorization: str | None = Header(None, alias="Authorization")):
+    """获取当前用户的提供商列表"""
+    user = _require_user(authorization)
     try:
-        mgr = _get_provider_mgr()
+        mgr = _get_provider_mgr(user.user_id)
         if configured_only:
             providers = mgr.get_configured()
         else:
@@ -1010,10 +1165,11 @@ async def list_providers(configured_only: bool = False):
 
 
 @app.get("/api/ai/providers/{provider_id}")
-async def get_provider(provider_id: str):
+async def get_provider(provider_id: str, authorization: str | None = Header(None, alias="Authorization")):
     """获取单个提供商"""
+    user = _require_user(authorization)
     try:
-        mgr = _get_provider_mgr()
+        mgr = _get_provider_mgr(user.user_id)
         provider = mgr.get(provider_id)
         if not provider:
             raise HTTPException(status_code=404, detail="提供商不存在")
@@ -1034,11 +1190,12 @@ class SaveProviderRequest(BaseModel):
 
 
 @app.post("/api/ai/providers")
-async def save_provider(request: SaveProviderRequest):
-    """保存提供商配置"""
+async def save_provider(request: SaveProviderRequest, authorization: str | None = Header(None, alias="Authorization")):
+    """保存当前用户的提供商配置"""
+    user = _require_user(authorization)
     try:
         from .provider_manager import ProviderConfig, ModelInfo
-        mgr = _get_provider_mgr()
+        mgr = _get_provider_mgr(user.user_id)
 
         models = [ModelInfo(**m) for m in request.models]
         config = ProviderConfig(
@@ -1049,6 +1206,7 @@ async def save_provider(request: SaveProviderRequest):
             models=models,
         )
         saved = mgr.save(config)
+        await _invalidate_stack(user.user_id)
         return success_response(data=saved.model_dump(), message="提供商已保存")
     except Exception as e:
         logger.error(f"保存提供商失败: {e}")
@@ -1056,12 +1214,14 @@ async def save_provider(request: SaveProviderRequest):
 
 
 @app.delete("/api/ai/providers/{provider_id}")
-async def delete_provider(provider_id: str):
+async def delete_provider(provider_id: str, authorization: str | None = Header(None, alias="Authorization")):
     """删除自定义提供商"""
+    user = _require_user(authorization)
     try:
-        mgr = _get_provider_mgr()
+        mgr = _get_provider_mgr(user.user_id)
         if not mgr.delete(provider_id):
             raise HTTPException(status_code=400, detail="内置提供商不可删除")
+        await _invalidate_stack(user.user_id)
         return success_response(message="提供商已删除")
     except HTTPException:
         raise
@@ -1071,10 +1231,11 @@ async def delete_provider(provider_id: str):
 
 
 @app.post("/api/ai/providers/{provider_id}/test")
-async def test_provider(provider_id: str):
-    """测试提供商连接"""
+async def test_provider(provider_id: str, authorization: str | None = Header(None, alias="Authorization")):
+    """测试提供商连接（用当前用户自己的凭据）"""
+    user = _require_user(authorization)
     try:
-        mgr = _get_provider_mgr()
+        mgr = _get_provider_mgr(user.user_id)
         provider = mgr.get(provider_id)
         if not provider:
             raise HTTPException(status_code=404, detail="提供商不存在")
@@ -1108,39 +1269,32 @@ _CLIENT_CACHE_MAX = 20  # 最大缓存客户端数
 _client_cache: dict[str, BaseLLMClient] = {}
 
 
-def _get_llm_client(provider: str = "", model: str = "") -> BaseLLMClient:
-    """动态获取 LLM 客户端（支持运行时切换提供商）"""
-    global llm_client, analyzer
-
-    # 如果没有指定提供商，使用默认客户端
+def _get_llm_client(user_id: int, provider: str = "", model: str = "") -> BaseLLMClient:
+    """动态获取当前用户的 LLM 客户端（支持运行时切换提供商）"""
+    # 如果没有指定提供商，使用该用户的默认客户端
     if not provider:
-        if llm_client:
-            return llm_client
-        _init_llm()
-        return llm_client
+        return _get_stack(user_id)["client"]
 
     # Ollama 每次都创建新客户端（模型可能切换）
     if provider == "ollama":
-        return _create_ollama_client(model)
+        return _create_ollama_client(user_id, model)
 
-    # 检查缓存
-    cache_key = f"{provider}:{model}"
+    # 检查缓存（缓存键带用户，避免不同用户的凭据互相串用）
+    cache_key = f"{user_id}:{provider}:{model}"
     if cache_key in _client_cache:
         return _client_cache[cache_key]
 
     # 根据提供商创建客户端
     try:
-        provider_mgr = _get_provider_mgr()
+        provider_mgr = _get_provider_mgr(user_id)
         provider_config = provider_mgr.get(provider)
 
         if not provider_config:
-            logger.warning(f"提供商 {provider} 不存在，尝试使用默认配置")
-            if llm_client:
-                return llm_client
-            return None
+            logger.warning(f"提供商 {provider} 不存在(user={user_id})，尝试使用该用户的默认配置")
+            return _get_stack(user_id)["client"]
 
         if not provider_config.api_key:
-            logger.warning(f"提供商 {provider} 未配置 API Key")
+            logger.warning(f"提供商 {provider} 未配置 API Key(user={user_id})")
             return None
 
         client = ModelAdapterFactory.create(
@@ -1160,13 +1314,13 @@ def _get_llm_client(provider: str = "", model: str = "") -> BaseLLMClient:
         return client
     except Exception as e:
         logger.error(f"创建 LLM 客户端失败: {e}")
-        return llm_client
+        return _get_stack(user_id)["client"]
 
 
-def _create_ollama_client(model: str = "") -> BaseLLMClient:
-    """创建 Ollama 客户端"""
+def _create_ollama_client(user_id: int, model: str = "") -> BaseLLMClient:
+    """创建 Ollama 客户端（地址取该用户的配置，默认共享本地服务）"""
     try:
-        provider_mgr = _get_provider_mgr()
+        provider_mgr = _get_provider_mgr(user_id)
         provider_config = provider_mgr.get("ollama")
         ollama_url = provider_config.base_url if provider_config else settings.ollama_base_url
         ollama_model = model or (provider_config.models[0].value if provider_config and provider_config.models else settings.ollama_model)
@@ -1180,24 +1334,20 @@ def _create_ollama_client(model: str = "") -> BaseLLMClient:
         logger.error(f"创建 Ollama 客户端失败: {e}")
         return None
 
-chat_mgr = None
-
-def _get_chat_mgr():
-    global chat_mgr
-    if chat_mgr is None:
-        from .chat_manager import ChatManager
-        chat_mgr = ChatManager(redis_mgr.client)
-    return chat_mgr
+def _get_chat_mgr(user_id: int):
+    """对话管理器按用户创建（轻量对象，键前缀按用户隔离）"""
+    from .chat_manager import ChatManager
+    return ChatManager(redis_mgr.client, user_id)
 
 
 # MCP 工具执行器
 tool_executor = None
 agent = None
 
-def _get_agent(provider: str = "", model: str = ""):
-    """获取 Agent 实例"""
+def _get_agent(user_id: int, provider: str = "", model: str = ""):
+    """获取 Agent 实例（使用指定用户的 LLM 凭据）"""
     global agent, tool_executor
-    client = _get_llm_client(provider, model)
+    client = _get_llm_client(user_id, provider, model)
     if not client:
         return None
     if tool_executor is None:
@@ -1220,10 +1370,11 @@ class ChatRequest(BaseModel):
 
 
 @app.post("/api/ai/chat")
-async def chat(request: ChatRequest):
+async def chat(request: ChatRequest, authorization: str | None = Header(None, alias="Authorization")):
     """对话式投研（非流式，走 Agent 支持工具调用）"""
+    user = _require_user(authorization)
     try:
-        mgr = _get_chat_mgr()
+        mgr = _get_chat_mgr(user.user_id)
         conv_id = request.conversation_id
         save = not request.no_save
 
@@ -1255,7 +1406,7 @@ async def chat(request: ChatRequest):
             context_messages = []
 
         # 通过 Agent 执行（支持工具调用）
-        agent = _get_agent(request.provider, request.model)
+        agent = _get_agent(user.user_id, request.provider, request.model)
         if not agent:
             raise HTTPException(
                 status_code=503,
@@ -1297,20 +1448,23 @@ async def chat(request: ChatRequest):
 
 
 @app.post("/api/ai/chat/stream")
-async def chat_stream(request: ChatRequest):
+async def chat_stream(request: ChatRequest, authorization: str | None = Header(None, alias="Authorization")):
     """流式对话（SSE）- 支持 Agent 工具调用"""
     from fastapi.responses import StreamingResponse
 
+    user = _require_user(authorization)
+    user_id = user.user_id
+
     async def generate():
         try:
-            # 获取 Agent
-            agent = _get_agent(request.provider, request.model)
+            # 获取 Agent（当前用户自己的凭据）
+            agent = _get_agent(user_id, request.provider, request.model)
             if not agent:
                 yield f"data: {json.dumps({'type': 'error', 'data': 'AI 服务未就绪，请先配置模型提供商'})}\n\n"
                 yield f"data: {json.dumps({'type': 'done'})}\n\n"
                 return
 
-            mgr = _get_chat_mgr()
+            mgr = _get_chat_mgr(user_id)
             conv_id = request.conversation_id
             save = not request.no_save
 
@@ -1385,10 +1539,11 @@ async def chat_stream(request: ChatRequest):
 
 
 @app.get("/api/ai/conversations")
-async def list_conversations():
-    """获取对话列表"""
+async def list_conversations(authorization: str | None = Header(None, alias="Authorization")):
+    """获取当前用户的对话列表"""
+    user = _require_user(authorization)
     try:
-        mgr = _get_chat_mgr()
+        mgr = _get_chat_mgr(user.user_id)
         conversations = mgr.list_conversations()
         return success_response(data=[c.model_dump() for c in conversations])
     except Exception as e:
@@ -1397,10 +1552,11 @@ async def list_conversations():
 
 
 @app.get("/api/ai/conversations/{conv_id}")
-async def get_conversation(conv_id: str):
+async def get_conversation(conv_id: str, authorization: str | None = Header(None, alias="Authorization")):
     """获取对话详情"""
+    user = _require_user(authorization)
     try:
-        mgr = _get_chat_mgr()
+        mgr = _get_chat_mgr(user.user_id)
         conv = mgr.get_conversation(conv_id)
         if not conv:
             raise HTTPException(status_code=404, detail="对话不存在")
@@ -1413,22 +1569,32 @@ async def get_conversation(conv_id: str):
 
 
 @app.delete("/api/ai/conversations/{conv_id}")
-async def delete_conversation(conv_id: str):
+async def delete_conversation(conv_id: str, authorization: str | None = Header(None, alias="Authorization")):
     """删除对话"""
+    user = _require_user(authorization)
     try:
-        mgr = _get_chat_mgr()
+        mgr = _get_chat_mgr(user.user_id)
+        if not mgr.get_conversation(conv_id):
+            raise HTTPException(status_code=404, detail="对话不存在")
         mgr.delete_conversation(conv_id)
         return success_response(message="对话已删除")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"删除对话失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/ai/conversations/{conv_id}/export")
-async def export_conversation(conv_id: str, fmt: str = "markdown"):
+async def export_conversation(
+    conv_id: str,
+    fmt: str = "markdown",
+    authorization: str | None = Header(None, alias="Authorization"),
+):
     """导出对话"""
+    user = _require_user(authorization)
     try:
-        mgr = _get_chat_mgr()
+        mgr = _get_chat_mgr(user.user_id)
         content = mgr.export_conversation(conv_id, fmt)
         if not content:
             raise HTTPException(status_code=404, detail="对话不存在")

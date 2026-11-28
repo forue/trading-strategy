@@ -7,6 +7,8 @@ from typing import Optional
 from pydantic import BaseModel
 from loguru import logger
 
+from shared import user_scope
+
 
 class ModelInfo(BaseModel):
     """模型信息"""
@@ -115,14 +117,25 @@ BUILTIN_PROVIDERS = {
     ),
 }
 
-PROVIDERS_KEY = "ai:providers"
+# 历史全局键，仅用于迁移到管理员账号
+LEGACY_PROVIDERS_KEY = "ai:providers"
+
+
+def providers_key(user_id: int) -> str:
+    """每个用户一套自己的提供商凭据，互不覆盖"""
+    return f"{user_scope(user_id)}:ai:providers"
 
 
 class ProviderManager:
-    """提供商管理器"""
+    """提供商管理器（按用户隔离：内置模板共享，API Key 各自独立）"""
 
-    def __init__(self, redis_client):
+    def __init__(self, redis_client, user_id: int):
         self.redis = redis_client
+        self.user_id = user_id
+
+    @property
+    def key(self) -> str:
+        return providers_key(self.user_id)
 
     def get_all(self) -> list[ProviderConfig]:
         """获取所有提供商（合并内置 + 自定义）"""
@@ -137,8 +150,10 @@ class ProviderManager:
                 merged.is_configured = bool(merged.api_key)
                 result.append(merged)
             else:
-                builtin.is_configured = False
-                result.append(builtin)
+                # 必须深拷贝：否则修改 is_configured 会污染全局模板，串到其他用户
+                template = builtin.model_copy(deep=True)
+                template.is_configured = False
+                result.append(template)
 
         # 自定义提供商
         for pid, cfg in saved.items():
@@ -181,8 +196,8 @@ class ProviderManager:
         return True
 
     def _load_saved(self) -> dict[str, ProviderConfig]:
-        """从 Redis 加载"""
-        raw = self.redis.get(PROVIDERS_KEY)
+        """从 Redis 加载当前用户的提供商配置"""
+        raw = self.redis.get(self.key)
         if raw:
             try:
                 data = json.loads(raw)
@@ -191,10 +206,10 @@ class ProviderManager:
                     result[pid] = ProviderConfig(**cfg_data)
                 return result
             except Exception as e:
-                logger.warning(f"加载提供商配置失败: {e}")
+                logger.warning(f"加载提供商配置失败(user={self.user_id}): {e}")
         return {}
 
     def _save_all(self, providers: dict[str, ProviderConfig]):
-        """保存所有到 Redis"""
+        """保存当前用户的所有提供商到 Redis"""
         data = {pid: cfg.model_dump() for pid, cfg in providers.items()}
-        self.redis.set(PROVIDERS_KEY, json.dumps(data, ensure_ascii=False))
+        self.redis.set(self.key, json.dumps(data, ensure_ascii=False))

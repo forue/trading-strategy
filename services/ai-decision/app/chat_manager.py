@@ -10,6 +10,8 @@ from typing import Optional
 from pydantic import BaseModel
 from loguru import logger
 
+from shared import user_scope
+
 
 class ChatMessage(BaseModel):
     """单条消息"""
@@ -34,14 +36,16 @@ class Conversation(BaseModel):
 
 
 class ChatManager:
-    """对话管理器"""
+    """对话管理器（按用户隔离）"""
 
-    CONV_LIST_KEY = "ai:conversations"
-    CONV_PREFIX = "ai:conv:"
     CONV_TTL = 30 * 86400
 
-    def __init__(self, redis_client):
+    def __init__(self, redis_client, user_id: int):
         self.redis = redis_client
+        self.user_id = user_id
+        scope_prefix = f"{user_scope(user_id)}:ai:"
+        self.CONV_LIST_KEY = f"{scope_prefix}conversations"
+        self.CONV_PREFIX = f"{scope_prefix}conv:"
 
     def create_conversation(self, title: str = "", provider: str = "", model: str = "") -> Conversation:
         conv_id = f"conv_{uuid.uuid4().hex[:12]}"

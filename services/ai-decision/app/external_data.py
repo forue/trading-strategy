@@ -437,7 +437,7 @@ async def get_china_interest_rates() -> dict:
 
     # LPR
     try:
-        df = await asyncio.get_event_loop().run_in_executor(None, ak.macro_china_lpr)
+        df = await asyncio.get_event_loop().run_in_executor(None, ak.interest_rate_lpr_em)
         if df is not None and not df.empty:
             result["lpr"] = _df_to_records(df.tail(5))
     except Exception as e:
@@ -453,7 +453,7 @@ async def get_china_interest_rates() -> dict:
 
     # SHIBOR
     try:
-        df = await asyncio.get_event_loop().run_in_executor(None, ak.macro_china_shibor_all)
+        df = await asyncio.get_event_loop().run_in_executor(None, ak.interest_rate_shibor_js)
         if df is not None and not df.empty:
             result["shibor"] = _df_to_records(df.tail(5))
     except Exception as e:
@@ -513,7 +513,7 @@ async def get_margin_trading_data(days: int = 10) -> dict:
 
     # 上海融资融券
     try:
-        df = await asyncio.get_event_loop().run_in_executor(None, ak.macro_china_market_margin_sh)
+        df = await asyncio.get_event_loop().run_in_executor(None, ak.stock_margin_sse_js)
         if df is not None and not df.empty:
             result["shanghai"] = _df_to_records(df.tail(days))
     except Exception as e:
@@ -521,7 +521,7 @@ async def get_margin_trading_data(days: int = 10) -> dict:
 
     # 深圳融资融券
     try:
-        df = await asyncio.get_event_loop().run_in_executor(None, ak.macro_china_market_margin_sz)
+        df = await asyncio.get_event_loop().run_in_executor(None, ak.stock_margin_szse_js)
         if df is not None and not df.empty:
             result["shenzhen"] = _df_to_records(df.tail(days))
     except Exception as e:
@@ -548,13 +548,13 @@ async def get_market_news(source: str = "global", limit: int = 15) -> dict:
     import akshare as ak
     try:
         if source == "global":
-            df = await _run_with_timeout(ak.stock_info_global_em, timeout=20)
+            df = await _run_with_timeout(ak.stock_news_global_em, timeout=20)
         elif source == "ths":
-            df = await _run_with_timeout(ak.stock_info_global_ths, timeout=20)
+            df = await _run_with_timeout(ak.stock_news_global_ths, timeout=20)
         elif source == "sina":
-            df = await _run_with_timeout(ak.stock_info_global_sina, timeout=20)
+            df = await _run_with_timeout(ak.stock_news_global_sina, timeout=20)
         elif source == "cls":
-            df = await _run_with_timeout(ak.stock_info_global_cls, symbol="全部", timeout=20)
+            df = await _run_with_timeout(ak.stock_news_global_cls, symbol="全部", timeout=20)
         else:
             return {"error": f"未知新闻源: {source}"}
 
@@ -614,7 +614,7 @@ async def get_china_us_bond_spread(days: int = 30) -> dict:
         from datetime import datetime, timedelta
         start = (datetime.now() - timedelta(days=days * 2)).strftime("%Y%m%d")
         df = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: ak.bond_zh_us_rate(start_date=start)
+            None, lambda: ak.bond_zh_us_yield_em(start_date=start)
         )
         if df is None or df.empty:
             return {"error": "中美债收益率数据为空"}
@@ -726,7 +726,7 @@ async def _fetch_market_indices_from_em() -> list:
     for attempt in range(2):
         try:
             async with _push2_guard("大盘指数"):
-                df = await _run_with_timeout(ak.stock_zh_index_spot_em, timeout=15)
+                df = await _run_with_timeout(ak.index_zh_spot_em, timeout=15)
             if df is None or df.empty:
                 continue
 
@@ -941,7 +941,7 @@ async def _fetch_cny_midprice(days: int = 25) -> dict:
     start = (datetime.now() - timedelta(days=days * 2)).strftime("%Y%m%d")
     try:
         df = await _run_with_timeout(
-            ak.currency_boc_sina, symbol="美元", start_date=start, end_date=end, timeout=20
+            ak.fx_boc_rate_sina, symbol="美元", start_date=start, end_date=end, timeout=20
         )
     except Exception as e:
         logger.warning(f"人民币中间价获取失败: {e}")
@@ -1092,7 +1092,7 @@ async def get_bond_curve_summary(days: int = 40) -> dict:
 
     start = (datetime.now() - timedelta(days=days * 2)).strftime("%Y%m%d")
     try:
-        df = await _run_with_timeout(ak.bond_zh_us_rate, start_date=start, timeout=25)
+        df = await _run_with_timeout(ak.bond_zh_us_yield_em, start_date=start, timeout=25)
     except Exception as e:
         logger.error(f"获取国债收益率失败: {e}")
         return {"error": str(e)}
@@ -1231,7 +1231,7 @@ async def get_market_fund_structure(days: int = 5) -> dict:
     import akshare as ak
     try:
         async with _push2_guard("全市场资金流"):
-            df = await _run_with_timeout(ak.stock_market_fund_flow, timeout=20)
+            df = await _run_with_timeout(ak.stock_fund_flow_market_em, timeout=20)
     except _Push2Busy as e:
         return {"error": str(e), "unavailable": True}
     except Exception as e:
