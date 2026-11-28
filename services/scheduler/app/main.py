@@ -218,35 +218,57 @@ async def job_collect_data():
 
 
 async def _trigger_strategy_calculation(client: httpx.AsyncClient, allow_stale: bool = False) -> bool:
-    """触发三种策略的轮动信号计算
+    """触发全部启用账号 × 三种策略的信号计算
+
+    策略参数已按账号隔离，因此不能只算一套全局信号：由策略服务在服务端遍历
+    账号（行情快照与历史 K 线只加载一次），调度器只发一个请求，避免 N×3 次
+    HTTP 往返。
 
     Returns:
-        True 表示至少一个策略在"当日数据就绪"的前提下完成计算；
+        True 表示至少一个账号在"当日数据就绪"的前提下完成计算；
         全部因数据未就绪而跳过时返回 False，调用方不应标记为已执行。
     """
-    calculated = False
-    for strategy in ["AGGRESSIVE", "MODERATE", "CONSERVATIVE"]:
-        try:
-            resp = await client.post(
-                f"{settings.strategy_url}/calculate?strategy_type={strategy}"
-                f"&allow_stale={'true' if allow_stale else 'false'}"
-            )
-            payload = resp.json()
-            logger.info(f"策略计算结果 [{strategy}]: {payload.get('message')}")
-            if payload.get("data_ready"):
-                calculated = True
-        except Exception as e:
-            logger.error(f"策略计算失败 [{strategy}]: {e}")
-    return calculated
+    try:
+        resp = await client.post(
+            f"{settings.strategy_url}/calculate/all"
+            f"?allow_stale={'true' if allow_stale else 'false'}",
+            headers=_internal_headers(),
+            timeout=600,  # 多账号 × 3 档策略，超时需显著放宽
+        )
+        payload = resp.json()
+        results = payload.get("data") or []
+        ready = [r for r in results if r.get("data_ready") and not r.get("error")]
+        failed = [r for r in results if r.get("error")]
+        logger.info(
+            f"批量策略计算完成: {len(payload.get('users') or [])} 个账号, "
+            f"{len(ready)}/{len(results)} 次计算就绪, 失败 {len(failed)} 次"
+        )
+        if failed[:3]:
+            logger.warning(f"批量计算失败样例: {failed[:3]}")
+        return bool(ready)
+    except Exception as e:
+        logger.error(f"批量策略计算失败: {e}")
+        return False
+
+
+def _internal_headers() -> dict:
+    """服务间调用凭证：策略服务据此认定调用方为内部调度（数据归属管理员）"""
+    token = getattr(settings, "internal_token", "") or ""
+    return {"X-Internal-Token": token} if token else {}
 
 
 async def _trigger_outcome_backfill(client: httpx.AsyncClient) -> None:
     """触发信号收益回填：为已走完 1/3/5/10 交易日持有期的历史信号结算胜负
 
     复盘页面的命中率/净收益依赖该回填结果，失败不影响主链路。
+    all_users=true 让策略服务遍历所有账号（各自参数口径不同）。
     """
     try:
-        resp = await client.post(f"{settings.strategy_url}/signals/backfill")
+        resp = await client.post(
+            f"{settings.strategy_url}/signals/backfill?all_users=true",
+            headers=_internal_headers(),
+            timeout=300,
+        )
         payload = resp.json()
         logger.info(f"信号收益回填: {payload.get('message')} {payload.get('data')}")
     except Exception as e:
@@ -726,32 +748,29 @@ async def trigger_strategy(allow_stale: bool = True, force: bool = False):
     if not force and await _is_executed(f"signal:calculated:{today}"):
         return {"code": 200, "message": "今日策略已计算，跳过重复触发（force=true 可强制重算）"}
     results = []
-    async with httpx.AsyncClient(timeout=120) as client:
-        for strategy in ["AGGRESSIVE", "MODERATE", "CONSERVATIVE"]:
-            try:
-                resp = await client.post(
-                    f"{settings.strategy_url}/calculate?strategy_type={strategy}"
-                    f"&allow_stale={'true' if allow_stale else 'false'}"
-                    f"&force={'true' if force else 'false'}"
-                )
-                data = resp.json()
-                signal_count = len(data.get("data", []))
+    # 参数按账号隔离后，逐个账号 × 策略计算由策略服务在服务端完成，
+    # 调度器只发一个批量请求（否则 N 个账号要发 N×3 次 HTTP）
+    async with httpx.AsyncClient(timeout=300) as client:
+        try:
+            resp = await client.post(
+                f"{settings.strategy_url}/calculate/all"
+                f"?allow_stale={'true' if allow_stale else 'false'}",
+                headers=_internal_headers(),
+                timeout=600,
+            )
+            payload = resp.json()
+            for item in payload.get("data") or []:
                 results.append({
-                    "strategy": strategy,
-                    "signal_count": signal_count,
-                    "signal_date": data.get("signal_date", ""),
-                    "data_ready": data.get("data_ready", False),
-                    "stale": data.get("stale", False),
-                    "message": data.get("message", ""),
+                    "user_id": item.get("user_id"),
+                    "strategy": item.get("strategy_type"),
+                    "signal_count": item.get("count", 0),
+                    "signal_date": item.get("signal_date", ""),
+                    "data_ready": item.get("data_ready", False),
+                    "error": item.get("error"),
                 })
-                logger.info(f"策略计算结果 [{strategy}]: {signal_count} 条信号")
-            except Exception as e:
-                results.append({
-                    "strategy": strategy,
-                    "signal_count": 0,
-                    "error": str(e),
-                })
-                logger.error(f"策略计算失败 [{strategy}]: {e}")
+        except Exception as e:
+            logger.error(f"批量策略计算失败: {e}")
+            return {"code": 500, "message": f"批量策略计算失败: {e}"}
 
     total_signals = sum(r.get("signal_count", 0) for r in results)
     ready_dates = sorted({r.get("signal_date", "") for r in results if r.get("data_ready")})
