@@ -1,0 +1,28 @@
+<template>
+  <svg class="rs-mark" :width="size" :height="size" viewBox="0 0 64 64" role="img" aria-label="轮动策略">
+    <defs>
+      <linearGradient :id="gradientId" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="var(--accent-primary-soft)" />
+        <stop offset="1" stop-color="var(--accent-primary)" />
+      </linearGradient>
+    </defs>
+    <rect x="1.5" y="1.5" width="61" height="61" rx="15.5" :fill="`url(#${gradientId})`" />
+    <g fill="none" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M16 44 V21 H26 Q32 21 32 27 Q32 33 26 33 H16 M25 33 L33 44" />
+      <path d="M48 24 C45 20 39 20.5 38 24.5 C37 27.5 40 29 43.5 30.5 C47.5 32.5 49 34.5 48 38 C47 42.5 40 44 36.5 41" />
+    </g>
+  </svg>
+</template>
+
+<script setup lang="ts">
+withDefaults(defineProps<{ size?: number | string }>(), { size: 32 })
+
+const gradientId = `rs-mark-${Math.random().toString(36).slice(2, 9)}`
+</script>
+
+<style scoped>
+.rs-mark {
+  display: block;
+  flex-shrink: 0;
+}
+</style>

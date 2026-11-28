@@ -9,9 +9,7 @@
 
     <div class="login-card">
       <div class="login-brand">
-        <div class="brand-icon">
-          <el-icon :size="36"><TrendCharts /></el-icon>
-        </div>
+        <BrandMark class="brand-icon" :size="64" />
         <h1 class="brand-title">A股轮动策略交易系统</h1>
         <p class="brand-subtitle">板块资金轮动 · 三档策略信号 · 智能监控推送</p>
       </div>
@@ -276,19 +274,11 @@ async function handleRegister() {
   margin-bottom: 28px;
 
   .brand-icon {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 64px;
-    height: 64px;
-    border-radius: var(--radius-md);
-    background: var(--accent-primary-light);
-    color: var(--accent-primary);
-    margin-bottom: 16px;
+    margin: 0 auto 16px;
   }
 
   .brand-title {
-    font-size: 18px;
+    font-size: 17px;
     font-weight: 700;
     color: var(--text-primary);
     margin: 0 0 6px;

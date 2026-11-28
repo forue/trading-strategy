@@ -4,7 +4,27 @@ import AutoImport from 'unplugin-auto-import/vite'
 import Components from 'unplugin-vue-components/vite'
 import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
 import { VitePWA } from 'vite-plugin-pwa'
+import { createHash } from 'crypto'
+import { readFileSync } from 'fs'
 import { resolve } from 'path'
+
+// Windows / Chrome 会按完整 URL 缓存已安装 PWA 的图标，固定 URL 换内容不会生效。
+// 用图标文件的内容哈希做版本参数，图标一改 URL 就变，旧缓存自然失效。
+const ICON_FILES = [
+  'public/favicon.ico',
+  'public/brand/rs-mark.svg',
+  'public/brand/rs-mark-dark.svg',
+  'public/brand/rs-mark-16.png',
+  'public/brand/rs-mark-32.png',
+  'public/brand/rs-mark-48.png',
+  'public/brand/rs-mark-192.png',
+  'public/brand/rs-mark-512.png',
+]
+const brandVersion = createHash('sha256')
+  .update(ICON_FILES.map((f) => readFileSync(resolve(__dirname, f))).reduce((a, b) => Buffer.concat([a, b]), Buffer.alloc(0)))
+  .digest('hex')
+  .slice(0, 8)
+const brandUrl = (path: string) => `/${path}?v=${brandVersion}`
 
 export default defineConfig({
   plugins: [
@@ -18,23 +38,30 @@ export default defineConfig({
       resolvers: [ElementPlusResolver()],
       dts: 'src/components.d.ts',
     }),
+    {
+      name: 'brand-icon-version',
+      transformIndexHtml(html: string) {
+        return html.replace(/(href="\/)(favicon\.ico|brand\/rs-mark[^"]*)(")/g,
+          (_m, prefix: string, file: string, suffix: string) => `${prefix}${file}?v=${brandVersion}${suffix}`)
+      },
+    },
     VitePWA({
       registerType: 'autoUpdate',
-      includeAssets: ['pwa-192x192.svg', 'pwa-512x512.svg'],
+      includeAssets: ['favicon.ico', 'pwa-192x192.svg', 'pwa-512x512.svg', 'brand/rs-mark.svg', 'brand/rs-mark-dark.svg', 'brand/rs-mark-16.png', 'brand/rs-mark-32.png', 'brand/rs-mark-48.png', 'brand/rs-mark-192.png', 'brand/rs-mark-512.png'],
       manifest: {
         name: '轮动策略交易系统',
         short_name: '轮动策略',
         description: '板块轮动策略交易系统 - 激进/稳健/保守三种策略',
-        theme_color: '#409eff',
+        theme_color: '#4051E0',
         background_color: '#ffffff',
         display: 'standalone',
         orientation: 'portrait',
         scope: '/',
         start_url: '/',
         icons: [
-          { src: 'pwa-192x192.svg', sizes: '192x192', type: 'image/svg+xml' },
-          { src: 'pwa-512x512.svg', sizes: '512x512', type: 'image/svg+xml' },
-          { src: 'pwa-512x512.svg', sizes: '512x512', type: 'image/svg+xml', purpose: 'any maskable' }
+          { src: brandUrl('brand/rs-mark.svg').slice(1), sizes: 'any', type: 'image/svg+xml', purpose: 'any' },
+          { src: brandUrl('brand/rs-mark-192.png').slice(1), sizes: '192x192', type: 'image/png' },
+          { src: brandUrl('brand/rs-mark-512.png').slice(1), sizes: '512x512', type: 'image/png' }
         ]
       },
       workbox: {
