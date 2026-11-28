@@ -5,6 +5,8 @@ import com.rotation.auth.repository.UserRepository;
 import com.rotation.auth.util.JwtUtil;
 import lombok.Data;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.web.bind.annotation.*;
@@ -57,36 +59,54 @@ public class AuthController {
         data.put("token", token);
         data.put("user", userInfo);
 
-        // 异步触发今日信号计算和数据采集（仅当日首次）
-        triggerSignalCalculationIfNeeded();
+        // 异步触发今日信号计算和数据采集（每个账号当日首次）
+        triggerSignalCalculationIfNeeded(user, token);
 
         return ResponseEntity.ok(Map.of("code", 200, "message", "登录成功", "data", data));
     }
 
-    private void triggerSignalCalculationIfNeeded() {
+    /**
+     * 登录时预热该账号的当日信号。
+     *
+     * 策略参数与信号已按账号隔离，所以计算必须带上当前登录用户的 token（策略引擎据此确定归属）；
+     * 计次标记也按账号区分，否则当天第一个登录的人会把其他账号的计算一并挡掉。
+     * 数据采集是全局动作，仍按自然日只做一次。
+     */
+    private void triggerSignalCalculationIfNeeded(User user, String token) {
         String today = LocalDate.now().toString();
         // 仅用于抑制"登录触发的重复采集/计算"，不能写 signal:calculated:{date}——
         // 那是调度中心标记"当日任务已完成"的键，登录时预置会让定时任务误判为已计算而跳过
-        String flagKey = "signal:login_trigger:" + today;
-
-        if (Boolean.TRUE.equals(redisTemplate.hasKey(flagKey))) {
+        String userFlagKey = "signal:login_trigger:" + today + ":" + user.getId();
+        if (Boolean.TRUE.equals(redisTemplate.hasKey(userFlagKey))) {
             return;
         }
+        redisTemplate.opsForValue().set(userFlagKey, "1", 25, TimeUnit.HOURS);
 
-        redisTemplate.opsForValue().set(flagKey, "1", 25, TimeUnit.HOURS);
+        String collectFlagKey = "signal:login_collect:" + today;
+        boolean needCollect = !Boolean.TRUE.equals(redisTemplate.hasKey(collectFlagKey));
+        if (needCollect) {
+            redisTemplate.opsForValue().set(collectFlagKey, "1", 25, TimeUnit.HOURS);
+        }
 
         new Thread(() -> {
             RestTemplate restTemplate = new RestTemplate();
-            try {
-                restTemplate.postForObject("http://backend-strategy:8002/collect", null, String.class);
-            } catch (Exception ignored) {
+            if (needCollect) {
+                try {
+                    restTemplate.postForObject("http://backend-strategy:8002/collect", null, String.class);
+                } catch (Exception ignored) {
+                }
             }
             try {
+                HttpHeaders headers = new HttpHeaders();
+                headers.setBearerAuth(token);
+                HttpEntity<Void> entity = new HttpEntity<>(headers);
                 String[] strategies = {"AGGRESSIVE", "MODERATE", "CONSERVATIVE"};
                 for (String st : strategies) {
                     // 登录时间不确定（可能盘后/周末），允许回退到最近有数据的交易日；
                     // 回退时策略引擎会以该交易日作为信号日期，不会用旧数据冒充当日信号
-                    restTemplate.postForObject("http://backend-strategy:8002/calculate?strategy_type=" + st + "&allow_stale=true", null, String.class);
+                    restTemplate.postForObject(
+                            "http://backend-strategy:8002/calculate?strategy_type=" + st + "&allow_stale=true",
+                            entity, String.class);
                 }
             } catch (Exception ignored) {
             }
