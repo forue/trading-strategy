@@ -5,10 +5,10 @@ import 'element-plus/dist/index.css'
 import 'element-plus/theme-chalk/dark/css-vars.css'
 import zhCn from 'element-plus/dist/locale/zh-cn.mjs'
 import {
-  DataBoard, Setting, Bell, Wallet, Monitor, VideoPlay, Tools,
+  DataBoard, Setting, Bell, Wallet, Monitor, VideoPlay, Tools, MagicStick,
   TrendCharts, DataLine, DataAnalysis, User, Lock, ArrowDown, Refresh,
-  Search, Plus, Edit, Delete, View, Download, Upload,
-  Check, Close, Warning, InfoFilled, SuccessFilled,
+  Search, Plus, Edit, Delete, View, Download, Upload, ArrowLeft, ArrowRight, ArrowUp,
+  Check, Close, Warning, InfoFilled, SuccessFilled, Star, StarFilled,
   Menu, HomeFilled, Operation, Histogram, PieChart,
   Sunny, Moon,
 } from '@element-plus/icons-vue'
@@ -20,10 +20,10 @@ import './styles/mobile.scss'
 const app = createApp(App)
 
 const icons = {
-  DataBoard, Setting, Bell, Wallet, Monitor, VideoPlay, Tools,
+  DataBoard, Setting, Bell, Wallet, Monitor, VideoPlay, Tools, MagicStick,
   TrendCharts, DataLine, DataAnalysis, User, Lock, ArrowDown, Refresh,
-  Search, Plus, Edit, Delete, View, Download, Upload,
-  Check, Close, Warning, InfoFilled, SuccessFilled,
+  Search, Plus, Edit, Delete, View, Download, Upload, ArrowLeft, ArrowRight, ArrowUp,
+  Check, Close, Warning, InfoFilled, SuccessFilled, Star, StarFilled,
   Menu, HomeFilled, Operation, Histogram, PieChart,
   Sunny, Moon,
 }

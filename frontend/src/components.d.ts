@@ -9,6 +9,7 @@ declare module 'vue' {
   export interface GlobalComponents {
     AiAnalysisPanel: typeof import('./components/AiAnalysisPanel.vue')['default']
     AiSettings: typeof import('./components/AiSettings.vue')['default']
+    BrandMark: typeof import('./components/BrandMark.vue')['default']
     ChatAssistant: typeof import('./components/ChatAssistant.vue')['default']
     ElAlert: typeof import('element-plus/es')['ElAlert']
     ElBadge: typeof import('element-plus/es')['ElBadge']
@@ -32,6 +33,7 @@ declare module 'vue' {
     ElInputNumber: typeof import('element-plus/es')['ElInputNumber']
     ElLink: typeof import('element-plus/es')['ElLink']
     ElOption: typeof import('element-plus/es')['ElOption']
+    ElOptionGroup: typeof import('element-plus/es')['ElOptionGroup']
     ElPagination: typeof import('element-plus/es')['ElPagination']
     ElPopconfirm: typeof import('element-plus/es')['ElPopconfirm']
     ElProgress: typeof import('element-plus/es')['ElProgress']
@@ -50,6 +52,7 @@ declare module 'vue' {
     ElTag: typeof import('element-plus/es')['ElTag']
     ElTimePicker: typeof import('element-plus/es')['ElTimePicker']
     ElTooltip: typeof import('element-plus/es')['ElTooltip']
+    ReplayTaskCard: typeof import('./components/ReplayTaskCard.vue')['default']
     RiskAlertPanel: typeof import('./components/RiskAlertPanel.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']

@@ -4,6 +4,9 @@ import { authApi } from '@/api/auth'
 import { schedulerApi } from '@/api/scheduler'
 import { strategyApi } from '@/api/strategy'
 import { useSignalStore } from '@/stores/signal'
+import { usePermissionStore } from '@/stores/permission'
+import { useAiStore } from '@/stores/ai'
+import { useReplayTaskStore } from '@/stores/replayTask'
 import type { UserInfo, LoginParams } from '@/api/auth'
 import dayjs from 'dayjs'
 import { ElMessage } from 'element-plus'
@@ -71,6 +74,15 @@ export const useUserStore = defineStore('user', () => {
     userInfo.value = res.user
     isLoggedIn.value = true
     localStorage.setItem('token', res.token)
+    // 换账号后重新拉取页面权限，不能沿用上一个会话的缓存
+    usePermissionStore().reset()
+    // AI 侧栏的对话状态、提供商偏好同样是个人数据，登录新账号前必须清掉
+    try {
+      useAiStore().reset()
+    } catch { /* ignore */ }
+    try {
+      useReplayTaskStore().clear()
+    } catch { /* ignore */ }
     
     // 登录后自动连接 WebSocket
     try {
@@ -115,8 +127,17 @@ export const useUserStore = defineStore('user', () => {
     isLoggedIn.value = false
     localStorage.removeItem('token')
     try {
+      usePermissionStore().reset()
+    } catch { /* ignore */ }
+    try {
+      useAiStore().reset()
+    } catch { /* ignore */ }
+    try {
       const signalStore = useSignalStore()
       signalStore.disconnectWebSocket()
+    } catch { /* ignore */ }
+    try {
+      useReplayTaskStore().clear()
     } catch { /* ignore */ }
   }
 

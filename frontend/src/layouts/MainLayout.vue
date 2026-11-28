@@ -1,9 +1,9 @@
 <template>
   <div class="app-container">
-    <!-- 侧栏：默认展开显示全部 11 项，可折叠为 60px 图标轨 -->
+    <!-- 侧栏：默认展开显示当前账号可访问的全部页面，可折叠为 60px 图标轨 -->
     <aside class="sidebar" :class="{ collapsed: sidebarCollapsed }" aria-label="主导航">
       <div class="side-logo">
-        <div class="logo-mark" title="点击展开 / 收起导航" @click="sidebarCollapsed = !sidebarCollapsed">LS</div>
+        <BrandMark class="logo-mark" :size="28" title="点击展开 / 收起导航" @click="sidebarCollapsed = !sidebarCollapsed" />
         <span class="logo-text">轮动策略</span>
         <button
           class="collapse-btn"
@@ -107,7 +107,7 @@
       </button>
     </nav>
 
-    <!-- 移动端「更多」抽屉：包含全部 11 项，无功能缺失 -->
+    <!-- 移动端「更多」抽屉：包含全部可访问项，无功能缺失 -->
     <el-drawer v-model="moreOpen" direction="btt" size="auto" :with-header="false" class="mobile-more-drawer">
       <div class="more-title">全部功能</div>
       <div class="more-grid">
@@ -138,6 +138,9 @@
       </div>
     </div>
     <div class="ai-sidebar-mask" :class="{ visible: aiSidebarOpen }" @click="aiSidebarOpen = false" />
+
+    <!-- 回测任务悬浮卡：挂在布局层，切页面不销毁，进度与结果持续可见 -->
+    <ReplayTaskCard />
   </div>
 </template>
 
@@ -151,7 +154,9 @@ import { useUserStore } from '@/stores/user'
 import { useSignalStore } from '@/stores/signal'
 import { useThemeStore } from '@/stores/theme'
 import { useStrategyStore, STRATEGY_OPTIONS } from '@/stores/strategy'
+import { usePermissionStore } from '@/stores/permission'
 import ChatAssistant from '@/components/ChatAssistant.vue'
+import ReplayTaskCard from '@/components/ReplayTaskCard.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -159,6 +164,7 @@ const userStore = useUserStore()
 const signalStore = useSignalStore()
 const theme = useThemeStore()
 const strategyStore = useStrategyStore()
+const permission = usePermissionStore()
 
 const currentRoute = computed(() => route.path)
 const currentPageTitle = computed(() => (route.meta.title as string) || '仪表盘')
@@ -169,8 +175,8 @@ const aiSidebarOpen = ref(false)
 
 watch(() => route.path, () => { moreOpen.value = false })
 
-// 全部 11 项，按业务域分组，一项不砍
-const navGroups = [
+// 全量导航（含后台管理 3 项），按业务域分组；实际渲染时按账号权限过滤
+const NAV_GROUPS = [
   {
     label: '工作台',
     items: [
@@ -181,6 +187,7 @@ const navGroups = [
     label: '策略与交易',
     items: [
       { path: '/strategy', label: '策略管理', short: '策略', icon: 'Setting' },
+      { path: '/strategy-workshop', label: '策略工坊', short: '工坊', icon: 'MagicStick' },
       { path: '/signals', label: '交易信号', short: '信号', icon: 'Bell' },
       { path: '/fund', label: '资金管理', short: '资金', icon: 'Wallet' },
     ],
@@ -202,11 +209,26 @@ const navGroups = [
       { path: '/settings', label: '系统设置', short: '设置', icon: 'Tools' },
     ],
   },
+  {
+    label: '后台管理',
+    items: [
+      { path: '/admin/users', label: '账号管理', short: '账号', icon: 'User' },
+      { path: '/admin/permissions', label: '页面权限', short: '权限', icon: 'Lock' },
+      { path: '/admin/features', label: '高级功能', short: '配额', icon: 'Operation' },
+    ],
+  },
 ]
 
-const allNavItems = navGroups.flatMap(group => group.items)
-const bottomItems = allNavItems.filter(item =>
-  ['/', '/signals', '/review', '/fund'].includes(item.path)
+// 无权限的分组与条目直接不渲染；普通账号看不到「后台管理」整组
+const navGroups = computed(() =>
+  NAV_GROUPS
+    .map(group => ({ ...group, items: group.items.filter(item => permission.can(item.path)) }))
+    .filter(group => group.items.length > 0)
+)
+
+const allNavItems = computed(() => navGroups.value.flatMap(group => group.items))
+const bottomItems = computed(() =>
+  allNavItems.value.filter(item => ['/', '/signals', '/review', '/fund'].includes(item.path))
 )
 
 function toggleAiSidebar() {

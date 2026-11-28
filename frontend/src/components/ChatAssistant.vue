@@ -37,7 +37,7 @@
     <!-- 消息列表 -->
     <div class="chat-messages" ref="messagesRef">
       <div v-if="currentMessages.length === 0" class="welcome">
-        <div class="welcome-icon">🤖</div>
+        <div class="welcome-icon"><BrandMark :size="48" /></div>
         <div class="welcome-text">AI 投研助手</div>
         <div class="welcome-hint">分析板块 · 解读信号 · 风险预警</div>
         <div class="quick-questions">
@@ -156,7 +156,7 @@ import { Plus, MoreFilled, Delete, Document, Share, User, Promotion, CaretRight,
 import { ElMessage, ElMessageBox } from 'element-plus'
 import MarkdownIt from 'markdown-it'
 import { aiApi } from '@/api/ai'
-import { useAiStore } from '@/stores/ai'
+import { useAiStore, AI_CHAT_STATE_KEY } from '@/stores/ai'
 import type { Conversation, ChatMessage, ProviderConfig } from '@/api/ai'
 
 const md = new MarkdownIt({ html: false, linkify: true, breaks: true })
@@ -237,17 +237,17 @@ watch(chatModel, (val) => {
   aiStore.setProvider(chatProvider.value, val)
 })
 
-// 持久化会话状态到 sessionStorage
-const STATE_KEY = 'ai_chat_state'
+// 持久化会话状态到 sessionStorage：只存对话 id，消息一律从后端按当前账号拉取。
+// 缓存消息会让换账号后的新用户直接看到上一个账号的对话内容。
+const STATE_KEY = AI_CHAT_STATE_KEY
 
 function saveState() {
   try {
-    sessionStorage.setItem(STATE_KEY, JSON.stringify({
-      convId: currentConvId.value,
-      messages: currentMessages.value,
-      provider: chatProvider.value,
-      model: chatModel.value,
-    }))
+    if (!currentConvId.value) {
+      sessionStorage.removeItem(STATE_KEY)
+      return
+    }
+    sessionStorage.setItem(STATE_KEY, JSON.stringify({ convId: currentConvId.value }))
   } catch {}
 }
 
@@ -257,15 +257,10 @@ function restoreState() {
     if (raw) {
       const state = JSON.parse(raw)
       if (state.convId) currentConvId.value = state.convId
-      if (state.messages?.length) currentMessages.value = state.messages
-      if (state.provider) chatProvider.value = state.provider
-      if (state.model) chatModel.value = state.model
     }
   } catch {}
 }
 
-// 消息变化时自动保存
-watch(currentMessages, saveState, { deep: true })
 watch(currentConvId, saveState)
 
 onMounted(async () => {
@@ -311,7 +306,10 @@ async function switchConversation(convId: string) {
     if (conv.model) chatModel.value = conv.model
     await scrollToBottom()
   } catch {
+    // 对话不属于当前账号（换账号后页面上还留着上一个账号的 id）或已删除
     currentMessages.value = []
+    currentConvId.value = ''
+    sessionStorage.removeItem(STATE_KEY)
   }
 }
 
@@ -569,12 +567,7 @@ async function shareAsImage() {
     const header = document.createElement('div')
     header.style.cssText = 'display:flex;align-items:center;gap:12px;margin:0 -16px;padding:20px 24px 16px;border-bottom:1px solid rgba(255,255,255,0.1);background:linear-gradient(135deg,#1a1a2e 0%,#16213e 50%,#0f3460 100%);'
     header.innerHTML = `
-      <div style="width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,#e94560,#533483);display:flex;align-items:center;justify-content:center;flex-shrink:0;">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-          <polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/>
-          <polyline points="16 7 22 7 22 13"/>
-        </svg>
-      </div>
+      <img src="/brand/rs-mark.svg" width="36" height="36" alt="轮动策略" style="flex-shrink:0;" />
       <div>
         <div style="font-size:16px;font-weight:700;color:#fff;letter-spacing:0.5px;">轮动策略</div>
         <div style="font-size:11px;color:rgba(255,255,255,0.55);margin-top:2px;">A股板块轮动量化分析平台</div>
@@ -699,7 +692,7 @@ async function scrollToBottom() {
 
     .welcome {
       text-align: center; padding: 30px 16px;
-      .welcome-icon { font-size: 48px; margin-bottom: 10px; }
+      .welcome-icon { display: flex; justify-content: center; margin-bottom: 10px; }
       .welcome-text { font-size: 18px; font-weight: 600; margin-bottom: 6px; }
       .welcome-hint { font-size: 13px; color: var(--text-tertiary); margin-bottom: 16px; }
       .quick-questions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }

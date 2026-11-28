@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import type { RouteRecordRaw } from 'vue-router'
+import { usePermissionStore } from '@/stores/permission'
 
 const routes: RouteRecordRaw[] = [
   {
@@ -26,6 +27,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '策略管理', icon: 'Setting' },
       },
       {
+        path: 'strategy-workshop',
+        name: 'StrategyWorkshop',
+        component: () => import('@/views/StrategyWorkshop.vue'),
+        meta: { title: '策略工坊', icon: 'MagicStick' },
+      },
+      {
         path: 'signals',
         name: 'Signals',
         component: () => import('@/views/Signals.vue'),
@@ -47,7 +54,8 @@ const routes: RouteRecordRaw[] = [
         path: 'monitor',
         name: 'Monitor',
         component: () => import('@/views/Monitor.vue'),
-        meta: { title: '系统监控', icon: 'Monitor' },
+        // 与 /admin/* 同款角色闸门：系统监控只对管理员开放，不依赖后端授权表兜底
+        meta: { title: '系统监控', icon: 'Monitor', admin: true },
       },
       {
         path: 'data-replay',
@@ -79,6 +87,25 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/views/Settings.vue'),
         meta: { title: '系统设置', icon: 'Tools' },
       },
+      // 后台管理：meta.admin 额外的角色闸门，页面权限配置里也永远是「仅管理员」
+      {
+        path: 'admin/users',
+        name: 'AdminUsers',
+        component: () => import('@/views/admin/AccountAdmin.vue'),
+        meta: { title: '账号管理', icon: 'User', admin: true },
+      },
+      {
+        path: 'admin/permissions',
+        name: 'AdminPermissions',
+        component: () => import('@/views/admin/RoutePermission.vue'),
+        meta: { title: '页面权限', icon: 'Lock', admin: true },
+      },
+      {
+        path: 'admin/features',
+        name: 'AdminFeatures',
+        component: () => import('@/views/admin/FeatureQuota.vue'),
+        meta: { title: '高级功能', icon: 'Operation', admin: true },
+      },
     ],
   },
 ]
@@ -88,14 +115,32 @@ const router = createRouter({
   routes,
 })
 
-router.beforeEach((to, _from, next) => {
-  const token = localStorage.getItem('token')
-  if (to.meta.requiresAuth !== false && !token) {
-    next({ name: 'Login' })
-  } else {
-    next()
-  }
+router.beforeEach(async (to) => {
   document.title = `${to.meta.title || 'A股轮动策略'} - 轮动策略交易系统`
+
+  if (to.meta.requiresAuth === false) {
+    return true
+  }
+
+  const token = localStorage.getItem('token')
+  if (!token) {
+    // 未登录状态清掉上一次会话的权限缓存，避免换账号后沿用旧权限
+    usePermissionStore().reset()
+    return { name: 'Login' }
+  }
+
+  const permission = usePermissionStore()
+  if (!permission.loaded) {
+    await permission.fetchMine()
+  }
+
+  const denied = to.meta.admin ? !permission.isAdmin : !permission.can(to.path)
+  if (denied) {
+    const target = permission.firstAllowed()
+    // 兜底：配置异常导致落点等于目标页时直接放行，避免路由死循环
+    return target === to.path ? true : { path: target }
+  }
+  return true
 })
 
 export default router
