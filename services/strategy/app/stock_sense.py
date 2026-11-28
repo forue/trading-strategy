@@ -17,7 +17,7 @@ import uuid
 from datetime import date, datetime, timedelta
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException
 from loguru import logger
 
 from .config import settings
@@ -46,10 +46,10 @@ FUTURE_BARS = 60            # 结束后展示的后续走势交易日数
 FUTURE_DAYS = 150           # 后续走势的查询跨度（自然日，约 100 个交易日）
 
 SESSION_TTL = 4 * 3600      # 会话过期（秒）
-RECORD_KEY_PREFIX = "stock_sense:records:"
+LEGACY_RECORD_KEY_PREFIX = "stock_sense:records:"   # 改造前的全局键，仅用于迁移
 SESSION_KEY_PREFIX = "stock_sense:session:"
-READY_CODES_KEY = "stock_sense:ready_codes"
-RECENT_CODES_PREFIX = "stock_sense:recent:"
+READY_CODES_KEY = "stock_sense:ready_codes"          # 样本池与预热锁是全局共享资源，不属个人数据
+RECENT_CODES_PREFIX = "stock_sense:recent:"          # 同上，仅迁移时用到
 EXCLUDE_RECENT = 10         # 抽题时排除该用户最近 N 轮训练过的标的，避免连续重复
 WARM_BATCH = 12             # 每轮训练后台预热的标的本数
 WARM_LOCK = "stock_sense:warm_lock"   # 预热互斥（避免并发采集同一批标的）
@@ -300,18 +300,30 @@ def _mark_ready(code: str) -> None:
         pass
 
 
-def _recent_codes(user: str) -> list[str]:
-    """该用户最近几轮抽到的标的（最近的在前，抽题时优先避开）"""
+def _user_prefix(user_id) -> str:
+    """盘感训练个人数据前缀（与策略参数、信号共用 user:{id} 口径）"""
+    return f"user:{int(user_id)}:stock_sense"
+
+
+def _records_key(user_id) -> str:
+    return f"{_user_prefix(user_id)}:records"
+
+
+def _recent_key(user_id) -> str:
+    return f"{_user_prefix(user_id)}:recent"
+
+
+def _recent_codes(user_id) -> list[str]:
+    """该账号最近几轮抽到的标的（最近的在前，抽题时优先避开）"""
     try:
-        return list(redis_mgr.client.lrange(RECENT_CODES_PREFIX + (user or "default"),
-                                            0, EXCLUDE_RECENT - 1) or [])
+        return list(redis_mgr.client.lrange(_recent_key(user_id), 0, EXCLUDE_RECENT - 1) or [])
     except Exception:
         return []
 
 
-def _mark_recent(user: str, code: str) -> None:
+def _mark_recent(user_id, code: str) -> None:
     """记录本轮抽到的标的，供下一轮排除"""
-    key = RECENT_CODES_PREFIX + (user or "default")
+    key = _recent_key(user_id)
     try:
         redis_mgr.client.lpush(key, code)
         redis_mgr.client.ltrim(key, 0, EXCLUDE_RECENT - 1)
@@ -350,13 +362,13 @@ def _pick_candidates(pool: list[dict], recent: list[str]) -> list[dict]:
     return picks or random.sample(pool, min(len(pool), MAX_PICK_ATTEMPTS))
 
 
-def _build_session(user: str) -> dict:
+def _build_session(user_id: int, username: str = "") -> dict:
     """随机抽题并构造会话（含指标预热段）"""
     pool = _fetch_stock_pool()
     if not pool:
         raise HTTPException(status_code=503, detail="股票池不可用，请检查 data-collector 服务")
 
-    recent = _recent_codes(user)
+    recent = _recent_codes(user_id)
     for pick in _pick_candidates(pool, recent):
         bars = _ensure_bars(pick["code"])
         window = _pick_window(bars)
@@ -364,7 +376,7 @@ def _build_session(user: str) -> dict:
             logger.info(f"个股 {pick['code']} 无合规一年区间，重新抽题")
             continue
         _mark_ready(pick["code"])
-        _mark_recent(user, pick["code"])
+        _mark_recent(user_id, pick["code"])
 
         start_idx, end_idx = window
         warmup_start = max(0, start_idx - WARMUP_BARS)
@@ -385,7 +397,8 @@ def _build_session(user: str) -> dict:
 
         return {
             "session_id": uuid.uuid4().hex,
-            "user": user or "default",
+            "user_id": int(user_id),
+            "user": username or str(user_id),
             "code": pick["code"],
             "name": seg[train_start].get("stock_name") or pick.get("name") or pick["code"],
             "bars": seg,
@@ -414,7 +427,7 @@ def _spawn(coro) -> None:
     task.add_done_callback(_bg_tasks.discard)
 
 
-async def _warm_ready(user: str) -> None:
+async def _warm_ready(user_id: int) -> None:
     """后台预热已落库样本
 
     抽题只在已落库标的中选才不会等 AkShare 采集，但初始样本很少（抽来抽去就那几只），
@@ -429,7 +442,7 @@ async def _warm_ready(user: str) -> None:
         if not redis_mgr.client.set(WARM_LOCK, "1", nx=True, ex=300):
             return
         pool = await asyncio.to_thread(_fetch_stock_pool)
-        exclude = set(_recent_codes(user))
+        exclude = set(_recent_codes(user_id))
         codes = [s["code"] for s in pool if s["code"] not in ready and s["code"] not in exclude]
         if not codes:
             return
@@ -710,7 +723,7 @@ def _settle(sess: dict, forced_exit: bool) -> dict:
         "created_at": datetime.now().isoformat(timespec="seconds"),
     }
 
-    key = RECORD_KEY_PREFIX + sess["user"]
+    key = _records_key(sess["user_id"])
     try:
         redis_mgr.client.lpush(key, json.dumps(record, ensure_ascii=False))
         redis_mgr.client.ltrim(key, 0, MAX_RECORDS - 1)
@@ -764,8 +777,8 @@ def _state(sess: dict) -> dict:
     }
 
 
-def _load_records(user: str) -> list[dict]:
-    key = RECORD_KEY_PREFIX + (user or "default")
+def _load_records(user_id) -> list[dict]:
+    key = _records_key(user_id)
     try:
         raw = redis_mgr.client.lrange(key, 0, MAX_RECORDS - 1)
     except Exception as e:
@@ -822,38 +835,160 @@ def _check_view(view: str) -> str:
     return view
 
 
+TRAINING_FEATURE_KEY = "stock_sense_training"
+
+
+async def _consume_training_quota(authorization: str | None) -> dict:
+    """训练入口配额：按 Token 解析出的账号计次（次数由后台「高级功能」页配置）。
+
+    计数与鉴权都在 auth 服务，这里只转发 Token 并把拒绝原因原样透传；
+    请求参数里的 user 是前端本地标识，不能作为计次依据（可被随意改写）。
+    auth 不可达时放行并记 warning —— 认证服务抖动不应该让整个功能不可用。
+    """
+    url = f"{settings.auth_service_url}/api/auth/quota/consume"
+    headers = {"Authorization": authorization} if authorization else {}
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(url, params={"feature": TRAINING_FEATURE_KEY}, headers=headers)
+    except Exception as e:
+        logger.warning(f"盘感训练配额校验跳过（auth 服务不可达）: {e}")
+        return {}
+
+    if resp.status_code == 200:
+        try:
+            return resp.json().get("data") or {}
+        except Exception:
+            return {}
+
+    detail = "配额校验失败"
+    try:
+        body = resp.json()
+        detail = body.get("message") or body.get("detail") or detail
+    except Exception:
+        pass
+    # 401/403/429 语义直接透传，其余按 400 处理，避免把配额错误伪装成服务端故障
+    status = resp.status_code if resp.status_code in (401, 403, 429) else 400
+    raise HTTPException(status_code=status, detail=detail)
+
+
+# ─────────────────────────── 账号归属 ───────────────────────────
+
+def _actor(authorization: str | None):
+    """训练数据归属只认 Token（不再接受 URL/表单里的 username）"""
+    from shared import AuthError, get_current_user
+
+    try:
+        return get_current_user(authorization)
+    except AuthError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+
+
+def _owned_session(sid: str, user_id) -> dict:
+    """按会话 id 取会话，并校验归属
+
+    会话 id 是随机 UUID，但日志/分享链接仍可能泄露，跨账号读取必须拒绝。
+    """
+    sess = _load(sid)
+    owner = int(sess.get("user_id") or 0)
+    if owner != int(user_id):
+        raise HTTPException(status_code=403, detail="无权访问该训练会话")
+    return sess
+
+
+def migrate_legacy_records() -> None:
+    """把改造前的 stock_sense:records:{username} 归并到 user:{id} 名下（幂等）
+
+    username→id 通过 users 表解析；解析不到（账号已删除）就留在旧键里，
+    下次启动再试，绝不猜测归属，避免把甲的数据划给乙。
+    """
+    try:
+        keys = list(redis_mgr.client.scan_iter(match=f"{LEGACY_RECORD_KEY_PREFIX}*"))
+    except Exception as e:
+        logger.warning(f"盘感训练历史数据迁移跳过（Redis 不可用）: {e}")
+        return
+    if not keys:
+        return
+
+    try:
+        from .signal_tracker import _connect
+
+        conn = _connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id, username FROM users")
+                mapping = {row[1]: int(row[0]) for row in cur.fetchall()}
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning(f"盘感训练历史数据迁移跳过（用户表不可用）: {e}")
+        return
+
+    migrated = 0
+    for key in keys:
+        username = str(key)[len(LEGACY_RECORD_KEY_PREFIX):]
+        user_id = mapping.get(username)
+        if not user_id:
+            continue
+        target = _records_key(user_id)
+        try:
+            items = redis_mgr.client.lrange(key, 0, -1) or []
+            if items:
+                # 旧列表本来就是"最近在前"，rpush 保持顺序一致
+                redis_mgr.client.rpush(target, *items)
+                redis_mgr.client.ltrim(target, 0, MAX_RECORDS - 1)
+            redis_mgr.client.delete(key)
+            migrated += 1
+        except Exception as e:
+            logger.warning(f"盘感训练历史数据迁移失败 {key}: {e}")
+    if migrated:
+        logger.info(f"盘感训练历史记录已按账号归并: {migrated} 个账号")
+
+
 @router.post("/start")
-async def start_training(user: str = "default"):
+async def start_training(authorization: str | None = Header(default=None)):
     """开始一轮训练：随机抽标的 + 随机一年区间
+
+    数据归属只认 Token：历史上 user 由前端 URL 传入，改个用户名就能读到
+    别人的训练记录，等于没有隔离。
 
     抽题包含 InfluxDB 查询与（必要时）AkShare 采集的同步阻塞 IO，放线程池执行。
     """
-    sess = await asyncio.to_thread(_build_session, user)
+    actor = _actor(authorization)
+    quota = await _consume_training_quota(authorization)
+    sess = await asyncio.to_thread(_build_session, actor.user_id, actor.username)
     _save(sess)
-    _spawn(_warm_ready(user))
+    _spawn(_warm_ready(actor.user_id))
     logger.info(f"盘感训练开始: {sess['session_id']} user={sess['user']} 标的={sess['name']}")
     return success_response(
-        data={"session": _state(sess), "chart": _chart(sess, "day")},
+        data={"session": _state(sess), "chart": _chart(sess, "day"), "quota": quota},
         message="训练已开始",
     )
 
 
 @router.get("/{sid}/chart")
-async def get_chart(sid: str, view: str = "day"):
+async def get_chart(
+    sid: str, view: str = "day",
+    authorization: str | None = Header(default=None),
+):
     """按天/周/月视图取当前可见K线（不推进）"""
     _check_view(view)
-    sess = _load(sid)
+    actor = _actor(authorization)
+    sess = _owned_session(sid, actor.user_id)
     return success_response(data={"chart": _chart(sess, view), "session": _state(sess)})
 
 
 @router.post("/{sid}/step")
-async def step(sid: str, unit: str = "day", view: str = "day"):
+async def step(
+    sid: str, unit: str = "day", view: str = "day",
+    authorization: str | None = Header(default=None),
+):
     """推进K线：unit=day 推进一日，unit=week 推进到下一自然周的最后交易日"""
     if unit not in _VALID_UNITS:
         raise HTTPException(status_code=400, detail="unit 仅支持 day/week")
     _check_view(view)
 
-    sess = _load(sid)
+    actor = _actor(authorization)
+    sess = _owned_session(sid, actor.user_id)
     if sess["ended"]:
         raise HTTPException(status_code=400, detail="训练已结束")
 
@@ -897,14 +1032,18 @@ async def step(sid: str, unit: str = "day", view: str = "day"):
 
 
 @router.post("/{sid}/trade")
-async def trade(sid: str, action: str, view: str = "day", ratio: float = 1.0):
+async def trade(
+    sid: str, action: str, view: str = "day", ratio: float = 1.0,
+    authorization: str | None = Header(default=None),
+):
     """买入/卖出（以当前可见最后一根K线收盘价成交，ratio 为仓位比例）"""
     if action not in ("buy", "sell"):
         raise HTTPException(status_code=400, detail="action 仅支持 buy/sell")
     _check_view(view)
     _check_ratio(ratio)
 
-    sess = _load(sid)
+    actor = _actor(authorization)
+    sess = _owned_session(sid, actor.user_id)
     if sess["ended"]:
         raise HTTPException(status_code=400, detail="训练已结束")
 
@@ -965,9 +1104,13 @@ def _clean_lines(raw, total: int) -> list[dict]:
 
 
 @router.post("/{sid}/lines")
-async def save_lines(sid: str, payload: dict):
+async def save_lines(
+    sid: str, payload: dict,
+    authorization: str | None = Header(default=None),
+):
     """保存训练中的划线（整体覆盖）"""
-    sess = _load(sid)
+    actor = _actor(authorization)
+    sess = _owned_session(sid, actor.user_id)
     if sess["ended"]:
         raise HTTPException(status_code=400, detail="训练已结束")
     sess["lines"] = _clean_lines(payload.get("lines"), len(sess["bars"]) - sess["train_start"])
@@ -976,14 +1119,18 @@ async def save_lines(sid: str, payload: dict):
 
 
 @router.post("/{sid}/finish")
-async def finish(sid: str, view: str = "day"):
+async def finish(
+    sid: str, view: str = "day",
+    authorization: str | None = Header(default=None),
+):
     """主动结束训练并按当前K线收盘价平仓结算
 
     结算后日期从脱敏序号还原成真实日期，必须同步返回当前视图的图表，
     否则主图仍是脱敏日期，买卖点会按真实日期找不到位置而挤到首根。
     """
     _check_view(view)
-    sess = _load(sid)
+    actor = _actor(authorization)
+    sess = _owned_session(sid, actor.user_id)
     if sess["ended"]:
         raise HTTPException(status_code=400, detail="训练已结束")
 
@@ -996,17 +1143,18 @@ async def finish(sid: str, view: str = "day"):
     )
 
 
-@router.get("/stats/{user}")
-async def get_stats(user: str):
-    """训练统计汇总 + 历史记录"""
-    return success_response(data=_stats(_load_records(user)))
+@router.get("/stats")
+async def get_stats(authorization: str | None = Header(default=None)):
+    """当前账号的训练统计汇总 + 历史记录"""
+    actor = _actor(authorization)
+    return success_response(data=_stats(_load_records(actor.user_id)))
 
 
 # ─────────────────────────── 复盘 ───────────────────────────
 
-def _find_record(user: str, session_id: str) -> dict | None:
-    """按会话 ID 在历史记录中定位一轮训练"""
-    for r in _load_records(user):
+def _find_record(user_id, session_id: str) -> dict | None:
+    """按会话 ID 在当前账号的历史记录中定位一轮训练"""
+    for r in _load_records(user_id):
         if r.get("session_id") == session_id:
             return r
     return None
@@ -1070,10 +1218,14 @@ def _replay_chart(record: dict, view: str) -> tuple[dict, dict]:
 
 
 @router.get("/replay/{session_id}")
-async def replay(session_id: str, user: str = "default", view: str = "day"):
+async def replay(
+    session_id: str, view: str = "day",
+    authorization: str | None = Header(default=None),
+):
     """复盘一轮已结算的训练：标的、区间、买卖点与K线"""
     _check_view(view)
-    record = _find_record(user, session_id)
+    actor = _actor(authorization)
+    record = _find_record(actor.user_id, session_id)
     if not record:
         raise HTTPException(status_code=404, detail="未找到该训练记录（仅保留最近 200 条）")
     chart, review = await asyncio.to_thread(_replay_chart, record, view)

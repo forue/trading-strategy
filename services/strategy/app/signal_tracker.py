@@ -34,6 +34,9 @@ from psycopg2.extras import execute_values
 from .config import settings
 from .influx_query import influx_query
 
+# 历史数据（改造前的全局信号）统一归属管理员账号
+ADMIN_USER_ID = 1
+
 # 评估窗口：覆盖三档策略的持仓周期（AGGRESSIVE/CONSERVATIVE 10 天、MODERATE 5 天）
 HORIZONS: tuple[int, ...] = (1, 3, 5, 10)
 DEFAULT_HORIZON = 5
@@ -49,6 +52,7 @@ _FALLBACK_SLIPPAGE_RATE = 0.001
 _CREATE_SIGNAL_OUTCOMES = """
 CREATE TABLE IF NOT EXISTS signal_outcomes (
     id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL DEFAULT 1,
     signal_date DATE NOT NULL,
     strategy_type VARCHAR(20) NOT NULL,
     sector_code VARCHAR(20) NOT NULL,
@@ -63,7 +67,8 @@ CREATE TABLE IF NOT EXISTS signal_outcomes (
     net_return DECIMAL(10,6),
     is_win BOOLEAN NOT NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(signal_date, strategy_type, sector_code, direction, horizon_days)
+    CONSTRAINT uk_signal_outcomes_user
+        UNIQUE(user_id, signal_date, strategy_type, sector_code, direction, horizon_days)
 )
 """
 
@@ -74,6 +79,57 @@ ALTER TABLE signal_outcomes
     ADD COLUMN IF NOT EXISTS cost_rate DECIMAL(10,6),
     ADD COLUMN IF NOT EXISTS net_return DECIMAL(10,6)
 """
+
+# 按账号隔离：补 user_id 列并把唯一键扩到 (user_id, ...)。
+# 旧唯一键不含 user_id，会让"两个账号同一天同板块同方向"互相覆盖，
+# 必须先删旧约束再加新约束；历史行由列默认值 1 归到管理员账号。
+#
+# 删旧约束不能写死约束名：PostgreSQL 会把超长自动名截断
+# （如 trade_signals_signal_date_strategy_type_sector_code_directi_key），
+# 写全名时 DROP CONSTRAINT IF EXISTS 不报错但也不删，隔离会静默失效。
+# 因此按定义内容判断——凡是不含 user_id 的唯一约束一律删除，幂等且与库无关。
+_MIGRATE_USER_SCOPED_SIGNALS = [
+    "ALTER TABLE trade_signals ADD COLUMN IF NOT EXISTS user_id BIGINT NOT NULL DEFAULT 1",
+    "ALTER TABLE signal_outcomes ADD COLUMN IF NOT EXISTS user_id BIGINT NOT NULL DEFAULT 1",
+    """DO $$ DECLARE r record;
+    BEGIN
+        FOR r IN SELECT c.conname, pg_get_constraintdef(c.oid) AS def
+                 FROM pg_constraint c
+                 WHERE c.conrelid = 'trade_signals'::regclass AND c.contype = 'u'
+        LOOP
+            IF position('user_id' in r.def) = 0 THEN
+                EXECUTE format('ALTER TABLE trade_signals DROP CONSTRAINT %I', r.conname);
+            END IF;
+        END LOOP;
+    END $$""",
+    """DO $$ DECLARE r record;
+    BEGIN
+        FOR r IN SELECT c.conname, pg_get_constraintdef(c.oid) AS def
+                 FROM pg_constraint c
+                 WHERE c.conrelid = 'signal_outcomes'::regclass AND c.contype = 'u'
+        LOOP
+            IF position('user_id' in r.def) = 0 THEN
+                EXECUTE format('ALTER TABLE signal_outcomes DROP CONSTRAINT %I', r.conname);
+            END IF;
+        END LOOP;
+    END $$""",
+    """DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uk_trade_signals_user') THEN
+            ALTER TABLE trade_signals ADD CONSTRAINT uk_trade_signals_user
+                UNIQUE (user_id, signal_date, strategy_type, sector_code, direction);
+        END IF;
+    END $$""",
+    """DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uk_signal_outcomes_user') THEN
+            ALTER TABLE signal_outcomes ADD CONSTRAINT uk_signal_outcomes_user
+                UNIQUE (user_id, signal_date, strategy_type, sector_code, direction, horizon_days);
+        END IF;
+    END $$""",
+    "CREATE INDEX IF NOT EXISTS idx_trade_signals_user "
+    "ON trade_signals (user_id, signal_date)",
+    "CREATE INDEX IF NOT EXISTS idx_signal_outcomes_user "
+    "ON signal_outcomes (user_id, signal_date)",
+]
 
 # 旧口径数据（T 日收盘基准、未按方向取号、未扣成本）与新口径不可混用，清除后重算。
 # 该表是纯派生数据，可由 trade_signals + 行情完整重建，清除无副作用。
@@ -90,6 +146,7 @@ CREATE INDEX IF NOT EXISTS idx_signal_outcomes_perf
 _CREATE_TRADE_SIGNALS = """
 CREATE TABLE IF NOT EXISTS trade_signals (
     id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL DEFAULT 1,
     signal_date DATE NOT NULL,
     strategy_type VARCHAR(20) NOT NULL,
     sector_code VARCHAR(20) NOT NULL,
@@ -99,7 +156,8 @@ CREATE TABLE IF NOT EXISTS trade_signals (
     score DECIMAL(10,4),
     reason TEXT,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(signal_date, strategy_type, sector_code, direction)
+    CONSTRAINT uk_trade_signals_user
+        UNIQUE(user_id, signal_date, strategy_type, sector_code, direction)
 )
 """
 
@@ -132,10 +190,12 @@ def ensure_schema() -> None:
             cur.execute(_CREATE_TRADE_SIGNALS)
             cur.execute(_CREATE_SIGNAL_OUTCOMES)
             cur.execute(_MIGRATE_SIGNAL_OUTCOMES)
+            for stmt in _MIGRATE_USER_SCOPED_SIGNALS:
+                cur.execute(stmt)
             cur.execute(_PURGE_LEGACY_OUTCOMES)
             cur.execute(_CREATE_SIGNAL_OUTCOMES_INDEX)
         conn.commit()
-        logger.info("信号跟踪表已就绪（trade_signals / signal_outcomes）")
+        logger.info("信号跟踪表已就绪（trade_signals / signal_outcomes，按账号隔离）")
     except Exception as e:
         logger.error(f"创建信号跟踪表失败: {e}")
         raise
@@ -143,8 +203,31 @@ def ensure_schema() -> None:
         conn.close()
 
 
-def save_signals(strategy_type: str, signal_date: str, signals: list[dict]) -> int:
-    """把信号写入 trade_signals（按业务唯一键幂等覆盖）
+def purge_user_rows(user_id: int) -> dict[str, int]:
+    """删除账号在信号表中的全部行（账号删除时调用，幂等）
+
+    只处理没有 users(id) 外键的表：strategy_configs / positions / trades / account_nav
+    带外键会阻止账号删除，账号删得掉就说明那些表本没有它的数据。而 trade_signals、
+    signal_outcomes 没有外键，不主动清理会永久留在库里——一旦该 id 被重新分配
+    （库还原、序列回退都会导致），新账号就会读到属于别人的信号与命中率。
+    """
+    deleted: dict[str, int] = {}
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            for table in ("signal_outcomes", "trade_signals"):
+                cur.execute(f"DELETE FROM {table} WHERE user_id = %s", (int(user_id),))
+                deleted[table] = cur.rowcount
+        conn.commit()
+    finally:
+        conn.close()
+    return deleted
+
+
+def save_signals(
+    user_id: int, strategy_type: str, signal_date: str, signals: list[dict],
+) -> int:
+    """把某个账号的信号写入 trade_signals（按业务唯一键幂等覆盖）
 
     Returns:
         实际写入条数
@@ -158,6 +241,7 @@ def save_signals(strategy_type: str, signal_date: str, signals: list[dict]) -> i
         if not code:
             continue
         rows.append((
+            int(user_id),
             signal_date,
             strategy_type,
             code,
@@ -176,10 +260,10 @@ def save_signals(strategy_type: str, signal_date: str, signals: list[dict]) -> i
         with conn.cursor() as cur:
             execute_values(cur, """
                 INSERT INTO trade_signals
-                    (signal_date, strategy_type, sector_code, sector_name,
+                    (user_id, signal_date, strategy_type, sector_code, sector_name,
                      direction, position_ratio, score, reason)
                 VALUES %s
-                ON CONFLICT (signal_date, strategy_type, sector_code, direction)
+                ON CONFLICT (user_id, signal_date, strategy_type, sector_code, direction)
                 DO UPDATE SET
                     sector_name = EXCLUDED.sector_name,
                     position_ratio = EXCLUDED.position_ratio,
@@ -189,36 +273,42 @@ def save_signals(strategy_type: str, signal_date: str, signals: list[dict]) -> i
         conn.commit()
     finally:
         conn.close()
-    logger.info(f"信号落库: {strategy_type} {signal_date} 共 {len(rows)} 条")
+    logger.info(f"信号落库: user={user_id}, {strategy_type} {signal_date} 共 {len(rows)} 条")
     return len(rows)
 
 
-def sync_from_cache(lookback_days: int = 7) -> dict:
+def sync_from_cache(lookback_days: int = 7, user_id: int | None = None) -> dict:
     """把 Redis 中仍然存活的信号补录到数据库
 
     信号缓存 TTL 为 7 天，所以最多只能补回最近一周的真实信号；用于
     /calculate 落库失败或历史版本未落库时的兜底。
-    """
-    from .main import redis_mgr  # 延迟导入，避免与 main.py 形成导入环
-    from .models import StrategyType
 
+    user_id 为 None 时遍历 Redis 中出现的所有账号（调度器兜底用）。
+    """
+    from .main import _active_user_ids, redis_mgr  # 延迟导入，避免与 main.py 形成导入环
+    from .models import StrategyType
+    from shared import user_scope
+
+    user_ids = [user_id] if user_id is not None else _active_user_ids()
     synced: dict[str, int] = {}
     skipped: list[str] = []
     today = datetime.now().date()
-    for strategy in StrategyType:
-        count = 0
-        for delta in range(lookback_days + 1):
-            date_str = (today - timedelta(days=delta)).strftime("%Y-%m-%d")
-            raw = redis_mgr.get(f"signals:{strategy.value}:{date_str}")
-            if not raw:
-                continue
-            try:
-                signals = json.loads(raw)
-            except (json.JSONDecodeError, TypeError):
-                skipped.append(f"{strategy.value}:{date_str}")
-                continue
-            count += save_signals(strategy.value, date_str, signals)
-        synced[strategy.value] = count
+    for uid in user_ids:
+        scope = user_scope(uid)
+        for strategy in StrategyType:
+            count = 0
+            for delta in range(lookback_days + 1):
+                date_str = (today - timedelta(days=delta)).strftime("%Y-%m-%d")
+                raw = redis_mgr.get(f"{scope}:signals:{strategy.value}:{date_str}")
+                if not raw:
+                    continue
+                try:
+                    signals = json.loads(raw)
+                except (json.JSONDecodeError, TypeError):
+                    skipped.append(f"user:{uid}:{strategy.value}:{date_str}")
+                    continue
+                count += save_signals(uid, strategy.value, date_str, signals)
+            synced[f"user:{uid}:{strategy.value}"] = count
 
     logger.info(f"信号缓存补录完成: {synced}")
     return {"synced": synced, "skipped": skipped}
@@ -283,21 +373,24 @@ def _load_quote_series(start_date: str, end_date: str) -> dict[str, list[tuple[s
     return series
 
 
-def _resolve_cost_rate(strategy_type: str) -> float:
-    """信号往返交易成本率（买入 + 卖出），取自策略配置以与回测口径一致
+def _resolve_cost_rate(strategy_type: str, user_id: int = ADMIN_USER_ID) -> float:
+    """信号往返交易成本率（买入 + 卖出），取自该账号策略配置以与回测口径一致
 
     买入成本 = 佣金 + 滑点；卖出成本 = 佣金 + 印花税 + 滑点。
     复盘是收益率口径，无法套用回测里"佣金 5 元下限"的绝对金额约束，
     该下限对小额订单影响更大，此处不予考虑（页面文案已注明）。
+
+    成本率必须按账号取值：不同用户可配置不同佣金/滑点，用全局值会让
+    复盘净收益与用户自己的回测口径不一致。
     """
     commission = _FALLBACK_COMMISSION_RATE
     stamp_tax = _FALLBACK_STAMP_TAX_RATE
     slippage = _FALLBACK_SLIPPAGE_RATE
     try:
-        from .main import DEFAULT_CONFIGS  # 延迟导入，避免与 main.py 形成导入环
+        from .main import _user_configs  # 延迟导入，避免与 main.py 形成导入环
         from .models import StrategyType
 
-        cfg = DEFAULT_CONFIGS.get(StrategyType(strategy_type))
+        cfg = _user_configs(user_id).get(StrategyType(strategy_type))
         if cfg is not None:
             commission = float(cfg.params.commission_rate)
             stamp_tax = float(cfg.params.stamp_tax_rate)
@@ -307,21 +400,31 @@ def _resolve_cost_rate(strategy_type: str) -> float:
     return 2 * (commission + slippage) + stamp_tax
 
 
-def _fetch_signals(start_date: str, end_date: str) -> list[dict]:
+def _fetch_signals(
+    start_date: str, end_date: str, user_id: int | None = None,
+) -> list[dict]:
     conn = _connect()
     try:
         with conn.cursor() as cur:
-            cur.execute("""
-                SELECT signal_date, strategy_type, sector_code, direction
-                FROM trade_signals
-                WHERE signal_date BETWEEN %s AND %s
-            """, (start_date, end_date))
+            if user_id is None:
+                cur.execute("""
+                    SELECT user_id, signal_date, strategy_type, sector_code, direction
+                    FROM trade_signals
+                    WHERE signal_date BETWEEN %s AND %s
+                """, (start_date, end_date))
+            else:
+                cur.execute("""
+                    SELECT user_id, signal_date, strategy_type, sector_code, direction
+                    FROM trade_signals
+                    WHERE signal_date BETWEEN %s AND %s AND user_id = %s
+                """, (start_date, end_date, int(user_id)))
             return [
                 {
-                    "signal_date": row[0].strftime("%Y-%m-%d"),
-                    "strategy_type": row[1],
-                    "sector_code": row[2],
-                    "direction": row[3],
+                    "user_id": int(row[0]),
+                    "signal_date": row[1].strftime("%Y-%m-%d"),
+                    "strategy_type": row[2],
+                    "sector_code": row[3],
+                    "direction": row[4],
                 }
                 for row in cur.fetchall()
             ]
@@ -329,25 +432,38 @@ def _fetch_signals(start_date: str, end_date: str) -> list[dict]:
         conn.close()
 
 
-def _fetch_existing_outcomes(start_date: str) -> set[tuple]:
+def _fetch_existing_outcomes(
+    start_date: str, user_id: int | None = None,
+) -> set[tuple]:
     """已回填的评估键，避免重复计算"""
     conn = _connect()
     try:
         with conn.cursor() as cur:
-            cur.execute("""
-                SELECT signal_date, strategy_type, sector_code, direction, horizon_days
-                FROM signal_outcomes
-                WHERE signal_date >= %s
-            """, (start_date,))
+            if user_id is None:
+                cur.execute("""
+                    SELECT user_id, signal_date, strategy_type, sector_code,
+                           direction, horizon_days
+                    FROM signal_outcomes
+                    WHERE signal_date >= %s
+                """, (start_date,))
+            else:
+                cur.execute("""
+                    SELECT user_id, signal_date, strategy_type, sector_code,
+                           direction, horizon_days
+                    FROM signal_outcomes
+                    WHERE signal_date >= %s AND user_id = %s
+                """, (start_date, int(user_id)))
             return {
-                (row[0].strftime("%Y-%m-%d"), row[1], row[2], row[3], int(row[4]))
+                (int(row[0]), row[1].strftime("%Y-%m-%d"), row[2], row[3], row[4], int(row[5]))
                 for row in cur.fetchall()
             }
     finally:
         conn.close()
 
 
-def backfill_outcomes(lookback_days: int = DEFAULT_LOOKBACK_DAYS) -> dict:
+def backfill_outcomes(
+    lookback_days: int = DEFAULT_LOOKBACK_DAYS, user_id: int | None = None,
+) -> dict:
     """回填信号后收益
 
     成交假设：T+1 开盘买入，第 T+horizon 个交易日收盘卖出（见模块头口径）。
@@ -360,20 +476,21 @@ def backfill_outcomes(lookback_days: int = DEFAULT_LOOKBACK_DAYS) -> dict:
     end_date = today.strftime("%Y-%m-%d")
     start_date = (today - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
 
-    signals = _fetch_signals(start_date, end_date)
+    signals = _fetch_signals(start_date, end_date, user_id)
     if not signals:
         return {"signals": 0, "evaluated": 0, "pending": 0, "no_quote": 0}
 
-    existing = _fetch_existing_outcomes(start_date)
+    existing = _fetch_existing_outcomes(start_date, user_id)
     series = _load_quote_series(start_date, end_date)
-    cost_rate_cache: dict[str, float] = {}
+    cost_rate_cache: dict[tuple[int, str], float] = {}
 
     rows: list[tuple] = []
     pending_signals: set[tuple] = set()
     no_quote_signals: set[tuple] = set()
     for sig in signals:
+        sig_uid = sig["user_id"]
         sig_key = (
-            sig["signal_date"], sig["strategy_type"],
+            sig_uid, sig["signal_date"], sig["strategy_type"],
             sig["sector_code"], sig["direction"],
         )
         quotes = series.get(sig["sector_code"])
@@ -397,10 +514,11 @@ def backfill_outcomes(lookback_days: int = DEFAULT_LOOKBACK_DAYS) -> dict:
             continue
 
         sign = 1.0 if sig["direction"] == "BUY" else -1.0
-        cost_rate = cost_rate_cache.get(sig["strategy_type"])
+        rate_key = (sig_uid, sig["strategy_type"])
+        cost_rate = cost_rate_cache.get(rate_key)
         if cost_rate is None:
-            cost_rate = _resolve_cost_rate(sig["strategy_type"])
-            cost_rate_cache[sig["strategy_type"]] = cost_rate
+            cost_rate = _resolve_cost_rate(sig["strategy_type"], sig_uid)
+            cost_rate_cache[rate_key] = cost_rate
 
         for horizon in HORIZONS:
             key = sig_key + (horizon,)
@@ -419,7 +537,7 @@ def backfill_outcomes(lookback_days: int = DEFAULT_LOOKBACK_DAYS) -> dict:
             direction_return = raw_return * sign
             net_return = direction_return - cost_rate
             rows.append((
-                sig["signal_date"], sig["strategy_type"], sig["sector_code"],
+                sig_uid, sig["signal_date"], sig["strategy_type"], sig["sector_code"],
                 sig["direction"], horizon, quote_date,
                 round(entry_price, 4), round(exit_price, 4),
                 round(raw_return, 6), round(direction_return, 6),
@@ -433,12 +551,12 @@ def backfill_outcomes(lookback_days: int = DEFAULT_LOOKBACK_DAYS) -> dict:
             with conn.cursor() as cur:
                 execute_values(cur, """
                     INSERT INTO signal_outcomes
-                        (signal_date, strategy_type, sector_code, direction,
+                        (user_id, signal_date, strategy_type, sector_code, direction,
                          horizon_days, end_date, base_close, end_close,
                          forward_return, direction_return, cost_rate,
                          net_return, is_win)
                     VALUES %s
-                    ON CONFLICT (signal_date, strategy_type, sector_code, direction, horizon_days)
+                    ON CONFLICT (user_id, signal_date, strategy_type, sector_code, direction, horizon_days)
                     DO UPDATE SET
                         end_date = EXCLUDED.end_date,
                         base_close = EXCLUDED.base_close,
@@ -481,6 +599,7 @@ def query_performance(
     horizon_days: int = DEFAULT_HORIZON,
     start_date: str | None = None,
     end_date: str | None = None,
+    user_id: int = ADMIN_USER_ID,
 ) -> dict:
     """汇总某策略在指定评估窗口下的收益与命中率指标
 
@@ -522,17 +641,18 @@ def query_performance(
                     AVG(net_return) FILTER (WHERE direction = 'SELL'),
                     AVG(direction_return) FILTER (WHERE direction = 'SELL')
                 FROM signal_outcomes
-                WHERE strategy_type = %s AND horizon_days = %s
+                WHERE user_id = %s AND strategy_type = %s AND horizon_days = %s
                   AND signal_date BETWEEN %s AND %s
-            """, (strategy_type, horizon_days, start, end))
+            """, (int(user_id), strategy_type, horizon_days, start, end))
             agg = cur.fetchone()
 
             # 信号总数：用于说明还有多少信号尚未走完持有期
             cur.execute("""
                 SELECT COUNT(*), MIN(signal_date), MAX(signal_date)
                 FROM trade_signals
-                WHERE strategy_type = %s AND signal_date BETWEEN %s AND %s
-            """, (strategy_type, start, end))
+                WHERE user_id = %s AND strategy_type = %s
+                  AND signal_date BETWEEN %s AND %s
+            """, (int(user_id), strategy_type, start, end))
             total, first_date, last_date = cur.fetchone()
 
             cur.execute("""
@@ -542,10 +662,10 @@ def query_performance(
                        AVG(net_return),
                        AVG(direction_return)
                 FROM signal_outcomes
-                WHERE strategy_type = %s AND horizon_days = %s
+                WHERE user_id = %s AND strategy_type = %s AND horizon_days = %s
                   AND signal_date BETWEEN %s AND %s
                 GROUP BY 1 ORDER BY 1
-            """, (strategy_type, horizon_days, start, end))
+            """, (int(user_id), strategy_type, horizon_days, start, end))
             monthly = cur.fetchall()
 
             cur.execute("""
@@ -557,15 +677,16 @@ def query_performance(
                        AVG(o.direction_return)
                 FROM signal_outcomes o
                 LEFT JOIN trade_signals s
-                  ON s.signal_date = o.signal_date
+                  ON s.user_id = o.user_id
+                 AND s.signal_date = o.signal_date
                  AND s.strategy_type = o.strategy_type
                  AND s.sector_code = o.sector_code
                  AND s.direction = o.direction
-                WHERE o.strategy_type = %s AND o.horizon_days = %s
+                WHERE o.user_id = %s AND o.strategy_type = %s AND o.horizon_days = %s
                   AND o.signal_date BETWEEN %s AND %s
                 GROUP BY o.sector_code
                 ORDER BY COUNT(*) DESC, o.sector_code
-            """, (strategy_type, horizon_days, start, end))
+            """, (int(user_id), strategy_type, horizon_days, start, end))
             sectors = cur.fetchall()
 
             # 曲线横轴取结算日 end_date：收益在第 horizon 个交易日收盘才落袋，
@@ -573,10 +694,10 @@ def query_performance(
             cur.execute("""
                 SELECT end_date, COUNT(*), AVG(net_return), AVG(direction_return)
                 FROM signal_outcomes
-                WHERE strategy_type = %s AND horizon_days = %s
+                WHERE user_id = %s AND strategy_type = %s AND horizon_days = %s
                   AND signal_date BETWEEN %s AND %s
                 GROUP BY 1 ORDER BY 1
-            """, (strategy_type, horizon_days, start, end))
+            """, (int(user_id), strategy_type, horizon_days, start, end))
             daily = cur.fetchall()
     finally:
         conn.close()

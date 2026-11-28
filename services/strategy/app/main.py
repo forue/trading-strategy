@@ -3,9 +3,13 @@ import sys
 import os
 import asyncio
 import calendar
+import hashlib
 import json
+import threading
+import time
 import uuid
 import numpy as np
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException, Header
@@ -15,7 +19,14 @@ from loguru import logger
 # 添加共享库路径
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from shared import success_response
+from shared import (
+    ADMIN_USER_ID,
+    AuthError,
+    get_current_user,
+    set_jwt_secret,
+    success_response,
+    user_scope,
+)
 
 # 常量定义
 TRADING_DAYS_PER_YEAR = 252  # 年化交易日天数
@@ -29,7 +40,7 @@ from .models import (
 from .scoring import scoring_model
 from .influx_query import influx_query
 from .stock_sense import router as stock_sense_router
-from . import signal_tracker
+from . import signal_tracker, workshop
 from shared import RabbitMQManager, RedisManager
 
 # 配置日志
@@ -39,6 +50,46 @@ logger.add(sys.stderr, level=settings.log_level)
 # 初始化连接管理器
 rmq = RabbitMQManager()
 redis_mgr = RedisManager()
+
+# 与 auth 服务共用密钥，本地验签即可识别当前用户
+set_jwt_secret(settings.jwt_secret)
+
+
+def _require_user(authorization: str | None):
+    """解析当前登录用户，缺失或无效时返回 401"""
+    try:
+        return get_current_user(authorization)
+    except AuthError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+
+
+def _resolve_actor(authorization: str | None, internal_token: str | None = None):
+    """确定本次请求的数据归属账号。
+
+    浏览器请求走 JWT；调度器 / mcp-agent / ai-decision 这些没有登录态的内部调用
+    用共享密钥换管理员身份。两者都没有时保持旧行为（视为管理员），避免内部
+    调用方全部 401 —— 一旦配置了 INTERNAL_TOKEN，不带密钥的匿名请求就会被拒。
+    """
+    if settings.internal_token and internal_token and internal_token == settings.internal_token:
+        return _SystemActor()
+    if authorization:
+        return _require_user(authorization)
+    if settings.internal_token:
+        raise HTTPException(status_code=401, detail="缺少访问凭证")
+    return _SystemActor()
+
+
+class _SystemActor:
+    """内部服务调用者：数据归属管理员账号"""
+
+    user_id = ADMIN_USER_ID
+    username = "system"
+    role = "ADMIN"
+
+
+def _ukey(user_id: int, suffix: str) -> str:
+    """用户维度 Redis 键：user:{id}:{suffix}"""
+    return f"{user_scope(user_id)}:{suffix}"
 
 
 def _calc_trade_cost(amount: float, commission_rate: float, stamp_tax_rate: float, slippage_rate: float, is_sell: bool = False) -> dict:
@@ -69,12 +120,27 @@ async def lifespan(app: FastAPI):
     )
     # 必须在 redis 连接建立之后恢复配置：模块导入期调用必然失败（Redis 未连接），
     # 会导致接口保存的策略配置在服务重启后被丢弃
-    _load_configs_from_redis()
+    # 历史全局策略配置先归并到管理员，再预加载管理员配置
+    _migrate_legacy_configs()
+    _user_configs(ADMIN_USER_ID)
+    # 历史全局个人设置归并到管理员账号，避免旧键与新键两套口径并存
+    _migrate_legacy_user_settings()
+    # 盘感训练历史记录：stock_sense:records:{username} -> user:{id}:stock_sense:records
+    try:
+        from .stock_sense import migrate_legacy_records
+
+        migrate_legacy_records()
+    except Exception as e:
+        logger.warning(f"盘感训练历史记录迁移跳过: {e}")
     # 信号跟踪表：供复盘统计（PG 异常时降级，不影响信号生成主链路）
     try:
         signal_tracker.ensure_schema()
     except Exception as e:
         logger.error(f"初始化信号跟踪表失败，复盘统计不可用: {e}")
+    try:
+        workshop.ensure_schema()
+    except Exception as e:
+        logger.error(f"初始化策略工坊表失败，个人策略不可用: {e}")
     yield
     rmq.close()
     redis_mgr.close()
@@ -109,6 +175,21 @@ DEFAULT_CONFIG_TEMPLATES = {
     st: cfg.model_copy(deep=True) for st, cfg in DEFAULT_CONFIGS.items()
 }
 
+# 用户维度策略配置：user:{id}:strategy_configs
+# 进程内缓存按 user_id 分开，且每个用户拿到的是独立深拷贝 —— 早期实现直接原地
+# 修改模块级 DEFAULT_CONFIGS，任何用户改参数都会改写全站配置
+_CONFIGS_CACHE: dict[int, dict[StrategyType, StrategyConfig]] = {}
+_CONFIGS_LOCK = threading.Lock()
+
+
+def _default_configs() -> dict[StrategyType, StrategyConfig]:
+    """返回一份全新的出厂配置（深拷贝，可安全修改）"""
+    return {st: cfg.model_copy(deep=True) for st, cfg in DEFAULT_CONFIG_TEMPLATES.items()}
+
+
+def _configs_key(user_id: int) -> str:
+    return _ukey(user_id, "strategy_configs")
+
 
 def publish_message(routing_key: str, message: dict):
     """发送消息到RabbitMQ（使用共享连接管理器）"""
@@ -116,7 +197,7 @@ def publish_message(routing_key: str, message: dict):
 
 
 @app.get("/health")
-async def health_check():
+def health_check():
     checks = {}
     # InfluxDB
     try:
@@ -146,7 +227,7 @@ async def health_check():
 
 
 @app.get("/trade-day/check")
-async def check_trade_day(date: str = None):
+def check_trade_day(date: str = None):
     """检查指定日期是否为交易日"""
     try:
         target_date = date or datetime.now().strftime("%Y-%m-%d")
@@ -323,13 +404,18 @@ def _load_sector_snapshot(target_date: str, force_refresh: bool = False) -> list
         return []
 
 
-def _regime_key(strategy_type: StrategyType, date_str: str) -> str:
-    """市场状态缓存键（按策略+日期，供连续确认 BEAR 使用）"""
-    return f"market_regime:{strategy_type.value}:{date_str}"
+def _regime_key(strategy_type: StrategyType, date_str: str, user_id: int = ADMIN_USER_ID) -> str:
+    """市场状态缓存键（按账号+策略+日期，供连续确认 BEAR 使用）
+
+    市场状态虽由行情推导，但强依赖各账号自己的参数（熊市阈值），
+    因此不能共享一份，否则乙账号会拿甲账号的 BEAR 判定做连续确认。
+    """
+    return _ukey(user_id, f"market_regime:{strategy_type.value}:{date_str}")
 
 
 def _load_regime_history(
-    strategy_type: StrategyType, before_date: str, days: int = REGIME_HISTORY_DAYS
+    strategy_type: StrategyType, before_date: str,
+    user_id: int = ADMIN_USER_ID, days: int = REGIME_HISTORY_DAYS,
 ) -> list:
     """读取 before_date 之前的市场状态序列（升序，元素为 BULL/NEUTRAL/BEAR）"""
     collected = []
@@ -338,7 +424,7 @@ def _load_regime_history(
             d = (
                 datetime.strptime(before_date, "%Y-%m-%d") - timedelta(days=offset)
             ).strftime("%Y-%m-%d")
-            value = redis_mgr.get(_regime_key(strategy_type, d))
+            value = redis_mgr.get(_regime_key(strategy_type, d, user_id))
             if value:
                 collected.append(value)
     except Exception as e:
@@ -347,10 +433,13 @@ def _load_regime_history(
     return collected
 
 
-def _save_regime(strategy_type: StrategyType, date_str: str, regime: str) -> None:
+def _save_regime(
+    strategy_type: StrategyType, date_str: str, regime: str,
+    user_id: int = ADMIN_USER_ID,
+) -> None:
     """记录当日市场状态，供后续交易日做连续确认"""
     try:
-        redis_mgr.setex(_regime_key(strategy_type, date_str), REGIME_TTL, regime)
+        redis_mgr.setex(_regime_key(strategy_type, date_str, user_id), REGIME_TTL, regime)
     except Exception as e:
         logger.warning(f"保存市场状态失败: {e}")
 
@@ -382,13 +471,15 @@ def _no_data_response(strategy_type: StrategyType, requested_date: str, message:
     }
 
 
-def _load_previous_clear_signals(strategy_type: str, signal_date: str) -> list:
-    """读取该日已缓存的"清仓"卖出信号（direction=SELL 且理由含"清仓"）。
+def _load_previous_clear_signals(
+    strategy_type: str, signal_date: str, user_id: int = ADMIN_USER_ID,
+) -> list:
+    """读取该账号当日已缓存的"清仓"卖出信号（direction=SELL 且理由含"清仓"）。
 
     用于重算得到空仓时保留清仓留痕，避免被空列表覆盖。
     """
     try:
-        raw = redis_mgr.get(f"signals:{strategy_type}:{signal_date}")
+        raw = redis_mgr.get(_ukey(user_id, f"signals:{strategy_type}:{signal_date}"))
         if not raw:
             return []
         return [
@@ -418,8 +509,10 @@ async def calculate_signals(
     signal_date: str = None,
     allow_stale: bool = False,
     force: bool = False,
+    authorization: str | None = Header(None, alias="Authorization"),
+    x_internal_token: str | None = Header(None, alias="X-Internal-Token"),
 ):
-    """触发策略计算，生成买卖信号。
+    """触发当前账号的策略计算，生成买卖信号。
 
     核心约束：信号日期必须与所用板块数据的日期严格一致，禁止用 T-1 数据生成 T 日信号。
 
@@ -432,21 +525,162 @@ async def calculate_signals(
         force: 回退场景下若该日期已有信号，是否强制重算（默认直接返回已有信号，
             避免手动/登录重复触发覆盖当日持仓）
     """
+    actor = _resolve_actor(authorization, x_internal_token)
+    return await _calculate_for_user(
+        actor.user_id, strategy_type, signal_date, allow_stale, force,
+    )
+
+
+@app.post("/calculate/all")
+async def calculate_all_users(
+    signal_date: str = None,
+    allow_stale: bool = True,
+    authorization: str | None = Header(None, alias="Authorization"),
+    x_internal_token: str | None = Header(None, alias="X-Internal-Token"),
+):
+    """为所有启用账号各算一套信号（调度器每日调用）
+
+    每个账号使用自己的策略参数、自己的持仓与 regime 历史，结果写入各自的
+    Redis 键并各自推送。行情快照与历史 K 线在同一次批处理里只加载一遍，
+    避免 N 个账号重复打 InfluxDB。
+    """
+    actor = _resolve_actor(authorization, x_internal_token)
+    if actor.role != "ADMIN":
+        raise HTTPException(status_code=403, detail="仅管理员或内部调度可批量计算")
+
+    user_ids = await asyncio.to_thread(_active_user_ids)
+    if not user_ids:
+        user_ids = [ADMIN_USER_ID]
+
+    shared: dict = {}
+    results = []
+    for uid in user_ids:
+        for st in StrategyType:
+            try:
+                r = await _calculate_for_user(uid, st, signal_date, allow_stale, False, shared)
+                results.append({
+                    "user_id": uid,
+                    "strategy_type": st.value,
+                    "signal_date": r.get("signal_date"),
+                    "count": len(r.get("data") or []),
+                    "data_ready": r.get("data_ready", True),
+                })
+            except Exception as e:
+                logger.error(f"批量计算失败: user={uid}, {st.value}: {e}")
+                results.append({
+                    "user_id": uid, "strategy_type": st.value,
+                    "error": str(e),
+                })
+    logger.info(f"批量信号计算完成: {len(user_ids)} 个账号, {len(results)} 次计算")
+    return {"code": 200, "data": results, "users": user_ids}
+
+
+@app.post("/internal/users/{user_id}/purge")
+async def purge_user_data(
+    user_id: int,
+    x_internal_token: str | None = Header(None, alias="X-Internal-Token"),
+):
+    """清理已删除账号的全部个人数据（仅服务间调用）
+
+    账号被删除后其 id 会被再次分配——库还原、序列回退、甚至同名重建都可能触发，
+    而 Redis 的 user:{id}: 键与 signal_outcomes / trade_signals 里的行都还挂着旧账号
+    的数据，新账号一登录就能看到别人的训练记录、信号缓存和市场状态。所以 auth 删除
+    账号前必须先调这里清干净，清理失败就不允许删号。
+    """
+    if not settings.internal_token or x_internal_token != settings.internal_token:
+        raise HTTPException(status_code=401, detail="缺少内部凭证")
+    if int(user_id) <= 0:
+        raise HTTPException(status_code=400, detail="用户 ID 非法")
+    try:
+        redis_deleted = await asyncio.to_thread(_purge_user_redis, int(user_id))
+        pg_rows = await asyncio.to_thread(signal_tracker.purge_user_rows, int(user_id))
+        pg_rows += await asyncio.to_thread(workshop.purge_user_rows, int(user_id))
+    except Exception as e:
+        logger.error(f"清理账号数据失败: user={user_id}, {e}")
+        raise HTTPException(status_code=500, detail=f"清理账号数据失败: {e}")
+    logger.info(f"账号数据已清理: user={user_id} redis_keys={redis_deleted} pg_rows={pg_rows}")
+    return {"code": 200, "data": {"redis_keys": redis_deleted, "pg_rows": pg_rows}}
+
+
+def _purge_user_redis(user_id: int) -> int:
+    """删除该账号在 Redis 中的全部个人数据，返回删除的键数
+
+    RedisManager.delete 失败时只返回 0 而不抛异常，这里每轮删完再扫一次确认，
+    三轮还有残留就报错——宁可删号失败，也不能让下一个账号继承旧数据。
+    """
+    pattern = f"{user_scope(user_id)}:*"
+    deleted = 0
+    for _ in range(3):
+        batch: list[str] = []
+        for key in redis_mgr.scan_iter(match=pattern, count=200):
+            batch.append(key)
+            if len(batch) >= 200:
+                deleted += redis_mgr.delete(*batch)
+                batch.clear()
+        if batch:
+            deleted += redis_mgr.delete(*batch)
+        if next(iter(redis_mgr.scan_iter(match=pattern, count=10)), None) is None:
+            break
+    else:
+        raise RuntimeError(f"账号 {user_id} 的 Redis 个人数据未清理干净")
+    with _CONFIGS_LOCK:
+        _CONFIGS_CACHE.pop(user_id, None)
+    return int(deleted or 0)
+
+
+def _active_user_ids() -> list[int]:
+    """读取启用状态的账号列表（PG 故障时回退为仅管理员）"""
+    try:
+        from .signal_tracker import _connect
+
+        conn = _connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id FROM users WHERE status = 'ACTIVE' ORDER BY id"
+                )
+                rows = [int(r[0]) for r in cur.fetchall()]
+            return rows or [ADMIN_USER_ID]
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning(f"读取账号列表失败，退化为仅计算管理员: {e}")
+        return [ADMIN_USER_ID]
+
+
+async def _calculate_for_user(
+    user_id: int,
+    strategy_type: StrategyType,
+    signal_date: str = None,
+    allow_stale: bool = False,
+    force: bool = False,
+    shared: dict | None = None,
+) -> dict:
+    """单个账号的策略计算流程
+
+    shared 用于批处理时复用当日行情快照（同一交易日所有账号口径一致）。
+    """
+    scope = user_scope(user_id)
     try:
         requested_date = signal_date or datetime.now().strftime("%Y-%m-%d")
         effective_date = requested_date
         is_stale = False
         note = ""
 
-        config = DEFAULT_CONFIGS.get(strategy_type)
+        config = _user_configs(user_id).get(strategy_type)
         if not config:
             raise HTTPException(status_code=400, detail=f"未知策略类型: {strategy_type}")
 
         # 只取目标日期当天的板块数据，不做任何隐式回退
-        sector_data = (
-            _load_sector_snapshot(requested_date, force_refresh=True)
-            if _is_trade_day(requested_date) else []
-        )
+        if _is_trade_day(requested_date):
+            if shared is not None and requested_date in shared:
+                sector_data = shared[requested_date]
+            else:
+                sector_data = _load_sector_snapshot(requested_date, force_refresh=True)
+                if shared is not None:
+                    shared[requested_date] = sector_data
+        else:
+            sector_data = []
 
         if not sector_data:
             if not allow_stale:
@@ -471,7 +705,7 @@ async def calculate_signals(
             logger.info(note)
 
             # 历史日期已有信号时默认不重算，避免重复触发覆盖当日持仓
-            cached_signals = redis_mgr.get(f"signals:{strategy_type.value}:{effective_date}")
+            cached_signals = redis_mgr.get(f"{scope}:signals:{strategy_type.value}:{effective_date}")
             if cached_signals and not force:
                 try:
                     existing = json.loads(cached_signals)
@@ -501,13 +735,13 @@ async def calculate_signals(
         # 从Redis读取当前持仓
         current_positions = {}
         try:
-            positions_raw = redis_mgr.get(f"positions:{strategy_type.value}")
+            positions_raw = redis_mgr.get(f"{scope}:positions:{strategy_type.value}")
             if positions_raw:
                 current_positions = json.loads(positions_raw)
                 logger.info(f"读取到当前持仓: {len(current_positions)}个板块")
         except Exception as e:
             # 持仓损坏会导致后续按"空仓"处理（跳过调仓缺口、清仓信号丢失），必须显眼告警
-            logger.error(f"读取持仓失败，本次按空仓处理，请检查 positions:{strategy_type.value}: {e}")
+            logger.error(f"读取持仓失败，本次按空仓处理，请检查 {scope}:positions:{strategy_type.value}: {e}")
             current_positions = {}
 
         # 为单日快照补充板块历史K线/资金流序列。
@@ -542,7 +776,7 @@ async def calculate_signals(
             logger.warning(f"补充板块历史序列失败（信号仍可生成，但缺少走势/技术维度）: {e}")
 
         diagnostics: dict = {}
-        regime_history = _load_regime_history(strategy_type, effective_date)
+        regime_history = _load_regime_history(strategy_type, effective_date, user_id)
         signals = scoring_model.calculate_daily_signals(
             sector_data=sector_data,
             strategy_type=strategy_type,
@@ -555,7 +789,7 @@ async def calculate_signals(
 
         # 记录当日市场状态，供后续交易日做连续确认（BEAR 连续确认后才清仓）
         if diagnostics.get("market_regime"):
-            _save_regime(strategy_type, effective_date, diagnostics["market_regime"])
+            _save_regime(strategy_type, effective_date, diagnostics["market_regime"], user_id)
 
         # 填充 id 和 created_at
         now = datetime.now().isoformat()
@@ -601,7 +835,7 @@ async def calculate_signals(
             for code in [s.sector_code for s in sell_signals]:
                 new_positions.pop(code, None)
             redis_mgr.setex(
-                f"positions:{strategy_type.value}", 86400 * 7,
+                f"{scope}:positions:{strategy_type.value}", 86400 * 7,
                 json.dumps(new_positions, ensure_ascii=False),
             )
             logger.info(
@@ -641,7 +875,7 @@ async def calculate_signals(
         # 得到"无信号"，不能用空列表覆盖掉清仓记录，否则日历与推送会丢失"当日已清仓"的证据。
         if not signals:
             previous_clears = _load_previous_clear_signals(
-                strategy_type.value, effective_date
+                strategy_type.value, effective_date, user_id
             )
             signal_dicts, preserved = _merge_clear_records(
                 signal_dicts, signals, previous_clears
@@ -655,12 +889,12 @@ async def calculate_signals(
                 )
 
         redis_mgr.setex(
-            f"signals:{strategy_type.value}:{effective_date}",
+            f"{scope}:signals:{strategy_type.value}:{effective_date}",
             SIGNAL_CACHE_TTL, json.dumps(signal_dicts, ensure_ascii=False),
         )
         # 持仓状态与空仓原因一并缓存，供"今日信号"接口表达空仓语义
         redis_mgr.setex(
-            f"signals:{strategy_type.value}:{effective_date}:status",
+            f"{scope}:signals:{strategy_type.value}:{effective_date}:status",
             SIGNAL_CACHE_TTL,
             json.dumps(
                 {
@@ -678,14 +912,15 @@ async def calculate_signals(
         try:
             await asyncio.to_thread(
                 signal_tracker.save_signals,
-                strategy_type.value, effective_date, signal_dicts,
+                user_id, strategy_type.value, effective_date, signal_dicts,
             )
         except Exception as e:
             logger.error(f"信号落库失败（不影响信号生成）: {e}")
 
-        # 通知信号服务
+        # 通知信号服务：user_id 决定这条信号推给谁，避免把甲账号的信号推给乙
         publish_message("signal.generated", {
             "event": "signals_generated",
+            "user_id": user_id,
             "strategy_type": strategy_type.value,
             "signal_date": effective_date,
             "requested_date": requested_date,
@@ -724,46 +959,82 @@ async def calculate_signals(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _load_configs_from_redis():
-    """从Redis加载策略配置，覆盖内存默认值"""
+def _load_configs_from_redis(user_id: int) -> dict[StrategyType, StrategyConfig]:
+    """加载指定用户的策略配置，缺失项回落到出厂默认值"""
+    configs = _default_configs()
     try:
-        raw = redis_mgr.get("strategy_configs")
+        raw = redis_mgr.get(_configs_key(user_id))
         if raw:
             saved = json.loads(raw)
-            for st in DEFAULT_CONFIGS:
+            for st, cfg in configs.items():
                 if st.value in saved:
                     saved_cfg = saved[st.value]
-                    cfg = DEFAULT_CONFIGS[st]
                     cfg.name = saved_cfg.get("name", cfg.name)
                     cfg.is_active = saved_cfg.get("is_active", cfg.is_active)
                     if "params" in saved_cfg:
                         cfg.params = StrategyParams(**saved_cfg["params"])
-            logger.info("从Redis加载策略配置成功")
+            logger.info(f"从Redis加载策略配置成功: user={user_id}")
     except Exception as e:
-        logger.warning(f"从Redis加载策略配置失败，使用默认值: {e}")
+        logger.warning(f"从Redis加载策略配置失败，使用默认值: user={user_id}, {e}")
+    return configs
 
 
-def _save_configs_to_redis():
-    """将当前策略配置保存到Redis"""
+def _migrate_legacy_configs() -> None:
+    """历史全局策略配置归并到管理员账号（幂等）
+
+    改造前所有用户共用 strategy_configs 单键。这里搬到 user:1 名下，
+    让管理员保留原有参数，其他用户从出厂默认值起步。
+    """
+    try:
+        legacy = redis_mgr.get("strategy_configs")
+        if legacy is None:
+            return
+        target = _configs_key(ADMIN_USER_ID)
+        if redis_mgr.get(target) is None:
+            redis_mgr.set(target, legacy)
+            logger.info(f"历史全局策略配置已归并到管理员账号: strategy_configs -> {target}")
+        redis_mgr.delete("strategy_configs")
+    except Exception as e:
+        logger.warning(f"历史策略配置迁移跳过: {e}")
+
+
+def _user_configs(user_id: int) -> dict[StrategyType, StrategyConfig]:
+    """取用户策略配置（进程内缓存，首次访问从 Redis 加载）"""
+    with _CONFIGS_LOCK:
+        cached = _CONFIGS_CACHE.get(user_id)
+    if cached is not None:
+        return cached
+    configs = _load_configs_from_redis(user_id)
+    with _CONFIGS_LOCK:
+        _CONFIGS_CACHE[user_id] = configs
+    return configs
+
+
+def _save_configs_to_redis(user_id: int) -> None:
+    """将指定用户的策略配置写入 Redis"""
     try:
         data = {}
-        for st, cfg in DEFAULT_CONFIGS.items():
+        for st, cfg in _user_configs(user_id).items():
             data[st.value] = {
                 "name": cfg.name,
                 "is_active": cfg.is_active,
                 "params": cfg.params.model_dump(),
             }
-        redis_mgr.set("strategy_configs", json.dumps(data, ensure_ascii=False))
-        logger.info("策略配置已保存到Redis")
+        redis_mgr.set(_configs_key(user_id), json.dumps(data, ensure_ascii=False))
+        logger.info(f"策略配置已保存到Redis: user={user_id}")
     except Exception as e:
-        logger.error(f"保存策略配置到Redis失败: {e}")
+        logger.error(f"保存策略配置到Redis失败: user={user_id}, {e}")
 
 
 @app.get("/configs")
-async def get_configs():
-    """获取所有策略配置"""
+def get_configs(
+    authorization: str | None = Header(None, alias="Authorization"),
+    x_internal_token: str | None = Header(None, alias="X-Internal-Token"),
+):
+    """获取当前账号的策略配置"""
+    actor = _resolve_actor(authorization, x_internal_token)
     configs = []
-    for cfg in DEFAULT_CONFIGS.values():
+    for cfg in _user_configs(actor.user_id).values():
         c = cfg.model_dump()
         c["params"] = cfg.params.model_dump()
         configs.append(c)
@@ -771,14 +1042,20 @@ async def get_configs():
 
 
 @app.put("/configs/{config_id}")
-async def update_config(config_id: int, config: StrategyConfig):
-    """更新策略配置
+def update_config(
+    config_id: int,
+    config: StrategyConfig,
+    authorization: str | None = Header(None, alias="Authorization"),
+    x_internal_token: str | None = Header(None, alias="X-Internal-Token"),
+):
+    """更新当前账号的策略配置
 
     注意: 前端仅提交部分参数（如 top_n/hold_days/stop_loss 等），
     未提交的参数必须保留原值，否则会退化为 StrategyParams 的默认值，
     导致调仓阈值/止损模式/仓位比例等关键参数被意外重置。
     """
-    for st, cfg in DEFAULT_CONFIGS.items():
+    actor = _resolve_actor(authorization, x_internal_token)
+    for st, cfg in _user_configs(actor.user_id).items():
         if cfg.id == config_id:
             if config.model_fields_set:
                 if "name" in config.model_fields_set and config.name:
@@ -789,21 +1066,27 @@ async def update_config(config_id: int, config: StrategyConfig):
                 incoming = config.params.model_dump(exclude_unset=True)
                 if incoming:
                     cfg.params = cfg.params.model_copy(update=incoming)
-            _save_configs_to_redis()
+            _save_configs_to_redis(actor.user_id)
             return {"code": 200, "message": "配置更新成功", "data": cfg.model_dump()}
     raise HTTPException(status_code=404, detail="配置不存在")
 
 
 @app.post("/configs/{config_id}/reset")
-async def reset_config(config_id: int):
-    """将指定策略配置恢复为出厂默认值（代码内置模板），并持久化到Redis"""
+def reset_config(
+    config_id: int,
+    authorization: str | None = Header(None, alias="Authorization"),
+    x_internal_token: str | None = Header(None, alias="X-Internal-Token"),
+):
+    """将指定策略恢复为出厂默认值（仅影响当前账号）"""
+    actor = _resolve_actor(authorization, x_internal_token)
+    configs = _user_configs(actor.user_id)
     for st, tmpl in DEFAULT_CONFIG_TEMPLATES.items():
         if tmpl.id == config_id:
-            cfg = DEFAULT_CONFIGS[st]
+            cfg = configs[st]
             cfg.name = tmpl.name
             cfg.is_active = tmpl.is_active
             cfg.params = tmpl.params.model_copy(deep=True)
-            _save_configs_to_redis()
+            _save_configs_to_redis(actor.user_id)
             data = cfg.model_dump()
             data["params"] = cfg.params.model_dump()
             return {"code": 200, "message": "配置已恢复默认", "data": data}
@@ -811,19 +1094,26 @@ async def reset_config(config_id: int):
 
 
 @app.get("/signals/today")
-async def get_today_signals(strategy_type: StrategyType):
-    """获取今日信号
+def get_today_signals(
+    strategy_type: StrategyType,
+    authorization: str | None = Header(None, alias="Authorization"),
+    x_internal_token: str | None = Header(None, alias="X-Internal-Token"),
+):
+    """获取当前账号的今日信号
 
     今日无信号时（周末/节假日手动触发生成的信号落在最近交易日），
     自动回退到最近存在信号的日期并返回，响应中标注实际信号日期。
     """
+    actor = _resolve_actor(authorization, x_internal_token)
+    user_id = actor.user_id
+
     def _status_of(date_str: str, rows: list, stale: bool) -> dict:
         """组装响应：持仓状态以信号数组为准，缓存仅补充市场状态与空仓原因"""
         # 以实际信号为准，避免缓存状态与信号不一致时给出误导性结论
         position_status = "HOLD" if rows else "EMPTY"
         regime = ""
         reason = ""
-        raw_status = redis_mgr.get(f"signals:{strategy_type.value}:{date_str}:status")
+        raw_status = redis_mgr.get(_ukey(user_id, f"signals:{strategy_type.value}:{date_str}:status"))
         if raw_status:
             try:
                 parsed = json.loads(raw_status)
@@ -843,7 +1133,7 @@ async def get_today_signals(strategy_type: StrategyType):
         }
 
     today = datetime.now().strftime("%Y-%m-%d")
-    cached = redis_mgr.get(f"signals:{strategy_type.value}:{today}")
+    cached = redis_mgr.get(_ukey(user_id, f"signals:{strategy_type.value}:{today}"))
     if cached:
         return _status_of(today, json.loads(cached), False)
 
@@ -851,9 +1141,9 @@ async def get_today_signals(strategy_type: StrategyType):
         fallback = (
             datetime.strptime(today, "%Y-%m-%d") - timedelta(days=offset)
         ).strftime("%Y-%m-%d")
-        cached = redis_mgr.get(f"signals:{strategy_type.value}:{fallback}")
+        cached = redis_mgr.get(_ukey(user_id, f"signals:{strategy_type.value}:{fallback}"))
         if cached:
-            logger.info(f"今日无信号，回退返回 {fallback} 的信号")
+            logger.info(f"今日无信号，回退返回 {fallback} 的信号: user={user_id}")
             return _status_of(fallback, json.loads(cached), True)
 
     # 无任何信号缓存：区分于"已计算且空仓"
@@ -864,16 +1154,22 @@ async def get_today_signals(strategy_type: StrategyType):
 
 
 @app.get("/positions")
-async def get_positions(strategy_type: StrategyType):
-    """获取指定策略的当前持仓
+def get_positions(
+    strategy_type: StrategyType,
+    authorization: str | None = Header(None, alias="Authorization"),
+    x_internal_token: str | None = Header(None, alias="X-Internal-Token"),
+):
+    """获取当前账号指定策略的持仓
 
-    持仓由策略计算流程写入 Redis（键 positions:{strategy_type}，TTL 7 天），
+    持仓由策略计算流程写入 Redis（键 user:{id}:positions:{strategy_type}，TTL 7 天），
     此处仅做只读暴露，供 AI 决策复盘与前端查询。
     """
+    actor = _resolve_actor(authorization, x_internal_token)
+    key = _ukey(actor.user_id, f"positions:{strategy_type.value}")
     try:
-        raw = redis_mgr.get(f"positions:{strategy_type.value}")
+        raw = redis_mgr.get(key)
     except Exception as e:
-        logger.error(f"读取持仓失败: positions:{strategy_type.value}: {e}")
+        logger.error(f"读取持仓失败: {key}: {e}")
         raise HTTPException(status_code=503, detail="持仓读取失败")
 
     positions = {}
@@ -892,8 +1188,15 @@ async def get_positions(strategy_type: StrategyType):
 
 
 @app.get("/signals/calendar")
-async def get_signal_calendar(strategy_type: StrategyType, month: str = None):
-    """获取信号日历数据"""
+def get_signal_calendar(
+    strategy_type: StrategyType,
+    month: str = None,
+    authorization: str | None = Header(None, alias="Authorization"),
+    x_internal_token: str | None = Header(None, alias="X-Internal-Token"),
+):
+    """获取当前账号的信号日历数据"""
+    actor = _resolve_actor(authorization, x_internal_token)
+    scope = user_scope(actor.user_id)
     try:
         if month is None:
             month = datetime.now().strftime("%Y-%m")
@@ -906,7 +1209,7 @@ async def get_signal_calendar(strategy_type: StrategyType, month: str = None):
         cache_keys = []
         for day in range(1, last_day + 1):
             date_str = f"{month}-{day:02d}"
-            cache_key = f"signals:{strategy_type.value}:{date_str}"
+            cache_key = f"{scope}:signals:{strategy_type.value}:{date_str}"
             cache_keys.append(date_str)
             pipe.get(cache_key)
             status_pipe.get(f"{cache_key}:status")
@@ -965,6 +1268,8 @@ async def get_signal_performance(
     horizon_days: int = signal_tracker.DEFAULT_HORIZON,
     start_date: str = None,
     end_date: str = None,
+    authorization: str | None = Header(None, alias="Authorization"),
+    x_internal_token: str | None = Header(None, alias="X-Internal-Token"),
 ):
     """策略信号复盘统计：命中率、平均净/毛收益、盈亏比等
 
@@ -972,10 +1277,11 @@ async def get_signal_performance(
     收益已按方向取号（卖出后下跌计为盈利）并扣除往返交易成本；
     尚未走完持有期的信号计入 pending_count，不进入命中率分母。
     """
+    actor = _resolve_actor(authorization, x_internal_token)
     try:
         data = await asyncio.to_thread(
             signal_tracker.query_performance,
-            strategy_type.value, horizon_days, start_date, end_date,
+            strategy_type.value, horizon_days, start_date, end_date, actor.user_id,
         )
         data["horizons"] = list(signal_tracker.HORIZONS)
         return {"code": 200, "data": data}
@@ -987,10 +1293,20 @@ async def get_signal_performance(
 
 
 @app.post("/signals/sync")
-async def sync_signal_cache(lookback_days: int = 7):
-    """把 Redis 中仍然存活的信号补录到数据库（信号缓存仅 7 天，用于兜底）"""
+async def sync_signal_cache(
+    lookback_days: int = 7,
+    all_users: bool = False,
+    authorization: str | None = Header(None, alias="Authorization"),
+    x_internal_token: str | None = Header(None, alias="X-Internal-Token"),
+):
+    """把 Redis 中仍然存活的信号补录到数据库（信号缓存仅 7 天，用于兜底）
+
+    all_users=True 时遍历全部启用账号（调度器使用），否则只补录当前账号。
+    """
+    actor = _resolve_actor(authorization, x_internal_token)
     try:
-        data = await asyncio.to_thread(signal_tracker.sync_from_cache, lookback_days)
+        user_id = None if all_users else actor.user_id
+        data = await asyncio.to_thread(signal_tracker.sync_from_cache, lookback_days, user_id)
         return {"code": 200, "data": data, "message": "信号缓存补录完成"}
     except Exception as e:
         logger.error(f"补录信号缓存失败: {e}")
@@ -1000,89 +1316,297 @@ async def sync_signal_cache(lookback_days: int = 7):
 @app.post("/signals/backfill")
 async def backfill_signal_outcomes(
     lookback_days: int = signal_tracker.DEFAULT_LOOKBACK_DAYS,
+    all_users: bool = False,
+    authorization: str | None = Header(None, alias="Authorization"),
+    x_internal_token: str | None = Header(None, alias="X-Internal-Token"),
 ):
-    """回填信号后收益：行情走完持有期后按 T+1 开盘价入场自动评估命中率与净收益"""
+    """回填信号后收益：行情走完持有期后按 T+1 开盘价入场自动评估命中率与净收益
+
+    all_users=True 时遍历全部启用账号（调度器使用），否则只回填当前账号。
+    """
+    actor = _resolve_actor(authorization, x_internal_token)
     try:
-        data = await asyncio.to_thread(signal_tracker.backfill_outcomes, lookback_days)
+        user_id = None if all_users else actor.user_id
+        data = await asyncio.to_thread(signal_tracker.backfill_outcomes, lookback_days, user_id)
         return {"code": 200, "data": data, "message": "信号收益回填完成"}
     except Exception as e:
         logger.error(f"回填信号收益失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/backtest")
-async def run_backtest(request: BacktestRequest):
-    """运行策略回测 - 基于真实历史数据逐日回放"""
-    try:
-        config = DEFAULT_CONFIGS.get(request.strategy_type)
-        if not config:
-            raise HTTPException(status_code=400, detail="未知策略类型")
-        # 回测参数采用“当前策略配置 + 请求覆盖字段”合并：
-        # 前端仅提交表单可见字段，未提交字段必须保留配置中的止损模式/评分门槛/冷却期等，
-        # 否则会退化为 StrategyParams 模型默认值（fixed 止损、高买入门槛），与页面展示的配置严重不一致。
-        if request.params is None:
-            params = config.params
-        else:
-            incoming = request.params.model_dump(exclude_unset=True)
-            params = config.params.model_copy(update=incoming)
+# ==================== 回测执行（同步接口与后台任务共用） ====================
 
-        daily_data = influx_query.query_daily_sectors(request.start_date, request.end_date)
-        if not daily_data:
-            raise HTTPException(status_code=404, detail="没有可用的历史数据")
+# 回测单次 10~20 秒，走同步 HTTP 时手机切换网络会让浏览器断开连接并重发请求：
+# 用户看到「回测失败」，后端却已经算完并写库，重发一次就多出一条重复记录。
+# 因此前端改为「提交任务 → 轮询状态」，提交端用参数指纹做幂等，任务状态存 Redis。
+_BACKTEST_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="backtest-task")
+_BACKTEST_TASK_TTL = 1800   # 任务状态保留 30 分钟，够前端轮询与刷新后查询
+_BACKTEST_LOCK_TTL = 900    # 同参数任务锁，任务结束立即释放
 
-        sorted_dates = sorted(daily_data.keys())
-        trading_days = len(sorted_dates)
-        logger.info(f"回测 {request.strategy_type.value}: {trading_days} 个交易日, {sorted_dates[0]} ~ {sorted_dates[-1]}")
 
-        # 放到线程池执行，避免阻塞事件循环
-        loop = asyncio.get_event_loop()
+def _merge_backtest_params(user_id: int, request: BacktestRequest) -> StrategyParams:
+    """回测参数采用“当前策略配置 + 请求覆盖字段”合并：
+    前端仅提交表单可见字段，未提交字段必须保留配置中的止损模式/评分门槛/冷却期等，
+    否则会退化为 StrategyParams 模型默认值（fixed 止损、高买入门槛），与页面展示的配置严重不一致。
+    """
+    config = _user_configs(user_id).get(request.strategy_type)
+    if not config:
+        raise HTTPException(status_code=400, detail="未知策略类型")
+    if request.params is None:
+        return config.params
+    incoming = request.params.model_dump(exclude_unset=True)
+    return config.params.model_copy(update=incoming)
 
-        # 获取上证指数数据作为基准
-        sh_returns = await loop.run_in_executor(
-            None,
-            lambda: influx_query.query_sh_index_returns(sorted_dates[0], sorted_dates[-1]),
-        )
 
-        result_data = await loop.run_in_executor(
-            None,
-            lambda: _run_backtest_core(
-                daily_data, sorted_dates, request.strategy_type, params, request.initial_capital,
-                return_full=True, sh_index_returns=sh_returns,
-            ),
-        )
-
-        bt_id = f"bt_{request.strategy_type.value}_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:6]}"
-        result_data["id"] = bt_id
-        result_data["created_at"] = datetime.now().isoformat()
-
-        # 保存回测结果到Redis
-        redis_mgr.setex(f"backtest:{bt_id}", 7 * 86400, json.dumps(result_data, ensure_ascii=False))
-
-        # 保存到回测历史列表
-        history_key = f"backtest_history:{request.strategy_type.value}"
-        history_entry = {
-            "id": bt_id,
+def _backtest_fingerprint(request: BacktestRequest, params: StrategyParams) -> str:
+    """同账号下「策略 + 区间 + 本金 + 完整参数」的指纹，用于识别重复提交"""
+    payload = json.dumps(
+        {
             "strategy_type": request.strategy_type.value,
             "start_date": request.start_date,
             "end_date": request.end_date,
-            "initial_capital": request.initial_capital,
-            "total_return": result_data["total_return"],
-            "annual_return": result_data["annual_return"],
-            "max_drawdown": result_data["max_drawdown"],
-            "sharpe_ratio": result_data.get("sharpe_ratio", 0),
+            "initial_capital": round(float(request.initial_capital), 2),
             "params": params.model_dump(),
-            "created_at": result_data["created_at"],
-            "trading_days": trading_days,
-        }
-        try:
-            history_raw = redis_mgr.get(history_key)
-            history = json.loads(history_raw) if history_raw else []
-        except Exception:
-            history = []
-        history.insert(0, history_entry)
-        history = history[:20]
-        redis_mgr.setex(history_key, 30 * 86400, json.dumps(history, ensure_ascii=False))
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+        default=str,
+    )
+    return hashlib.md5(payload.encode("utf-8")).hexdigest()
 
+
+def _execute_backtest(
+    user_id: int,
+    strategy_type: StrategyType,
+    start_date: str,
+    end_date: str,
+    initial_capital: float,
+    params: StrategyParams,
+    on_progress=None,
+) -> dict:
+    """执行一次回测并落库（同步），返回完整结果
+
+    on_progress(done, total): 逐日回放进度回调，同步接口不传，异步任务用它刷新任务进度。
+    """
+    scope = user_scope(user_id)
+    daily_data = influx_query.query_daily_sectors(start_date, end_date)
+    if not daily_data:
+        raise HTTPException(status_code=404, detail="没有可用的历史数据")
+
+    sorted_dates = sorted(daily_data.keys())
+    trading_days = len(sorted_dates)
+    logger.info(f"回测 {strategy_type.value}: {trading_days} 个交易日, {sorted_dates[0]} ~ {sorted_dates[-1]}")
+
+    # 获取上证指数数据作为基准
+    sh_returns = influx_query.query_sh_index_returns(sorted_dates[0], sorted_dates[-1])
+    result_data = _run_backtest_core(
+        daily_data, sorted_dates, strategy_type, params, initial_capital,
+        return_full=True, sh_index_returns=sh_returns, on_progress=on_progress,
+    )
+
+    bt_id = f"bt_{strategy_type.value}_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:6]}"
+    result_data["id"] = bt_id
+    result_data["created_at"] = datetime.now().isoformat()
+
+    # 保存回测结果到Redis（按账号隔离）
+    redis_mgr.setex(f"{scope}:backtest:{bt_id}", 7 * 86400, json.dumps(result_data, ensure_ascii=False))
+
+    # 保存到回测历史列表
+    history_key = f"{scope}:backtest_history:{strategy_type.value}"
+    history_entry = {
+        "id": bt_id,
+        "strategy_type": strategy_type.value,
+        "start_date": start_date,
+        "end_date": end_date,
+        "initial_capital": initial_capital,
+        "total_return": result_data["total_return"],
+        "annual_return": result_data["annual_return"],
+        "max_drawdown": result_data["max_drawdown"],
+        "sharpe_ratio": result_data.get("sharpe_ratio", 0),
+        "params": params.model_dump(),
+        "created_at": result_data["created_at"],
+        "trading_days": trading_days,
+    }
+    try:
+        history_raw = redis_mgr.get(history_key)
+        history = json.loads(history_raw) if history_raw else []
+    except Exception:
+        history = []
+    history.insert(0, history_entry)
+    history = history[:20]
+    redis_mgr.setex(history_key, 30 * 86400, json.dumps(history, ensure_ascii=False))
+
+    return result_data
+
+
+def _update_backtest_task(task_key: str, **fields) -> None:
+    """合并更新任务状态（状态量小，整体重写即可）"""
+    raw = redis_mgr.get(task_key)
+    try:
+        data = json.loads(raw) if raw else {}
+    except Exception:
+        data = {}
+    data.update(fields)
+    redis_mgr.setex(task_key, _BACKTEST_TASK_TTL, json.dumps(data, ensure_ascii=False))
+
+
+def _run_backtest_task(
+    user_id: int,
+    task_key: str,
+    lock_key: str,
+    strategy_type: StrategyType,
+    start_date: str,
+    end_date: str,
+    initial_capital: float,
+    params: StrategyParams,
+) -> None:
+    """后台线程执行回测，状态写 Redis 供前端轮询"""
+    started_at = datetime.now()
+    last_progress = -1
+
+    def report_progress(done: int, total: int) -> None:
+        """逐日回放占进度 5%~95%，余下留给取数与落库；每涨 3 个百分点写一次 Redis"""
+        nonlocal last_progress
+        percent = 5 + int(done / max(total, 1) * 90)
+        if percent - last_progress < 3 and done < total:
+            return
+        last_progress = percent
+        _update_backtest_task(
+            task_key, status="running", progress=percent,
+            progress_done=done, progress_total=total,
+            elapsed_seconds=round((datetime.now() - started_at).total_seconds(), 1),
+            updated_at=datetime.now().isoformat(),
+        )
+
+    _update_backtest_task(
+        task_key, status="running", progress=1,
+        elapsed_seconds=0, updated_at=datetime.now().isoformat(),
+    )
+    try:
+        result_data = _execute_backtest(
+            user_id, strategy_type, start_date, end_date, initial_capital, params,
+            on_progress=report_progress,
+        )
+        _update_backtest_task(
+            task_key, status="done", progress=100, bt_id=result_data["id"],
+            elapsed_seconds=round((datetime.now() - started_at).total_seconds(), 1),
+            finished_at=datetime.now().isoformat(), updated_at=datetime.now().isoformat(),
+        )
+    except HTTPException as e:
+        logger.error(f"回测任务失败: {e.detail}")
+        _update_backtest_task(
+            task_key, status="failed", error=str(e.detail),
+            finished_at=datetime.now().isoformat(), updated_at=datetime.now().isoformat(),
+        )
+    except Exception as e:
+        logger.error(f"回测任务失败: {e}")
+        _update_backtest_task(
+            task_key, status="failed", error=str(e),
+            finished_at=datetime.now().isoformat(), updated_at=datetime.now().isoformat(),
+        )
+    finally:
+        # 任务结束后释放锁，相同参数可以立即重跑
+        redis_mgr.delete(lock_key)
+
+
+@app.post("/backtest/async")
+async def submit_backtest(
+    request: BacktestRequest,
+    authorization: str | None = Header(None, alias="Authorization"),
+    x_internal_token: str | None = Header(None, alias="X-Internal-Token"),
+):
+    """提交回测任务（异步执行，用 GET /backtest/task/{task_id} 轮询）
+
+    相同参数在任务结束前重复提交会复用同一个 task_id，避免网络重发产生重复记录。
+    """
+    actor = _resolve_actor(authorization, x_internal_token)
+    scope = user_scope(actor.user_id)
+    params = _merge_backtest_params(actor.user_id, request)
+
+    task_id = f"btt_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
+    task_key = f"{scope}:backtest_task:{task_id}"
+    lock_key = f"{scope}:backtest_submit:{_backtest_fingerprint(request, params)}"
+    now = datetime.now().isoformat()
+
+    # 先写任务状态再抢锁：锁一旦可见，其指向的任务状态必然已就绪，
+    # 重复提交读到锁时不会出现「锁已存在但状态还没写」的空窗。
+    _update_backtest_task(
+        task_key, task_id=task_id, status="queued",
+        strategy_type=request.strategy_type.value,
+        start_date=request.start_date, end_date=request.end_date,
+        initial_capital=request.initial_capital,
+        created_at=now, updated_at=now,
+    )
+
+    # SET NX 保证并发/重发的两次提交只有一个能创建任务
+    claimed = True
+    try:
+        claimed = bool(redis_mgr.client.set(lock_key, task_id, nx=True, ex=_BACKTEST_LOCK_TTL))
+    except Exception as e:
+        logger.warning(f"回测提交锁不可用，降级为直接提交: {e}")
+
+    if not claimed:
+        existing_task = redis_mgr.get(lock_key)
+        raw = redis_mgr.get(f"{scope}:backtest_task:{existing_task}") if existing_task else None
+        redis_mgr.delete(task_key)  # 丢弃本次多写的任务状态
+        if existing_task and raw:
+            logger.info(f"回测重复提交，复用任务 {existing_task}")
+            return {"code": 200, "data": {**json.loads(raw), "reused": True}}
+        # 锁指向的任务状态已不存在（数据异常），宁可让用户重试也不重复计算
+        redis_mgr.delete(lock_key)
+        raise HTTPException(status_code=503, detail="回测提交冲突，请重试")
+
+    try:
+        _BACKTEST_EXECUTOR.submit(
+            _run_backtest_task, actor.user_id, task_key, lock_key, request.strategy_type,
+            request.start_date, request.end_date, request.initial_capital, params,
+        )
+    except Exception as e:
+        logger.error(f"回测任务提交失败: {e}")
+        redis_mgr.delete(lock_key)
+        _update_backtest_task(task_key, status="failed", error=f"任务提交失败: {e}", updated_at=now)
+        raise HTTPException(status_code=500, detail=f"回测任务提交失败: {e}")
+
+    return {"code": 200, "data": {"task_id": task_id, "status": "queued", "reused": False}}
+
+
+@app.get("/backtest/task/{task_id}")
+def get_backtest_task(
+    task_id: str,
+    authorization: str | None = Header(None, alias="Authorization"),
+    x_internal_token: str | None = Header(None, alias="X-Internal-Token"),
+):
+    """查询回测任务状态（账号隔离，他人 task_id 不可见）"""
+    actor = _resolve_actor(authorization, x_internal_token)
+    raw = redis_mgr.get(f"{user_scope(actor.user_id)}:backtest_task:{task_id}")
+    if not raw:
+        raise HTTPException(status_code=404, detail="回测任务不存在或已过期")
+    return {"code": 200, "data": json.loads(raw)}
+
+
+@app.post("/backtest")
+async def run_backtest(
+    request: BacktestRequest,
+    authorization: str | None = Header(None, alias="Authorization"),
+    x_internal_token: str | None = Header(None, alias="X-Internal-Token"),
+):
+    """运行策略回测 - 基于真实历史数据逐日回放（结果仅归当前账号）
+
+    同步接口，供 scheduler / mcp-agent / ai-decision 等内部服务调用；
+    浏览器侧走 /backtest/async + 轮询，避免长连接被手机网络切换中断。
+    """
+    actor = _resolve_actor(authorization, x_internal_token)
+    try:
+        params = _merge_backtest_params(actor.user_id, request)
+        # 放到线程池执行，避免阻塞事件循环
+        loop = asyncio.get_event_loop()
+        result_data = await loop.run_in_executor(
+            None,
+            lambda: _execute_backtest(
+                actor.user_id, request.strategy_type, request.start_date,
+                request.end_date, request.initial_capital, params,
+            ),
+        )
         return {"code": 200, "data": result_data}
     except HTTPException:
         raise
@@ -1091,12 +1615,28 @@ async def run_backtest(request: BacktestRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _load_sector_history_cache(sorted_dates) -> dict:
-    """批量加载所有板块历史数据（2次InfluxDB查询），供回测因子计算复用
+# 历史 K 线按日期区间做进程内缓存：同一交易日内所有账号的批量计算
+# 只打一次 InfluxDB，而不是每个账号每个策略各打两次（N×3 放大）
+_HISTORY_CACHE: dict[tuple, tuple[float, dict]] = {}
+_HISTORY_LOCK = threading.Lock()
+_HISTORY_CACHE_TTL = 600
+_HISTORY_CACHE_MAX = 4
+
+
+def _load_sector_history_cache(sorted_dates, use_memo: bool = True) -> dict:
+    """批量加载所有板块历史数据（2次InfluxDB查询），供回测/信号计算复用
 
     Returns:
         {sector_code: [rows按date升序, 合并K线(OHLCV)与资金流/估值字段], ...}
     """
+    cache_key = (sorted_dates[0], sorted_dates[-1]) if sorted_dates else None
+    now = time.monotonic()
+    if use_memo and cache_key is not None:
+        with _HISTORY_LOCK:
+            hit = _HISTORY_CACHE.get(cache_key)
+        if hit and now - hit[0] < _HISTORY_CACHE_TTL:
+            return hit[1]
+
     sector_history_cache = {}
     try:
         from datetime import timedelta
@@ -1127,6 +1667,12 @@ def _load_sector_history_cache(sorted_dates) -> dict:
         for rows in sector_history_cache.values():
             rows.sort(key=lambda r: r.get("date", ""))
         logger.info(f"回测预加载历史: {len(sector_history_cache)}个板块, {hist_start}~{hist_end}, 2次查询")
+        if use_memo and cache_key is not None and sector_history_cache:
+            with _HISTORY_LOCK:
+                _HISTORY_CACHE[cache_key] = (time.monotonic(), sector_history_cache)
+                # 只保留最近若干个区间，避免长跑进程无限增长
+                for stale_key in list(_HISTORY_CACHE)[:-_HISTORY_CACHE_MAX]:
+                    _HISTORY_CACHE.pop(stale_key, None)
     except Exception as e:
         logger.warning(f"回测历史预加载失败: {e}")
     return sector_history_cache
@@ -1227,7 +1773,7 @@ def _summarize_nav_curve(nav_list: list, risk_free_rate: float = 0.02) -> dict |
     }
 
 
-def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_capital, return_full=False, sh_index_returns=None, history_cache=None, initial_bench_capital=None):
+def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_capital, return_full=False, sh_index_returns=None, history_cache=None, initial_bench_capital=None, on_progress=None):
     """回测核心逻辑（统一入口）
 
     成交模型（T+1 统一）：
@@ -1998,6 +2544,10 @@ def _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_
             "stop_loss": stop_loss_triggered,
         })
 
+        # 逐日回放是回测最耗时的环节，按每 5 个交易日汇报一次进度
+        if on_progress is not None and (i % 5 == 0 or i == len(sorted_dates) - 1):
+            on_progress(i + 1, len(sorted_dates))
+
     # ============ 计算回测指标 ============
     if initial_capital <= 0:
         return _empty_backtest_result(strategy_type, initial_capital, return_full)
@@ -2160,7 +2710,7 @@ def _empty_backtest_result(strategy_type, initial_capital, return_full):
 
 
 @app.post("/factors/analyze")
-async def analyze_factors(request: FactorAnalyzeRequest):
+def analyze_factors(request: FactorAnalyzeRequest):
     """因子分析 - 计算单个板块的所有因子得分"""
     try:
         sector_code = request.sector_code
@@ -2255,9 +2805,38 @@ class FactorBatchRequest(BaseModel):
     sector_codes: list[str] = []
 
 
+# 批量因子结果缓存：因子只依赖"交易日 + 策略类型 + 板块范围 + 当日数据本身"。
+# 命中时省掉一次 60 天历史查询 + 90 个板块的因子计算（实测 1.5s -> 0.05s），
+# 前端来回切页面不再重算。缓存键里带当日数据指纹，手动重采集或补采后自动失效。
+_FACTOR_BATCH_CACHE: dict[tuple, dict] = {}
+_FACTOR_BATCH_CACHE_MAX = 64
+_FACTOR_BATCH_CACHE_LOCK = threading.Lock()
+
+
+def _daily_data_fingerprint(sectors: list[dict]) -> str:
+    """当日板块数据的指纹：任一板块任一标量字段变化都会改变结果
+
+    只取标量字段（numpy 数值也算），跳过 _history 这类内部附加字段。
+    """
+    parts = []
+    for s in sectors:
+        fields = ",".join(
+            f"{k}={s.get(k)}"
+            for k in sorted(s)
+            if not k.startswith("_")
+            and not isinstance(s.get(k), (dict, list, tuple, type(None)))
+        )
+        parts.append(f"{s.get('sector_code')}[{fields}]")
+    return hashlib.md5("|".join(sorted(parts)).encode()).hexdigest()
+
+
 @app.post("/factors/batch")
-async def analyze_factors_batch(request_body: FactorBatchRequest):
-    """批量因子分析 - 计算多个板块的因子得分并排名"""
+def analyze_factors_batch(request_body: FactorBatchRequest):
+    """批量因子分析 - 计算多个板块的因子得分并排名
+
+    同步路由（非 async）：内部是 InfluxDB 查询 + numpy 计算的阻塞调用，
+    放在 async 路由里会独占事件循环，前端并发发两个请求就要排队（实测 1.5s -> 3.0s）。
+    """
     try:
         date = request_body.date
         strategy_type = StrategyType(request_body.strategy_type)
@@ -2279,6 +2858,18 @@ async def analyze_factors_batch(request_body: FactorBatchRequest):
         if not daily_data or actual_date not in daily_data:
             raise HTTPException(status_code=404, detail="无可用数据")
 
+        # 数据已取回（当日 90 条，约 0.05 秒），用它算指纹后查缓存
+        cache_key = (
+            actual_date,
+            strategy_type.value,
+            tuple(sorted(request_body.sector_codes)),
+            _daily_data_fingerprint(daily_data[actual_date]),
+        )
+        with _FACTOR_BATCH_CACHE_LOCK:
+            cached = _FACTOR_BATCH_CACHE.get(cache_key)
+            if cached is not None:
+                return success_response(data=cached)
+
         from .factors import FactorRegistry
         from .combiner import FactorCombiner, DEFAULT_WEIGHTS
 
@@ -2295,13 +2886,17 @@ async def analyze_factors_batch(request_body: FactorBatchRequest):
         abs_by_code: dict[str, float] = {}
         meta_by_code: dict[str, dict] = {}
 
+        # 历史序列一次批量取回：逐板块查询是 90 板块 × 3 次 InfluxQL 往返（实测 6.2s），
+        # 批量后只剩 3 次（资金流 + 北向资金 + K线），输出字段口径不变。
+        hist_start = (datetime.strptime(actual_date, "%Y-%m-%d") - timedelta(days=60)).strftime("%Y-%m-%d")
+        history_map = influx_query.query_all_sector_history_map(hist_start, actual_date)
+
         for sector in sectors:
             code = sector.get("sector_code")
             if not code:
                 continue
             try:
-                start_date = (datetime.strptime(actual_date, "%Y-%m-%d") - timedelta(days=60)).strftime("%Y-%m-%d")
-                history_data = influx_query.query_sector_history(code, start_date, actual_date)
+                history_data = history_map.get(str(code)) or []
                 if history_data:
                     sector["_history"] = history_data
                 factor_results = FactorRegistry.calculate_all(sector, history_data, context)
@@ -2358,7 +2953,13 @@ async def analyze_factors_batch(request_body: FactorBatchRequest):
         for i, r in enumerate(results):
             r["rank"] = i + 1
 
-        return success_response(data={"date": actual_date, "strategy_type": strategy_type.value, "rankings": results})
+        payload = {"date": actual_date, "strategy_type": strategy_type.value, "rankings": results}
+        with _FACTOR_BATCH_CACHE_LOCK:
+            if len(_FACTOR_BATCH_CACHE) >= _FACTOR_BATCH_CACHE_MAX:
+                _FACTOR_BATCH_CACHE.clear()
+            _FACTOR_BATCH_CACHE[cache_key] = payload
+
+        return success_response(data=payload)
     except HTTPException:
         raise
     except Exception as e:
@@ -2367,7 +2968,7 @@ async def analyze_factors_batch(request_body: FactorBatchRequest):
 
 
 @app.get("/factors/config")
-async def get_factor_config():
+def get_factor_config():
     """获取因子配置"""
     try:
         from .factors import FactorRegistry
@@ -2385,14 +2986,20 @@ async def get_factor_config():
 
 
 @app.get("/backtest/history")
-async def get_backtest_history(strategy_type: StrategyType = None):
-    """获取回测历史记录"""
+def get_backtest_history(
+    strategy_type: StrategyType = None,
+    authorization: str | None = Header(None, alias="Authorization"),
+    x_internal_token: str | None = Header(None, alias="X-Internal-Token"),
+):
+    """获取当前账号的回测历史记录"""
+    actor = _resolve_actor(authorization, x_internal_token)
+    scope = user_scope(actor.user_id)
     try:
         results = []
         if strategy_type:
-            keys = [f"backtest_history:{strategy_type.value}"]
+            keys = [f"{scope}:backtest_history:{strategy_type.value}"]
         else:
-            keys = [f"backtest_history:{st.value}" for st in StrategyType]
+            keys = [f"{scope}:backtest_history:{st.value}" for st in StrategyType]
 
         for key in keys:
             raw = redis_mgr.get(key)
@@ -2407,16 +3014,21 @@ async def get_backtest_history(strategy_type: StrategyType = None):
 
 
 @app.get("/backtest/{bt_id}")
-async def get_backtest_detail(bt_id: str):
-    """获取回测详情"""
-    raw = redis_mgr.get(f"backtest:{bt_id}")
+def get_backtest_detail(
+    bt_id: str,
+    authorization: str | None = Header(None, alias="Authorization"),
+    x_internal_token: str | None = Header(None, alias="X-Internal-Token"),
+):
+    """获取当前账号的回测详情（他人 bt_id 不可见）"""
+    actor = _resolve_actor(authorization, x_internal_token)
+    raw = redis_mgr.get(f"{user_scope(actor.user_id)}:backtest:{bt_id}")
     if raw:
         return {"code": 200, "data": json.loads(raw)}
     raise HTTPException(status_code=404, detail="回测记录不存在")
 
 
 @app.get("/data/availability")
-async def get_data_availability():
+def get_data_availability():
     """查询InfluxDB中历史数据的可用日期范围"""
     try:
         min_date, max_date = influx_query.get_available_date_range()
@@ -2434,7 +3046,7 @@ async def get_data_availability():
 
 
 @app.get("/cache/stats")
-async def get_cache_stats():
+def get_cache_stats():
     """获取缓存统计信息"""
     try:
         info = redis_mgr.info("memory")
@@ -2444,10 +3056,13 @@ async def get_cache_stats():
         total_keys = db_info.get("keys", 0) if isinstance(db_info, dict) else 0
 
         categories = {}
+        # 用户数据统一挂在 user:{id}: 下，统计时用通配覆盖所有账号
         patterns = [
-            ("backtest_result", "backtest:*"),
-            ("backtest_history", "backtest_history:*"),
-            ("signals", "signals:*"),
+            ("backtest_result", "user:*:backtest:*"),
+            ("backtest_history", "user:*:backtest_history:*"),
+            ("signals", "user:*:signals:*"),
+            ("strategy_configs", "user:*:strategy_configs"),
+            ("market_regime", "user:*:market_regime:*"),
             ("sector_data", "sector_capital_flow:*"),
             ("system_settings", "settings:*"),
         ]
@@ -2472,7 +3087,7 @@ async def get_cache_stats():
 
 
 @app.delete("/cache/clear")
-async def clear_all_cache(x_admin_token: str = Header(default="")):
+def clear_all_cache(x_admin_token: str = Header(default="")):
     """清空当前数据库的所有缓存（需要管理员令牌）"""
     admin_token = os.environ.get("ADMIN_TOKEN", "")
     if not admin_token:
@@ -2489,7 +3104,7 @@ async def clear_all_cache(x_admin_token: str = Header(default="")):
 
 
 @app.delete("/cache/expired")
-async def clear_expired_cache():
+def clear_expired_cache():
     """清除已过期的缓存key"""
     try:
         cleared = 0
@@ -2505,7 +3120,7 @@ async def clear_expired_cache():
 
 
 @app.get("/database/status")
-async def get_database_status():
+def get_database_status():
     """获取数据库状态信息"""
     try:
         # PostgreSQL状态
@@ -2577,98 +3192,140 @@ async def get_database_status():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/settings")
-async def get_system_settings():
-    """获取系统设置"""
-    try:
-        settings_map = {}
-        for key in redis_mgr.scan_iter(match="settings:*"):
-            val = redis_mgr.get(key)
-            short_key = key.replace("settings:", "")
-            try:
-                parsed = json.loads(val)
-                settings_map[short_key] = parsed
-            except (json.JSONDecodeError, TypeError):
-                # 兼容旧格式：str(True) -> "True"
-                if val == "True":
-                    settings_map[short_key] = True
-                elif val == "False":
-                    settings_map[short_key] = False
-                else:
-                    try:
-                        settings_map[short_key] = int(val)
-                    except (ValueError, TypeError):
-                        settings_map[short_key] = val
-
-        defaults = {
-            "ws_push_enabled": True,
-            "ws_push_strategy_types": ["AGGRESSIVE", "MODERATE", "CONSERVATIVE"],
-            "data_source": "akshare_ths",
-            "data_source_config": {
-                "name": "AkShare (同花顺)",
-                "is_mock": False,
-                "description": "AkShare同花顺数据源，提供真实K线和行业汇总数据",
-            },
-            "cache_ttl_days": 7,
-            "scheduler_enabled": True,
-            "scheduler_times": {
-                "collect": "15:30",
-                "calculate": "15:35",
-                "north_bound": "16:00",
-            },
-        }
-        for k, v in defaults.items():
-            if k not in settings_map:
-                settings_map[k] = v
-
-        return {"code": 200, "data": settings_map}
-    except Exception as e:
-        logger.error(f"获取系统设置失败: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-ALLOWED_SETTINGS_KEYS = {
-    "ws_push_enabled",
-    "ws_push_strategy_types",
+# 个人偏好（按用户保存）：实时推送开关与订阅的策略档位
+USER_SETTINGS_KEYS = {"ws_push_enabled", "ws_push_strategy_types"}
+# 系统级参数（全局一份，仅管理员可改）：数据源、缓存天数、调度时间
+SYSTEM_SETTINGS_KEYS = {
     "data_source",
     "data_source_config",
     "cache_ttl_days",
     "scheduler_enabled",
     "scheduler_times",
 }
+ALLOWED_SETTINGS_KEYS = USER_SETTINGS_KEYS | SYSTEM_SETTINGS_KEYS
+
+SETTINGS_DEFAULTS = {
+    "ws_push_enabled": True,
+    "ws_push_strategy_types": ["AGGRESSIVE", "MODERATE", "CONSERVATIVE"],
+    "data_source": "akshare_ths",
+    "data_source_config": {
+        "name": "AkShare (同花顺)",
+        "is_mock": False,
+        "description": "AkShare同花顺数据源，提供真实K线和行业汇总数据",
+    },
+    "cache_ttl_days": 7,
+    "scheduler_enabled": True,
+    "scheduler_times": {
+        "collect": "15:30",
+        "calculate": "15:35",
+        "north_bound": "16:00",
+    },
+}
+
+
+def _user_settings_key(user_id: int, key: str) -> str:
+    return f"{user_scope(user_id)}:settings:{key}"
+
+
+def _parse_setting(raw):
+    """解析历史遗留的非 JSON 格式（str(True) / str(123)）"""
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        if raw == "True":
+            return True
+        if raw == "False":
+            return False
+        try:
+            return int(raw)
+        except (ValueError, TypeError):
+            return raw
+
+
+def _read_setting(redis_key: str):
+    raw = redis_mgr.get(redis_key)
+    return None if raw is None else _parse_setting(raw)
+
+
+def _migrate_legacy_user_settings():
+    """历史全局个人设置归并到管理员账号（幂等）
+
+    改造前 ws_push_* 存在 settings:* 全局键里，多用户共用一份。这里把它们搬到
+    user:1 下（管理员），并删除旧键，避免"全局设置"与新口径并存造成误读。
+    """
+    for key in USER_SETTINGS_KEYS:
+        legacy_key = f"settings:{key}"
+        legacy_value = redis_mgr.get(legacy_key)
+        if legacy_value is None:
+            continue
+        target_key = _user_settings_key(ADMIN_USER_ID, key)
+        if redis_mgr.get(target_key) is None:
+            redis_mgr.set(target_key, legacy_value)
+            logger.info(f"历史设置迁移到管理员账号: {legacy_key} -> {target_key}")
+        redis_mgr.delete(legacy_key)
+
+
+@app.get("/settings")
+def get_system_settings(authorization: str | None = Header(None, alias="Authorization")):
+    """获取设置：个人偏好取自当前用户，系统级参数全局共享"""
+    user = _require_user(authorization)
+    try:
+        settings_map = dict(SETTINGS_DEFAULTS)
+        for key in SYSTEM_SETTINGS_KEYS:
+            value = _read_setting(f"settings:{key}")
+            if value is not None:
+                settings_map[key] = value
+        for key in USER_SETTINGS_KEYS:
+            value = _read_setting(_user_settings_key(user.user_id, key))
+            if value is not None:
+                settings_map[key] = value
+        return {"code": 200, "data": settings_map}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取设置失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.put("/settings")
-async def update_system_settings(settings_body: dict):
-    """更新系统设置"""
+def update_system_settings(settings_body: dict, authorization: str | None = Header(None, alias="Authorization")):
+    """更新设置：个人偏好写入当前用户，系统级参数仅管理员可改"""
+    user = _require_user(authorization)
+    invalid_keys = set(settings_body.keys()) - ALLOWED_SETTINGS_KEYS
+    if invalid_keys:
+        raise HTTPException(status_code=400, detail=f"不允许的设置项: {', '.join(invalid_keys)}")
+
+    system_updates = set(settings_body.keys()) & SYSTEM_SETTINGS_KEYS
+    if system_updates and not user.is_admin:
+        raise HTTPException(
+            status_code=403,
+            detail=f"系统级设置仅管理员可修改: {', '.join(sorted(system_updates))}",
+        )
+
     try:
-        invalid_keys = set(settings_body.keys()) - ALLOWED_SETTINGS_KEYS
-        if invalid_keys:
-            raise HTTPException(status_code=400, detail=f"不允许的设置项: {', '.join(invalid_keys)}")
         updated = {}
         for key, value in settings_body.items():
-            redis_key = f"settings:{key}"
+            redis_key = _user_settings_key(user.user_id, key) if key in USER_SETTINGS_KEYS else f"settings:{key}"
             redis_mgr.set(redis_key, json.dumps(value, ensure_ascii=False))
             updated[key] = value
-        logger.info(f"系统设置已更新: {list(updated.keys())}")
+        logger.info(f"设置已更新: user={user.user_id}, keys={list(updated.keys())}")
         return {"code": 200, "message": "设置已更新", "data": updated}
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"更新系统设置失败: {e}")
+        logger.error(f"更新设置失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/data/replay/dates")
-async def get_replay_dates(start_date: str = None, end_date: str = None):
+def get_replay_dates(start_date: str = None, end_date: str = None):
     """获取可用于回放的交易日列表"""
     try:
-        min_range, max_range = influx_query.get_available_date_range()
-        daily_data = influx_query.query_daily_sectors(
-            start_date or (min_range or "2020-01-01"),
-            end_date or (max_range or datetime.now().strftime("%Y-%m-%d")),
-        )
-        dates = sorted(daily_data.keys())
+        dates = influx_query.get_trading_dates()
+        if start_date:
+            dates = [d for d in dates if d >= start_date]
+        if end_date:
+            dates = [d for d in dates if d <= end_date]
         return {"code": 200, "data": dates}
     except Exception as e:
         logger.error(f"获取回放日期列表失败: {e}")
@@ -2676,7 +3333,7 @@ async def get_replay_dates(start_date: str = None, end_date: str = None):
 
 
 @app.get("/data/replay/sectors")
-async def get_replay_sectors():
+def get_replay_sectors():
     """获取所有可用的板块列表"""
     try:
         sectors = influx_query.get_sector_list()
@@ -2687,7 +3344,7 @@ async def get_replay_sectors():
 
 
 @app.get("/data/replay/sector/{sector_code}")
-async def get_replay_sector_history(sector_code: str, start_date: str = None, end_date: str = None):
+def get_replay_sector_history(sector_code: str, start_date: str = None, end_date: str = None):
     """获取单个板块的历史数据序列"""
     try:
         min_range, max_range = influx_query.get_available_date_range()
@@ -2703,7 +3360,7 @@ async def get_replay_sector_history(sector_code: str, start_date: str = None, en
 
 
 @app.get("/data/replay/day/{date}")
-async def get_replay_day_data(date: str, sector_code: str = None):
+def get_replay_day_data(date: str, sector_code: str = None):
     """获取某一天的板块交易数据用于回放"""
     try:
         daily_data = influx_query.query_daily_sectors(date, date, sector_code=sector_code)
@@ -2719,6 +3376,53 @@ async def get_replay_day_data(date: str, sector_code: str = None):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/data/replay/heatmap")
+def get_replay_heatmap(days: int = 5):
+    """板块资金流热力图：一次范围查询后在服务端按板块聚合
+
+    前端原来逐日拉 /data/replay/day/{date}（5/10/20 个串行请求，每个 0.1~0.34s），
+    这里一次 InfluxQL 取回区间数据，聚合口径与前端保持一致：
+    每个板块在所有出现过的交易日上取算术平均，缺失字段按 0 计入。
+    """
+    try:
+        days = max(1, min(int(days), 60))
+        end_date = datetime.now().strftime("%Y-%m-%d")
+        start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        daily_data = influx_query.query_daily_sectors(start_date, end_date)
+        dates = sorted(daily_data.keys())
+
+        acc: dict[str, dict] = {}
+        for date in dates:
+            for sector in daily_data[date]:
+                name = sector.get("sector_name") or sector.get("sector_code") or ""
+                if not name:
+                    continue
+                item = acc.setdefault(name, {"inflow_sum": 0.0, "pct_sum": 0.0, "count": 0})
+                item["inflow_sum"] += float(sector.get("main_net_inflow") or 0.0)
+                item["pct_sum"] += float(sector.get("index_change_pct") or 0.0)
+                item["count"] += 1
+
+        sectors = [
+            {
+                "sector_name": name,
+                "main_net_inflow": v["inflow_sum"] / v["count"] if v["count"] else 0.0,
+                "index_change_pct": v["pct_sum"] / v["count"] if v["count"] else 0.0,
+                "days": v["count"],
+            }
+            for name, v in acc.items()
+        ]
+        sectors.sort(key=lambda x: x["main_net_inflow"], reverse=True)
+        return {"code": 200, "data": {"dates": dates, "days": days, "sectors": sectors}}
+    except Exception as e:
+        logger.error(f"获取热力图数据失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# 全局叠加回测进度状态（与寻优同构：后台线程执行，请求立即返回）
+_overlay_progress = {"active": False, "completed": 0, "total": 1, "error": None}
+# 最近一次完成的叠加回测完整结果（前端轮询拉取）
+_overlay_result: dict | None = None
+
 # 全局寻优进度状态
 _optimization_progress = {
     "active": False,
@@ -2726,8 +3430,7 @@ _optimization_progress = {
     "total": 0,
     "best_return": 0.0,
     "best_sharpe": 0.0,
-}
-# 最近一次寻优的完整结果（完成后写入，供前端轮询拉取）
+}# 最近一次寻优的完整结果（完成后写入，供前端轮询拉取）
 _optimization_result: dict = None
 
 
@@ -2879,9 +3582,11 @@ def _run_optimization(daily_data, sorted_dates, strategy_type, initial_capital, 
             "oos_range": [sorted(oos_set)[0], sorted(oos_set)[-1]] if oos_set else [],
         }
         _optimization_result = result_payload
-        # 追加历史摘要（最新在前），仅保留最近 20 次
+        # 追加历史摘要（最新在前），仅保留最近 20 次；完整结果另存归档供「查看详情」
+        opt_id = result_payload["created_at"]
         _optimization_history.insert(0, {
-            "created_at": result_payload["created_at"],
+            "id": opt_id,
+            "created_at": opt_id,
             "strategy_type": result_payload["strategy_type"],
             "n_trials": n_trials,
             "trial_count": len(all_results),
@@ -2890,6 +3595,10 @@ def _run_optimization(daily_data, sorted_dates, strategy_type, initial_capital, 
             "max_drawdown": final_result.get("max_drawdown", 0),
             "train_range": result_payload["train_range"],
         })
+        _optimization_archive[opt_id] = result_payload
+        # 淘汰超出 20 条的旧记录时同步清归档，避免内存无限增长
+        for old in _optimization_history[20:]:
+            _optimization_archive.pop(old.get("id"), None)
         del _optimization_history[20:]
         return {"code": 200, "data": result_payload}
     finally:
@@ -2899,22 +3608,33 @@ def _run_optimization(daily_data, sorted_dates, strategy_type, initial_capital, 
 
 # 历史寻优记录摘要（最新在前，最多 20 条），供前端按时间倒序展示
 _optimization_history: list = []
+# 历史记录对应的完整结果归档，按 id（created_at）索引，供「查看详情」拉取
+_optimization_archive: dict = {}
 
 
 @app.get("/data/replay/strategy-optimize/history")
-async def get_optimize_history():
+def get_optimize_history():
     """获取历史寻优记录（最新在前，按完成时间倒序）"""
     return {"code": 200, "data": list(_optimization_history)}
 
 
+@app.get("/data/replay/strategy-optimize/history/{opt_id}")
+def get_optimize_history_detail(opt_id: str):
+    """获取某次历史寻优的完整结果，供点击历史记录查看详情"""
+    result = _optimization_archive.get(opt_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="该寻优记录已过期或不存在")
+    return {"code": 200, "data": result}
+
+
 @app.get("/data/replay/optimize-progress")
-async def get_optimize_progress():
+def get_optimize_progress():
     """获取当前寻优进度"""
     return {"code": 200, "data": dict(_optimization_progress)}
 
 
 @app.get("/data/replay/strategy-optimize/result")
-async def get_optimize_result():
+def get_optimize_result():
     """获取最近一次完成的寻优结果"""
     global _optimization_result
     if _optimization_progress["active"]:
@@ -3046,9 +3766,62 @@ def _suggest_params(trial, strategy_type: StrategyType) -> dict:
         }
 
 
+def _run_overlay_task(daily_data, sorted_dates, strategy_type, params, initial_capital, sh_returns):
+    """后台执行叠加回测，结果写入全局 _overlay_result。
+    与寻优同构：HTTP 请求立即返回，计算在线程池进行，前端轮询进度/结果。
+    """
+    global _overlay_result
+    try:
+        result_data = _run_backtest_core(
+            daily_data, sorted_dates, strategy_type, params, initial_capital,
+            return_full=True, sh_index_returns=sh_returns,
+        )
+        nav_curve = result_data.pop("nav_curve", [])
+        daily_signals = result_data.pop("daily_signals", [])
+        position_changes = result_data.pop("position_changes", [])
+        portfolio_snapshots = result_data.pop("portfolio_snapshots", [])
+        _overlay_result = {
+            "summary": result_data,
+            "nav_curve": nav_curve,
+            "daily_signals": daily_signals,
+            "position_changes": position_changes,
+            "portfolio_snapshots": portfolio_snapshots,
+        }
+        _overlay_progress.update({"active": False, "completed": 1, "total": 1, "error": None})
+        logger.info(f"策略叠加回测完成: {len(sorted_dates)} 个交易日")
+    except Exception as e:
+        logger.error(f"后台策略叠加回测失败: {e}")
+        _overlay_result = None
+        _overlay_progress.update({"active": False, "completed": 0, "total": 1, "error": str(e)})
+
+
+@app.get("/data/replay/strategy-overlay/progress")
+def get_overlay_progress():
+    """叠加回测进度（后台任务模式）"""
+    return {"code": 200, "data": dict(_overlay_progress)}
+
+
+@app.get("/data/replay/strategy-overlay/result")
+def get_overlay_result():
+    """最近一次完成的叠加回测完整结果"""
+    if _overlay_progress["active"]:
+        return {"code": 200, "data": {"status": "running", "result": None, "error": None}}
+    if _overlay_progress.get("error"):
+        return {"code": 200, "data": {"status": "failed", "result": None, "error": _overlay_progress["error"]}}
+    return {"code": 200, "data": {"status": "done", "result": _overlay_result, "error": None}}
+
+
 @app.post("/data/replay/strategy-overlay")
-async def replay_strategy_overlay(request_body: dict):
-    """数据回放 - 策略叠加"""
+async def replay_strategy_overlay(
+    request_body: dict,
+    authorization: str | None = Header(None, alias="Authorization"),
+    x_internal_token: str | None = Header(None, alias="X-Internal-Token"),
+):
+    """数据回放 - 策略叠加：启动后台任务，立即返回；前端轮询进度后拉取结果。
+    与寻优同构，计算不依赖前端连接——切页/刷新都不会中断回测。
+    """
+    global _overlay_result
+    actor = _resolve_actor(authorization, x_internal_token)
     try:
         start_date = request_body.get("start_date", "")
         end_date = request_body.get("end_date", "")
@@ -3064,7 +3837,7 @@ async def replay_strategy_overlay(request_body: dict):
         except ValueError:
             raise HTTPException(status_code=400, detail=f"未知策略类型: {strategy_type_str}")
 
-        config = DEFAULT_CONFIGS.get(strategy_type)
+        config = _user_configs(actor.user_id).get(strategy_type)
         if not config:
             raise HTTPException(status_code=400, detail="未知策略类型")
         params = StrategyParams(**params_override) if params_override else config.params
@@ -3073,40 +3846,309 @@ async def replay_strategy_overlay(request_body: dict):
         if not daily_data:
             raise HTTPException(status_code=404, detail="该时间范围内无历史数据")
 
-        sorted_dates = sorted(daily_data.keys())
-        trading_days = len(sorted_dates)
+        if _overlay_progress["active"]:
+            raise HTTPException(status_code=409, detail="已有叠加回测运行中，请稍候")
 
+        sorted_dates = sorted(daily_data.keys())
         loop = asyncio.get_event_loop()
         sh_returns = await loop.run_in_executor(
             None,
             lambda: influx_query.query_sh_index_returns(sorted_dates[0], sorted_dates[-1]),
         )
 
-        result_data = await loop.run_in_executor(
+        _overlay_result = None
+        _overlay_progress.update({"active": True, "completed": 0, "total": 1, "error": None})
+        loop.run_in_executor(
             None,
-            lambda: _run_backtest_core(daily_data, sorted_dates, strategy_type, params, initial_capital,
-                                        return_full=True, sh_index_returns=sh_returns),
+            lambda: _run_overlay_task(daily_data, sorted_dates, strategy_type, params, initial_capital, sh_returns),
         )
-
-        # 转换为前端期望的嵌套格式
-        nav_curve = result_data.pop("nav_curve", [])
-        daily_signals = result_data.pop("daily_signals", [])
-        position_changes = result_data.pop("position_changes", [])
-        portfolio_snapshots = result_data.pop("portfolio_snapshots", [])
-        response_data = {
-            "summary": result_data,
-            "nav_curve": nav_curve,
-            "daily_signals": daily_signals,
-            "position_changes": position_changes,
-            "portfolio_snapshots": portfolio_snapshots,
-        }
-
-        return {"code": 200, "data": response_data}
+        return {"code": 200, "data": {"accepted": True, "message": "叠加回测已启动，请通过进度接口查询"}}
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"策略叠加回放失败: {e}")
+        logger.error(f"启动策略叠加回测失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== 策略工坊 ====================
+# 用户自定义策略全部按 JWT 的 userId 归属；公开策略只读，复制才进入自己的账户。
+
+
+def _workshop_strategy(user_id: int, strategy_id: int) -> dict:
+    strategy = workshop.get_strategy(user_id, strategy_id)
+    if not strategy:
+        raise HTTPException(status_code=404, detail="策略不存在")
+    return strategy
+
+
+@app.post("/workshop/strategies")
+async def workshop_create_strategy(
+    payload: workshop.StrategyPayload,
+    authorization: str | None = Header(None, alias="Authorization"),
+):
+    user = _require_user(authorization)
+    try:
+        return {"code": 200, "data": workshop.create_strategy(user.user_id, payload)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/workshop/strategies")
+async def workshop_list_strategies(
+    scope: str = "mine",
+    authorization: str | None = Header(None, alias="Authorization"),
+):
+    user = _require_user(authorization)
+    if scope not in {"mine", "public"}:
+        raise HTTPException(status_code=400, detail="scope 仅支持 mine/public")
+    return {"code": 200, "data": workshop.list_strategies(user.user_id, scope)}
+
+
+@app.get("/workshop/strategies/{strategy_id}")
+async def workshop_get_strategy(
+    strategy_id: int,
+    authorization: str | None = Header(None, alias="Authorization"),
+):
+    user = _require_user(authorization)
+    strategy = workshop.get_strategy(user.user_id, strategy_id)
+    if not strategy:
+        strategy = workshop.get_strategy(user.user_id, strategy_id, public_only=True)
+    if not strategy:
+        raise HTTPException(status_code=404, detail="策略不存在")
+    return {"code": 200, "data": strategy}
+
+
+@app.put("/workshop/strategies/{strategy_id}")
+async def workshop_update_strategy(
+    strategy_id: int,
+    payload: workshop.StrategyPayload,
+    change_note: str = "",
+    authorization: str | None = Header(None, alias="Authorization"),
+):
+    user = _require_user(authorization)
+    try:
+        updated = workshop.update_strategy(user.user_id, strategy_id, payload, change_note)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not updated:
+        raise HTTPException(status_code=404, detail="策略不存在")
+    return {"code": 200, "data": updated}
+
+
+@app.delete("/workshop/strategies/{strategy_id}")
+async def workshop_delete_strategy(
+    strategy_id: int,
+    authorization: str | None = Header(None, alias="Authorization"),
+):
+    user = _require_user(authorization)
+    if not workshop.delete_strategy(user.user_id, strategy_id):
+        raise HTTPException(status_code=404, detail="策略不存在")
+    return {"code": 200, "message": "策略已删除"}
+
+
+@app.get("/workshop/strategies/{strategy_id}/versions")
+async def workshop_versions(
+    strategy_id: int,
+    authorization: str | None = Header(None, alias="Authorization"),
+):
+    user = _require_user(authorization)
+    _workshop_strategy(user.user_id, strategy_id)
+    return {"code": 200, "data": workshop.list_versions(user.user_id, strategy_id)}
+
+
+@app.post("/workshop/strategies/{strategy_id}/fork")
+async def workshop_fork_strategy(
+    strategy_id: int,
+    authorization: str | None = Header(None, alias="Authorization"),
+):
+    user = _require_user(authorization)
+    try:
+        copied = workshop.fork_strategy(user.user_id, strategy_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not copied:
+        raise HTTPException(status_code=404, detail="公开策略不存在")
+    return {"code": 200, "data": copied}
+
+
+@app.post("/workshop/strategies/{strategy_id}/apply")
+async def workshop_apply_strategy(
+    strategy_id: int,
+    request: workshop.ApplyRequest,
+    authorization: str | None = Header(None, alias="Authorization"),
+):
+    """运行策略：simulation=历史回测；live=当日计算（沿用 signal.generated 链路）"""
+    user = _require_user(authorization)
+    if request.mode not in {"simulation", "live"}:
+        raise HTTPException(status_code=400, detail="mode 仅支持 simulation/live")
+    strategy = _workshop_strategy(user.user_id, strategy_id)
+    started_at = datetime.now()
+    try:
+        if request.mode == "simulation":
+            end_date = request.end_date or started_at.strftime("%Y-%m-%d")
+            start_date = request.start_date or (started_at - timedelta(days=120)).strftime("%Y-%m-%d")
+            backtest_request = BacktestRequest(
+                strategy_type=StrategyType(strategy["scenario"]),
+                start_date=start_date, end_date=end_date,
+                initial_capital=request.initial_capital,
+                params=workshop.params_from_strategy(strategy),
+            )
+            params = _merge_backtest_params(user.user_id, backtest_request)
+            loop = asyncio.get_event_loop()
+            raw = await loop.run_in_executor(
+                None,
+                lambda: _execute_backtest(
+                    user.user_id, backtest_request.strategy_type, start_date, end_date,
+                    request.initial_capital, params,
+                ),
+            )
+            nav = raw.get("nav_curve") or []
+            step = max(1, len(nav) // 120)
+            result = {
+                "start_date": start_date, "end_date": end_date,
+                "initial_capital": request.initial_capital,
+                "total_return": raw.get("total_return"), "annual_return": raw.get("annual_return"),
+                "max_drawdown": raw.get("max_drawdown"), "sharpe_ratio": raw.get("sharpe_ratio"),
+                "win_rate": raw.get("win_rate"), "trade_count": raw.get("trade_count"),
+                "nav_curve": nav[::step],
+                "note": "回测按风控参数逐日回放；触发条件与执行动作在实盘信号层生效",
+            }
+        else:
+            response = await _calculate_for_user(
+                user.user_id, StrategyType(strategy["scenario"]), allow_stale=True, force=True,
+            )
+            signals = response.get("data") or []
+            # 信号本身不带板块行情/估值指标，按 sector_code 注入当日快照，
+            # 使「强势动量/资金流入/低估值」等算法条件能在信号层真实匹配
+            try:
+                snapshot = await asyncio.to_thread(
+                    _load_sector_snapshot, response.get("signal_date"), False
+                ) or []
+                sectors_by_code = {row.get("sector_code"): row for row in snapshot}
+                for sig in signals:
+                    row = sectors_by_code.get(sig.get("sector_code")) or {}
+                    for field in workshop.SNAPSHOT_FIELDS:
+                        if field in row:
+                            sig[field] = row[field]
+            except Exception as e:
+                logger.warning(f"策略工坊注入板块指标失败，相关条件将不匹配: {e}")
+            accepted, stats = workshop.apply_rules(signals, strategy)
+            result = {
+                "signal_date": response.get("signal_date"),
+                "market_regime": response.get("market_regime"),
+                "position_status": response.get("position_status"),
+                "stats": stats, "signals": accepted,
+                "note": "采纳信号沿用既有 signal.generated 链路；工坊规则仅过滤/调整本次生成的信号",
+            }
+        run = workshop.save_run(user.user_id, strategy_id, request.mode, "success", result,
+                                started_at=started_at.strftime("%Y-%m-%d %H:%M:%S"))
+        return {"code": 200, "data": {"run": run, "result": result}}
+    except Exception as e:
+        logger.error(f"策略工坊运行失败: strategy={strategy_id}, {e}")
+        workshop.save_run(user.user_id, strategy_id, request.mode, "failed", error=str(e),
+                          started_at=started_at.strftime("%Y-%m-%d %H:%M:%S"))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/workshop/runs")
+async def workshop_list_runs(
+    strategy_id: int | None = None,
+    limit: int = 50,
+    authorization: str | None = Header(None, alias="Authorization"),
+):
+    user = _require_user(authorization)
+    return {"code": 200, "data": workshop.list_runs(user.user_id, strategy_id, min(limit, 100))}
+
+
+@app.get("/workshop/runs/{run_id}")
+async def workshop_get_run(
+    run_id: int,
+    authorization: str | None = Header(None, alias="Authorization"),
+):
+    user = _require_user(authorization)
+    run = workshop.get_run(user.user_id, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="运行记录不存在")
+    return {"code": 200, "data": run}
+
+
+@app.post("/workshop/strategies/{strategy_id}/like")
+async def workshop_like_strategy(
+    strategy_id: int,
+    authorization: str | None = Header(None, alias="Authorization"),
+):
+    """点赞公开策略：同一账号只计一次（数据库唯一约束兜底）"""
+    user = _require_user(authorization)
+    if not workshop.get_strategy(user.user_id, strategy_id, public_only=True):
+        raise HTTPException(status_code=404, detail="公开策略不存在")
+    return {"code": 200, "data": workshop.like_strategy(user.user_id, strategy_id)}
+
+
+@app.delete("/workshop/strategies/{strategy_id}/like")
+async def workshop_unlike_strategy(
+    strategy_id: int,
+    authorization: str | None = Header(None, alias="Authorization"),
+):
+    user = _require_user(authorization)
+    if not workshop.get_strategy(user.user_id, strategy_id, public_only=True):
+        raise HTTPException(status_code=404, detail="公开策略不存在")
+    return {"code": 200, "data": workshop.unlike_strategy(user.user_id, strategy_id)}
+
+
+@app.get("/workshop/algorithms/builtin")
+async def workshop_builtin_algorithms(
+    authorization: str | None = Header(None, alias="Authorization"),
+):
+    """系统内置算法：一键插入触发条件，字段与后端白名单保持一致"""
+    _require_user(authorization)
+    return {"code": 200, "data": workshop.BUILTIN_ALGORITHMS}
+
+
+@app.get("/workshop/algorithms")
+async def workshop_list_algorithms(
+    authorization: str | None = Header(None, alias="Authorization"),
+):
+    user = _require_user(authorization)
+    return {"code": 200, "data": workshop.list_algorithms(user.user_id)}
+
+
+@app.post("/workshop/algorithms")
+async def workshop_create_algorithm(
+    payload: workshop.AlgorithmPayload,
+    authorization: str | None = Header(None, alias="Authorization"),
+):
+    user = _require_user(authorization)
+    try:
+        return {"code": 200, "data": workshop.create_algorithm(user.user_id, payload)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.put("/workshop/algorithms/{algorithm_id}")
+async def workshop_update_algorithm(
+    algorithm_id: int,
+    payload: workshop.AlgorithmPayload,
+    authorization: str | None = Header(None, alias="Authorization"),
+):
+    user = _require_user(authorization)
+    try:
+        updated = workshop.update_algorithm(user.user_id, algorithm_id, payload)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not updated:
+        raise HTTPException(status_code=404, detail="算法不存在")
+    return {"code": 200, "data": updated}
+
+
+@app.delete("/workshop/algorithms/{algorithm_id}")
+async def workshop_delete_algorithm(
+    algorithm_id: int,
+    authorization: str | None = Header(None, alias="Authorization"),
+):
+    user = _require_user(authorization)
+    if not workshop.delete_algorithm(user.user_id, algorithm_id):
+        raise HTTPException(status_code=404, detail="算法不存在")
+    return {"code": 200, "message": "算法已删除"}
 
 
 if __name__ == "__main__":
