@@ -249,7 +249,7 @@ Agent 工具（`get_market_overview` / `get_market_breadth` 等）依赖 `extern
 
 | 数据 | 主源 | 备用源 | 说明 |
 |------|------|--------|------|
-| A股主要指数 | 新浪 `hq.sinajs.cn`（完整行情，含开高低收/成交额） | 东财 `push2`（`ak.stock_zh_index_spot_em`） | 新浪响应约 0.4s，东财被阻断时单次耗时 20s+ |
+| A股主要指数 | 新浪 `hq.sinajs.cn`（完整行情，含开高低收/成交额） | 东财 `push2`（`ak.index_zh_spot_em`） | 新浪响应约 0.4s，东财被阻断时单次耗时 20s+ |
 | 全球指数 | 东财（字段最多，含 DAX/CAC40/KOSPI） | 新浪 `int_*`（仅 6 个主要指数） | |
 | 涨跌家数 | 东财全A行情 `ak.stock_zh_a_spot_em`（含涨跌幅分布） | 乐咕乐股 `ak.stock_market_activity_legu`（无分布字段） | |
 
@@ -414,9 +414,9 @@ assistant 与尽量新的 tool 结果，并**同步裁剪 assistant 的 tool_cal
 | `get_index_futures_basis` | `ak.futures_main_sina` IF0/IH0/IC0/IM0 + 新浪宽基指数收盘 | ~1010 字符 | 机构预期：贴水收窄/加深、持仓量变化 |
 | `get_commodity_futures_trend` | `ak.futures_main_sina` SC0/RB0/I0/CU0 | ~650 字符 | 石化/钢铁/有色周期板块的成本与景气 |
 | `get_limit_up_stats` | `ak.stock_zt_pool_em` + `stock_zt_pool_zbgc_em` + `stock_lhb_detail_em` | ~600 字符 | 情绪温度、连板梯队、题材集中度、机构龙虎榜 |
-| `get_market_fund_structure` | `ak.stock_market_fund_flow` | ~810 字符 | 超大单(机构)/小单(散户)背离，判断上涨质量 |
+| `get_market_fund_structure` | `ak.stock_fund_flow_market_em` | ~810 字符 | 超大单(机构)/小单(散户)背离，判断上涨质量 |
 | `get_full_market_valuation` | `ak.stock_a_ttm_lyr` + `stock_index_pe_lg`(沪深300/中证500) | ~390 字符 | 市场整体估值位置（与板块级估值互补） |
-| `get_bond_spread`（改造） | `ak.bond_zh_us_rate` | 30 天裸序列 → **364 字符摘要** | 期限利差、中美利差及变化（bp） |
+| `get_bond_spread`（改造） | `ak.bond_zh_us_yield_em` | 30 天裸序列 → **364 字符摘要** | 期限利差、中美利差及变化（bp） |
 
 **取不到、因此没做的**（实测失败，不要重复尝试）：北向/南向（源头停止披露）、
 `stock_sector_fund_flow_rank`（push2 域 `RemoteDisconnected`，已有 `all-sectors` 覆盖）、
@@ -533,6 +533,7 @@ Exchange: rotation (topic, durable)
 // signal.generated → AI 服务消费
 {
   "event": "signals_generated",
+  "user_id": 3,
   "strategy_type": "AGGRESSIVE",
   "signal_date": "2026-05-01",
   "signals": [
@@ -549,6 +550,7 @@ Exchange: rotation (topic, durable)
 // ai.signal.analyzed → 信号通知服务消费
 {
   "event": "signal_analyzed",
+  "user_id": 3,
   "strategy_type": "AGGRESSIVE",
   "signal_date": "2026-05-01",
   "analyses": [
@@ -603,9 +605,14 @@ Response:
 }
 ```
 
-**失败语义**：同日结果缓存 30 天（`ai:analysis:{strategy_type}:{date}`），命中即返回；
+**失败语义**：同日结果缓存 30 天（`user:{user_id}:ai:analysis:{strategy_type}:{date}`），命中即返回；
 信号被重新计算时 AI 服务会先作废该日缓存（见 6.3），避免日历回放展示过期结论。
 signal-notification 不可用或返回非 200 时接口返回 **502**，不会退化成"当日无信号"。
+
+**自动解读只跑管理员**：信号按账号各算一套后，若对每个账号 × 三档策略都调 LLM，成本会随账号数线性放大。
+消费 `signals_generated` 时先看 `user_id`，非管理员直接跳过（不写缓存、不发 `ai.signal.analyzed`）；
+普通账号的解读在 AI 页面按需触发（`/api/ai/analyze-signal`），用该账号自己的模型配置，
+结果也只写该账号的缓存键。AI 服务访问 strategy / signal 服务时统一带 `X-Internal-Token` 凭证。
 
 ### 5.2 风险检查
 
@@ -735,12 +742,34 @@ Request:
 ### 6.1 Key 设计
 
 ```
-ai:config                          → 模型配置 JSON
-ai:analysis:{strategy_type}:{date} → 信号解读结果列表
-ai:alerts:{date}                   → 当日风险预警列表
-ai:review:{date}                   → 复盘报告
-ai:chat:{conversation_id}          → 对话历史 (list)
+user:{user_id}:ai:config                    → 该用户的模型配置 JSON
+user:{user_id}:ai:providers                 → 该用户的提供商凭据 JSON
+user:{user_id}:ai:conversations             → 该用户的对话索引 (zset)
+user:{user_id}:ai:conv:{conversation_id}    → 该用户的对话历史 (string)
+user:{user_id}:ai:analysis:{strategy_type}:{date}  → 该账号的信号解读结果（30 天）
+ai:alerts:{date}                            → 当日风险预警列表
+ai:review:{date}                            → 复盘报告（全局）
 ```
+
+用户相关键全部带 `user:{user_id}:` 前缀：AI 配置、API Key、对话历史按用户隔离，不再存在全局
+`ai:config` / `ai:providers`。服务启动时自动把历史全局键归并到管理员账号（user:1）后删除。
+后台任务（每日复盘、信号解读、风控巡检）没有用户上下文，统一取管理员账号的配置；普通用户未配置
+自己的凭据时，`/api/ai/chat`、`/api/ai/analyze-signal`、`/api/ai/daily-review` 返回 503，
+不会借用管理员的 key。
+
+**账号删除时的清理**：上面这些 `user:{id}:*` 键都是个人数据，账号被删除时必须一起清空，否则
+id 再次分配（库还原、序列回退、同名重建）后，新账号会直接继承前一个账号的 AI 配置、API Key 和
+对话历史。auth 服务删号前会调用：
+
+```
+POST /internal/users/{user_id}/purge
+Header: X-Internal-Token: $INTERNAL_TOKEN
+→ {"code": 200, "data": {"redis_keys": 清理的键数}}
+```
+
+实现要点：`scan_iter` 分批（200 个/批）删除，每轮删完再扫一次确认，最多 3 轮，仍有残留直接返回
+500 让删号失败（`RedisManager.delete` 失败只返回 0 不抛异常，只删不查会出现"删了但没删掉"）。
+未配置 `INTERNAL_TOKEN` 时 auth 侧跳过清理并打 WARN 日志。
 
 ### 6.2 TTL 策略
 
@@ -837,17 +866,18 @@ backend-ai-decision:
 
 ### 8.3 LLM 提供商凭据解析
 
-提供商凭据（api_key / base_url）统一保存在 Redis `ai:providers`；`ai:config` 里的
-`provider` / `api_key` / `base_url` 是设置页不再写入的遗留字段（设置页只写
+提供商凭据（api_key / base_url）按用户保存在 Redis `user:{user_id}:ai:providers`；`user:{user_id}:ai:config`
+里的 `provider` / `api_key` / `base_url` 是设置页不再写入的遗留字段（设置页只写
 `temperature` / `max_tokens` / `signal_analysis_*`），其 `provider` 恒为占位值 `openai`。
-因此默认 LLM 客户端（对话与复盘使用）按以下顺序解析凭据（`_resolve_default_llm_args`）：
+因此某个用户的默认 LLM 客户端（该用户的对话与复盘）按以下顺序解析凭据（`_resolve_default_llm_args`）：
 
-1. 遗留字段 `provider` 对应的 `ai:providers` 凭据；
-2. 回退 `signal_analysis_provider` 的凭据与模型（后端唯一由用户选定的提供商）；
-3. 回退 `ai:config` 中直接写入的 `api_key`。
+1. 遗留字段 `provider` 对应的**该用户** `ai:providers` 凭据；
+2. 回退该用户 `signal_analysis_provider` 的凭据与模型；
+3. 回退该用户 `ai:config` 中直接写入的 `api_key`。
 
 非 ollama 的提供商统一走 OpenAI 兼容协议分支。若三步都拿不到凭据，客户端保持未初始化，
-`/api/ai/chat` 与 `/api/ai/daily-review` 返回 503 而不是 500。
+`/api/ai/chat` 与 `/api/ai/daily-review` 返回 503 而不是 500。管理员账号的默认配置来自环境变量
+（`AI_PROVIDER` / `AI_API_KEY` / `AI_MODEL`），后台任务固定使用管理员账号这一份。
 
 ### 8.4 Ollama 本地模型排错 (2026-10-22)
 

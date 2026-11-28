@@ -81,6 +81,8 @@ pytest tests/
 - **Response format**: Python services return `{"code": 200, "data": ..., "message": "..."}`. Use `success_response()` / `error_response()` from `shared`.
 - **Logs**: All Python services use `loguru`, configured via `LOG_LEVEL` env var.
 - **RabbitMQ**: Exchange is `topic` type named `rotation`. Python services share a singleton `RabbitMQManager`.
+- **Account isolation**: personal data lives under `user:{id}:...` Redis keys and `user_id` columns. Account identity comes only from `Authorization: Bearer` (or `X-Internal-Token` for service-to-service = admin scope). Never accept a username/user id from URL or query params.
+- **Internal token**: `INTERNAL_TOKEN` env var must be identical across scheduler / ai-decision / mcp-agent / strategy / signal-notification. Internal calls send `X-Internal-Token`; when set, strategy and signal-notification reject anonymous requests with 401.
 
 ## AI Decision Service
 

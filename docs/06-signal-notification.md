@@ -159,23 +159,24 @@ Routing Key: ai.#   (匹配 ai.signal.analyzed)
 
 ```python
 if event == "signals_generated":
-    # 1. WebSocket广播 + 缓存信号（不等待AI，保证前端及时可见）
-    _broadcast_and_cache(signals, strategy_type, signal_date)
+    user_id = payload["user_id"]          # 策略引擎按账号算出的一套信号
+    # 1. WebSocket广播 + 缓存信号（只发给该账号，不等待AI，保证前端及时可见）
+    _broadcast_and_cache(signals, strategy_type, signal_date, user_id)
 
-    # 2. 外部推送：有买卖信号且 ai_push_enabled 时暂存，等AI解读合并后推送
+    # 2. 外部推送：有买卖信号且该账号 ai_push_enabled 时暂存，等AI解读合并后推送
     if settings.ai_push_enabled and _has_trade_signal(signals):
-        _pending_push[f"{strategy_type}:{signal_date}"] = {...}
+        _pending_push[f"{user_id}:{strategy_type}:{signal_date}"] = {...}
     elif not _has_trade_signal(signals):
         # 空仓/清仓（无买卖信号）：仅广播+缓存，不推送外部渠道
         logger.info("无买卖信号，跳过外部推送，仅广播与缓存")
     else:
-        _do_push(signals, strategy_type, signal_date)
+        _do_push(signals, strategy_type, signal_date, user_id)
 
 # AI解读到达（ai.signal.analyzed）
 if event == "signal_analyzed":
-    pending = _pending_push.pop(f"{strategy_type}:{signal_date}", None)
+    pending = _pending_push.pop(f"{user_id}:{strategy_type}:{signal_date}", None)
     if pending:
-        _do_push(pending.signals, strategy_type, signal_date, ai_analyses=analyses)
+        _do_push(pending.signals, strategy_type, signal_date, user_id, ai_analyses=analyses)
 ```
 
 #### 4.2.1 AI 分析随推送（必选能力）
@@ -236,10 +237,11 @@ GET /signals/today?strategy_type=AGGRESSIVE
 
 ```
 GET /signals/history?strategy_type=MODERATE&start_date=2026-04-01&end_date=2026-04-18
+Authorization: Bearer <token>
 
 逻辑:
   1. 遍历日期范围
-  2. 从Redis读取每日信号 (signals:{type}:{date})
+  2. 从Redis读取每日信号 (user:{id}:signals:{type}:{date})，id 取自 Token
   3. 汇总返回
 ```
 
@@ -250,7 +252,7 @@ GET /signals/calendar?strategy_type=AGGRESSIVE&month=2026-04
 
 逻辑:
   1. 计算月份起止日期
-  2. 逐日读取信号缓存 signals:{type}:{date} 与状态缓存 signals:{type}:{date}:status
+  2. 逐日读取该账号的信号缓存 user:{id}:signals:{type}:{date} 与状态缓存 user:{id}:signals:{type}:{date}:status
   3. 返回当月所有信号；对"已计算但空仓"的日期额外输出空仓标记
 ```
 
@@ -280,17 +282,20 @@ GET /signals/calendar?strategy_type=AGGRESSIVE&month=2026-04
 
 ```
 GET /signals/notify/config
-  - 获取推送通道配置（webhook URL会脱敏显示）
+  - 获取当前登录用户自己的推送通道配置（webhook URL会脱敏显示）
 
 PUT /signals/notify/config
 Content-Type: application/json
-  - 更新推送通道配置（钉钉/企业微信）
-  - 配置持久化到Redis (key: notify_channels_config)
+  - 更新当前用户自己的推送通道配置（钉钉/企业微信）
+  - 配置持久化到Redis (key: user:{user_id}:notify_config)
 
 POST /signals/notify/test/{channel}?strategy_type=MODERATE
-  - 测试推送通道（channel: dingtalk/wecom）
-  - 发送测试消息验证配置是否正确
+  - 用当前用户自己的通道配置发送测试消息（channel: dingtalk/wecom）
 ```
+
+三个接口都需要 `Authorization: Bearer <token>`，用户身份由 `shared/auth.py` 本地验签 JWT 得到，
+不再有"全局一份推送配置"。管理员的环境变量通道（`DINGTALK_*` / `WECOM_*`）只作为
+管理员账号首次使用时的初始值，普通用户默认全部未启用。
 
 ### 5.5 健康检查
 
@@ -317,12 +322,12 @@ GET /health
 ### 6.1 Key设计
 
 ```
-signals:{strategy_type}:{date}   - 每日信号缓存
+user:{user_id}:signals:{strategy_type}:{date}   - 每日信号缓存（按账号隔离）
   TTL: 7天 (604800秒)
   Value: JSON数组
 
 示例:
-  signals:AGGRESSIVE:2026-04-18 → [{"sector_name":"银行","direction":"BUY",...}, ...]
+  user:3:signals:AGGRESSIVE:2026-04-18 → [{"sector_name":"银行","direction":"BUY",...}, ...]
 ```
 
 ### 6.2 缓存更新时机
@@ -435,9 +440,23 @@ function connectWebSocket() {
 ### 8.3 配置持久化机制
 
 #### 8.3.1 配置存储
-- 推送通道配置存储在Redis中（key: `notify_channels_config`）
+- 推送通道配置按用户隔离：Redis key `user:{user_id}:notify_config`，每个用户一份，互不覆盖
+- `notify:users` 集合登记所有配置过通道的用户，信号分发时遍历该集合
 - 支持部分更新，合并新旧配置
-- 服务启动时自动从Redis加载配置
+- 历史全局键 `notify_channels_config` 在服务启动时归并到管理员账号（user:1）后删除
+
+#### 8.3.2 信号分发与实时推送偏好
+- 信号由策略引擎**按账号各算一套**（参数、持仓、回测都跟随账号），事件 payload 带 `user_id`；
+  本服务只把该账号的信号发给该账号，不做任何跨账号分发
+- 外部推送同理：`_do_push(..., user_id)` 只发往该账号 `user:{id}:notify_config` 里启用的通道，
+  未启用通道的账号不推送
+- WebSocket 连接必须带有效 token（`/ws/signals?token=...`），服务端解析出真实用户 id 后登记连接，
+  伪造/缺失 token 直接关闭连接；`send_signals_to_user()` 只投递给该 id 的连接
+- 广播时按用户偏好过滤：读取 `user:{user_id}:settings:ws_push_enabled` 与
+  `user:{user_id}:settings:ws_push_strategy_types`（由 strategy 服务的 `/settings` 写入，两个服务同为 Redis db 1），
+  关闭推送或不在订阅档位内的用户不下发；未设置时默认全档位接收
+- `/signals/today`、`/signals/history` 需要 `Authorization`，只返回当前账号缓存；
+  内部服务用 `X-Internal-Token` 时按管理员口径读取
 
 #### 8.3.2 配置API
 ```http

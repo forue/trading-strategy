@@ -40,25 +40,35 @@ frontend/src/
 
 - 完整日线序列只保存在服务端 Redis 会话 `stock_sense:session:{sid}`（TTL 4 小时），接口按 `cursor` 切片返回 `_chart()` 结果，前端任何时刻拿不到未来数据。
 - 训练中 `bars[].date`、`current_date`、`start_date`、成交与持仓日期统一替换为训练区间序号 `D0038`，前端显示为「第38根」，避免日期暗示牛熊阶段与政策窗口。`_state()` 不返回 `code` / `name`；结算后的 `summary`、`session.current_date`、`session.trades` 与复盘才返回真实日期。
-- 抽题：`_fetch_stock_pool()` 取股票池 → 排除该用户最近 10 轮标的（`stock_sense:recent:{user}`）→ 取近 5 年日线（缺失时请求 data-collector 补采）→ `_pick_window()` 随机截取连续一年（≥230 个交易日、单次缺口 ≤30 天）→ 区间前 90 根作为 MA60/MACD 预热（不展示）。最多尝试 8 只标的。
-- 每轮开始后台补采 12 只标的扩充 `stock_sense:ready_codes`（上限 120 只），用 `stock_sense:warm_lock` 避免并发重复采集。
+- 抽题：`_fetch_stock_pool()` 取股票池 → 排除该用户最近 10 轮标的（`user:{id}:stock_sense:recent`）→ 取近 5 年日线（缺失时请求 data-collector 补采）→ `_pick_window()` 随机截取连续一年（≥230 个交易日、单次缺口 ≤30 天）→ 区间前 90 根作为 MA60/MACD 预热（不展示）。最多尝试 8 只标的。
+- 每轮开始后台补采 12 只标的扩充 `stock_sense:ready_codes`（上限 120 只），用 `stock_sense:warm_lock` 避免并发重复采集。这两者是全体共享的样本池资源，不带账号前缀。
 - 初始可见区间为训练区间前两个月（`INITIAL_VIEW_MONTHS = 2`）；`unit=day` 推进一日，`unit=week` 推进到下一自然周最后一个交易日，前端切「按周」会同步把视图切成周线。
-- 前端用 `localStorage['stock-sense-sid:' + user]` 记录会话 id，刷新页面后按 id 恢复（会话与划线都在后端）。结算时清除该键。
+- 前端用 `localStorage['stock-sense-sid:' + user]` 记录会话 id，刷新页面后按 id 恢复（会话与划线都在后端）。结算时清除该键；该键只是本机记忆，真正的归属由 Token 决定。
+
+**账号归属**：会话、历史记录、复盘全部绑定登录账号的 `user_id`。所有接口从 `Authorization` 头解析账号（`_actor()`），会话内保存 `user_id`/`user`，访问他人会话返回 403，不接受 URL/查询参数指定账号。
 
 ## 四、API 契约
 
+所有接口都需要 `Authorization: Bearer <token>`，账号由 Token 决定。
+
 | 方法 | 路径 | 关键参数 | 返回 |
 |------|------|----------|------|
-| POST | `/start` | `user` | `session` + `chart`（日线） |
+| POST | `/start` | — | `session` + `chart`（日线）+ `quota` |
 | GET | `/{sid}/chart` | `view=day\|week\|month` | 当前可见 `chart` + `session`，不推进 |
 | POST | `/{sid}/step` | `unit=day\|week`、`view` | 推进后的 `session` + `chart`；到末尾时附带 `summary` |
 | POST | `/{sid}/trade` | `action=buy\|sell`、`ratio`、`view` | 成交后的 `session` + `chart` |
 | POST | `/{sid}/lines` | body `{lines:[...]}` 整体覆盖 | 保存后的 `lines` |
 | POST | `/{sid}/finish` | `view` | `summary` + `session` + 结算后真实日期的 `chart` |
-| GET | `/stats/{user}` | — | 聚合统计 + 最近记录 |
-| GET | `/replay/{session_id}` | `user`、`view` | `record`（含现场回算的 `review`）+ `chart` |
+| GET | `/stats` | — | 当前账号的聚合统计 + 最近记录 |
+| GET | `/replay/{session_id}` | `view` | `record`（含现场回算的 `review`）+ `chart` |
 
 `/finish?view=` 必须返回刷新后的图表：训练中主图是脱敏日期，结算后 `_state()` 还原成交真实日期，若主图不刷新，前端按日期字符串匹配会让 B/S 点全部落到首根（买入后中途结束训练时最明显）。
+
+**入口配额**：`/start` 先调 auth 服务 `POST /api/auth/quota/consume?feature=stock_sense_training`（转发用户的
+`Authorization` 头），按 Token 解析出的账号计次——次数由后台「高级功能」页配置，默认普通账号 3 次/天、管理员不限。
+超限返回 429、功能未开放返回 403，文案原样透传；auth 不可达时放行并记 warning（认证抖动不阻断训练）。
+计次与数据归属用同一个账号（都来自 Token），不再接受请求参数里的 `user`。
+每次 `/start` 的响应额外带 `quota`（`dailyLimit` / `used` / `remaining`，`dailyLimit=0` 表示不限），前端页头据此显示「今日剩余 N/M 次」并在用完后禁用按钮。
 
 ## 五、数据结构
 
@@ -142,7 +152,9 @@ frontend/src/
 
 ## 十一、统计与历史记录
 
-记录按用户存 Redis list（`stock_sense:records:{user}`，最近 200 条）。`_stats()` 返回 `total`、`win_count`、`win_rate`、`avg_return`、`avg_excess`、`best_return`、`worst_return`、`cumulative_return`、`avg_hold_days`、`avg_trade_count` 与 `records`（前端只展示前 50 条）。`cumulative_return` 按各轮收益复利相乘。
+记录按账号存 Redis list（`user:{id}:stock_sense:records`，最近 200 条）。`_stats()` 返回 `total`、`win_count`、`win_rate`、`avg_return`、`avg_excess`、`best_return`、`worst_return`、`cumulative_return`、`avg_hold_days`、`avg_trade_count` 与 `records`（前端只展示前 50 条）。`cumulative_return` 按各轮收益复利相乘。
+
+改造前的 `stock_sense:records:{username}` 列表由启动时 `migrate_legacy_records()` 按 users 表解析 username→id 后归并到新键（幂等，解析不到的账号留在旧键不动）。
 
 ## 十二、关键常量
 

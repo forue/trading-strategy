@@ -58,8 +58,8 @@
            │ HTTP (httpx异步客户端)
            ▼
     ┌──────────────────────────────────────┐
-    │  数据采集服务 (:8003)  ← /collect/*  │
-    │  策略引擎服务 (:8002)  ← /calculate  │
+    │  数据采集服务 (:8003)  ← /collect/*    │
+    │  策略引擎服务 (:8002)  ← /calculate/all │
     └──────────────────────────────────────┘
 ```
 
@@ -254,6 +254,11 @@ async def job_calculate_strategy():
             await _clear_executed(f"signal:calculated:{today}")
 ```
 
+`_trigger_strategy_calculation()` 只发一个 `POST /calculate/all`（`X-Internal-Token` 凭证，timeout 600s）：
+策略参数按账号隔离后，信号必须按账号各算一套，由策略服务在服务端遍历所有启用账号 × 三档策略，
+行情快照与历史 K 线只加载一次。调度器侧不再关心账号数量，也避免 N×3 次 HTTP 往返。
+信号收益回填与缓存补录同样带 `all_users=true`（`/signals/backfill`、`/signals/sync`），一次覆盖全部账号。
+
 #### 4.2.1 采算竞态与幂等
 
 > 背景：2026-09-11 15:37 服务重启后，15:00 采集任务与 15:05 备用计算任务因 misfire 同时补跑，
@@ -272,7 +277,10 @@ async def job_calculate_strategy():
 
 > 背景：2026-09-16 排查发现 `auth` 服务登录时也会写 `signal:calculated:{date}`，导致用户当天首次登录后，
 > 调度中心的 15:00/15:05 任务全部判定"今日已计算"而跳过，出现"数据不采集、信号不计算"。
-> 现已改为 `auth` 使用独立键 `signal:login_trigger:{date}` 抑制登录侧重复触发。
+> 现已改为 `auth` 使用独立键抑制重复触发：信号按账号隔离后，计算标记必须带上账号
+> （`signal:login_trigger:{date}:{user_id}`），否则当天第一个登录的人会把其他账号一并挡掉。
+> 全局数据采集仍按自然日只做一次（`signal:login_collect:{date}`），登录触发的 `/calculate` 会带上
+> 该用户的 JWT，让信号落到他自己的账号下。
 
 ### 4.3 启动时任务
 

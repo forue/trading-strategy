@@ -244,9 +244,9 @@ services/strategy/app/
 
 ```
 触发方式: 
-  1. 定时触发: 任务调度中心 15:30 数据采集后链式触发（或15:35备用触发）
-  2. 手动触发: 前端策略管理页触发 /calculate
-  3. 登录触发: 认证服务登录成功后触发 /collect + /calculate
+  1. 定时触发: 任务调度中心 15:30 数据采集后链式触发 /calculate/all（或15:35备用触发），一次覆盖所有启用账号 × 三档策略
+  2. 手动触发: 前端策略管理页触发 /calculate，只算当前账号（账号取自 Token）
+  3. 登录触发: 认证服务登录成功后触发 /collect + /calculate（同样只算当前账号）
 
 计算流程:
   1. 确定目标日期: signal_date（默认今天），并判断是否为交易日
@@ -258,7 +258,7 @@ services/strategy/app/
         - allow_stale=false（默认，自动调度）→ 拒绝生成信号，返回 data_ready=false
         - allow_stale=true（手动/登录触发）→ 回退到最近有数据的交易日 D，并将信号日期修正为 D
 
-  3. 从Redis读取当前持仓 (positions:{strategy_type})
+  3. 从Redis读取当前持仓 (user:{id}:positions:{strategy_type})
 
   4. 构建截面上下文（各板块 `_history` 中的 `date` + `index_change_pct` 按日合并）
      历史序列一律以生效信号日期为界，避免混入信号日之后的走势
@@ -273,13 +273,35 @@ services/strategy/app/
       - 冷却期: 止损后 cooldown_days 内不建仓
 
   7. 信号处理（仅在数据就绪时执行）:
-      a. 更新持仓到Redis (positions:{type}, TTL: 7天)
-         - 仅在本次确实产生 BUY/SELL 信号时更新；无信号表示"维持现有持仓"，绝不写空仓位
-      b. 写入Redis缓存 (key: signals:{type}:{date}, TTL: 7天)
-      c. 信号落库 PostgreSQL (trade_signals，按当日+唯一键幂等去重，见 5.13)
-      d. 通过RabbitMQ发布 signals_generated 事件
-      e. 信号通知服务消费事件 → WebSocket推送给前端
+     a. 更新持仓到Redis (user:{id}:positions:{type}, TTL: 7天)
+        - 仅在本次确实产生 BUY/SELL 信号时更新；无信号表示"维持现有持仓"，绝不写空仓位
+     b. 写入Redis缓存 (key: user:{id}:signals:{type}:{date}, TTL: 7天)
+     c. 信号落库 PostgreSQL (trade_signals，按 (user_id, 当日, 板块, 方向) 幂等去重，见 5.13)
+     d. 通过RabbitMQ发布 signals_generated 事件（payload 带 user_id）
+     e. 信号通知服务按 user_id 消费 → 只推送给该账号的 WebSocket 连接与推送通道
 ```
+
+#### 4.1.0 账号隔离
+
+策略参数、持仓、信号缓存、回测结果、复盘统计全部按登录账号隔离，Redis 键统一加 `user:{id}:` 前缀：
+
+| 数据 | 键 |
+|------|-----|
+| 策略参数 | `user:{id}:strategy_configs`（老键在启动时由 `_migrate_legacy_configs()` 归到管理员） |
+| 持仓 | `user:{id}:positions:{type}` |
+| 当日信号 | `user:{id}:signals:{type}:{date}` |
+| 信号日历 / 状态 | `user:{id}:signals:calendar:{type}:{month}`、`user:{id}:signals:status:{type}:{date}` |
+| 市场状态 | `user:{id}:market_regime:{type}:{date}` |
+| 回测结果 | `user:{id}:backtest:*` |
+| 盘感训练 | `user:{id}:stock_sense:*` |
+
+账号来源只有两个：前端请求的 `Authorization: Bearer <token>`（`_resolve_actor()` 解析），
+或内部服务用 `X-Internal-Token` 换取的**管理员口径**。URL/查询参数不再能指定账号。
+信号落库 `trade_signals` / `signal_outcomes` 都带 `user_id`，唯一键扩为 `(user_id, ...)`，
+两个账号同一天同一板块同一方向互不覆盖。
+
+批量入口 `POST /calculate/all`（管理员或内部 token 可用）遍历所有启用账号 × 三档策略，
+定时任务只调这一个接口，避免 N×3 次请求与重复的板块历史查询。
 
 #### 4.1.1 信号日期与数据日期强一致
 
@@ -302,6 +324,7 @@ services/strategy/app/
 ```json
 {
   "event": "signals_generated",
+  "user_id": 3,
   "strategy_type": "AGGRESSIVE",
   "signal_date": "2026-04-18",
   "count": 5,
@@ -359,6 +382,7 @@ services/strategy/app/
 
 ```
 POST /calculate?strategy_type=AGGRESSIVE&signal_date=2026-04-18&allow_stale=false&force=false
+Authorization: Bearer <token>
 ```
 
 | 参数 | 默认 | 说明 |
@@ -367,6 +391,26 @@ POST /calculate?strategy_type=AGGRESSIVE&signal_date=2026-04-18&allow_stale=fals
 | `signal_date` | 今天 | 期望的信号日期 |
 | `allow_stale` | `false` | 目标日期无数据（非交易日或数据未入库）时，允许回退到最近有数据的交易日，并同步修正信号日期 |
 | `force` | `false` | 回退场景且该日期已有信号时，强制重算覆盖（默认直接返回已有信号） |
+
+账号取自 `Authorization`（或内部服务用 `X-Internal-Token` 时按管理员口径），参数里无法指定账号。
+定时任务改用批量入口：
+
+```
+POST /calculate/all?signal_date=&allow_stale=false&force=false   # ADMIN 或 X-Internal-Token
+```
+
+返回 `users`（参与计算的账号数）、`computed`（成功条数）与逐账号明细；单账号失败不中断其余账号。
+
+账号删除时的清理入口：
+
+```
+POST /internal/users/{user_id}/purge   # 仅 X-Internal-Token，删除该账号全部个人数据
+```
+
+清 Redis 中 `user:{id}:*`（信号缓存、市场状态、持仓、策略参数、盘感训练记录、通知配置、
+个人设置）与 `trade_signals` / `signal_outcomes` 中该账号的行，并清掉进程内配置缓存。
+`RedisManager.delete` 失败只返回 0 不抛异常，所以接口会删完再扫一遍，三轮仍有残留就报
+500——宁可删号失败，也不能把旧数据留给下一个拿到同一 id 的账号。auth 删除账号前必调此接口。
 
 响应:
 ```json
@@ -402,7 +446,7 @@ POST /calculate?strategy_type=AGGRESSIVE&signal_date=2026-04-18&allow_stale=fals
   与回测的 BEAR 确认口径一致；未达确认天数时只"不买入"，不主动卖出，避免假信号频繁清仓
 - 回测路径不传 `regime_history`，保持"只不买入"的原行为，其熊市清仓仍由回测自身的 `BEAR_EXIT` 流程处理，
   因此本次改动不影响已验证的回测结果
-- 当日市场状态写入 `market_regime:{strategy_type}:{date}`（TTL 30 天），供跨交易日连续确认
+- 当日市场状态写入 `user:{id}:market_regime:{strategy_type}:{date}`（TTL 30 天），供跨交易日连续确认
 - **重算保留清仓留痕**：`/calculate` 写缓存前，若本次重算得到空仓（无任何信号），而该日缓存中
   已存在清仓 SELL 记录（`direction=SELL` 且 `reason` 含"清仓"），则保留这些清仓记录并同步写入
   `:status`（`position_status=EMPTY`、`empty_reason` 取清仓理由），避免"空仓重算"用空列表
@@ -470,7 +514,7 @@ GET /signals/today?strategy_type=AGGRESSIVE
 ```
 GET /positions?strategy_type=AGGRESSIVE
 
-响应: 从 Redis（positions:{strategy_type}）读取当前持仓权重
+响应: 从 Redis（user:{id}:positions:{strategy_type}）读取当前账号的持仓权重
 {
   "code": 200,
   "data": {
@@ -481,7 +525,7 @@ GET /positions?strategy_type=AGGRESSIVE
 }
 ```
 
-- 只读暴露，持仓由 `/calculate` 计算流程写入（键 `positions:{strategy_type}`，TTL 7 天）；
+- 只读暴露，持仓由 `/calculate` 计算流程写入（键 `user:{id}:positions:{strategy_type}`，TTL 7 天，账号取自 Token）；
 - AI 决策复盘（`DailyReviewDataCollector`）与 Agent 工具 `get_current_positions` 均调用此接口。
 
 ### 5.5 获取信号日历
@@ -493,6 +537,60 @@ GET /signals/calendar?strategy_type=AGGRESSIVE&month=2026-04
 ```
 
 ### 5.6 策略回测
+
+浏览器侧不直接调 `POST /backtest`：回测单次 10~20 秒，手机切换网络（WiFi ↔ 蜂窝）时
+浏览器会断开连接并重发请求，用户看到「回测失败」、后端却已算完写库，重发一次就多出一条
+重复记录。因此前端走「提交任务 → 轮询状态」，`POST /backtest` 同步接口保留给
+scheduler / mcp-agent / ai-decision 等内部服务。
+
+提交任务（参数指纹 = 策略 + 区间 + 本金 + 完整参数 md5；相同参数在任务结束前重复提交
+会返回同一个 `task_id`，不会重复计算）：
+
+```
+POST /backtest/async
+请求: 同下方 POST /backtest
+
+响应:
+{
+  "code": 200,
+  "data": { "task_id": "btt_20261122165247_ab12cd34", "status": "queued", "reused": false }
+}
+```
+
+轮询状态（`reused: true` 表示复用了正在执行的相同参数任务）：
+
+```
+GET /backtest/task/{task_id}
+
+响应:
+{
+  "code": 200,
+  "data": {
+    "task_id": "btt_20261122165247_ab12cd34",
+    "status": "queued | running | done | failed",
+    "bt_id": "bt_MODERATE_20261122165309_a1b2c3",  // status=done 时给出，再用 5.8 取完整结果
+    "error": "没有可用的历史数据",                    // status=failed 时给出
+    "progress": 42,                                 // 回测进度 0~100
+    "progress_done": 101,                           // 已回放交易日数
+    "progress_total": 241,                          // 区间内交易日总数
+    "elapsed_seconds": 26.3                         // 已耗时
+  }
+}
+```
+
+`progress` 只统计逐日回放这一段（占 5%~95%），取数阶段（查 InfluxDB）还没有总数可算，
+此时 `progress_total` 缺省、`progress` 停在 1，前端用不确定态进度条展示。前端进度卡片
+据此显示「逐日回放 101/241 个交易日」与百分比。
+
+任务状态存 `user:{id}:backtest_task:{task_id}`（TTL 30 分钟），提交锁存
+`user:{id}:backtest_submit:{指纹}`，任务结束立即释放，相同参数可马上重跑。
+
+前端把 `task_id` / `bt_id` 记在 `sessionStorage['strategy.backtestSession']`：切到其他页面会卸载
+组件，但任务跑在后端，回来时先 `GET /backtest/task/{task_id}` 探测一次——仍在执行就恢复进度卡
+继续轮询，已 `done` 则直接按 `bt_id` 取结果回填（不滚动页面），404（任务已过期 / 服务重启）则
+清掉记录，让用户从回测历史里取。
+
+同步接口：
 
 ```
 POST /backtest
@@ -602,6 +700,8 @@ position_changes.action 类型说明:
 GET /backtest/history?strategy_type=MODERATE
 
 响应: 返回最近的回测记录列表（最多20条）
+
+每条记录对应一次真实执行：任务在后台算完后才写入，重复提交被复用/拒绝的请求不会留下记录。
 ```
 
 ### 5.8 回测详情
@@ -660,9 +760,114 @@ GET /data/replay/dates           - 获取可回放日期列表
 GET /data/replay/sectors        - 获取板块列表
 GET /data/replay/sector/{code}  - 获取板块历史数据
 GET /data/replay/day/{date}     - 获取某天数据
+GET /data/replay/heatmap?days=5 - 板块资金流热力图（区间聚合，见下）
 POST /data/replay/strategy-optimize  - 策略参数自动寻优（Optuna）
-POST /data/replay/strategy-overlay  - 策略叠加回放
+GET  /data/replay/strategy-optimize/history  - 历史寻优摘要（最新在前，最多 20 条，每条带 id）
+GET  /data/replay/strategy-optimize/history/{id}  - 按 id 取该次寻优完整结果（净值/每日明细/全部试验）
+POST /data/replay/strategy-overlay  - 策略叠加回放（启动后台任务，立即返回）
+GET  /data/replay/strategy-overlay/progress  - 叠加回测进度
+GET  /data/replay/strategy-overlay/result   - 叠加回测完整结果
 ```
+
+**叠加回测后台任务**：与寻优同构，`POST strategy-overlay` 仅启动线程池任务并立即返回，
+`_overlay_progress/_overlay_result` 保存进度与结果，前端轮询 `/progress` 与 `/result`。
+计算完全在后端进行，不依赖前端连接——切换页签、切路由、刷新页面都不会中断回测，
+也不会出现 `net::ERR_ABORTED` 误判为失败。小卡（MainLayout 常驻）统一轮询两类后台任务
+（overlay / optimize），完成后把结果写入 `replayTask` store；数据回放页 `onMounted` 与
+store watch 从结果恢复净值曲线、每日明细与调仓记录。寻优结果需按
+`normalizeOptimizeResult` 转换成叠加回放格式后展示。
+
+**历史寻优详情**：`/strategy-optimize/history` 的每条摘要带 `id`（即 `created_at`），
+完整结果另存内存归档 `_optimization_archive[created_at]`，超过 20 条时同步淘汰。
+前端点击历史记录「查看详情」按 id 拉取完整结果，将 `best_result`（`_run_backtest_core(return_full=True)`
+的原始输出，含 `nav_curve/daily_signals/position_changes/portfolio_snapshots`）按叠加回放的
+嵌套格式转换后填入结果区，因此历史详情也能看到净值曲线、每日持仓明细与调仓快照。
+服务重启后归档失效，接口返回 404「该寻优记录已过期或不存在」。
+
+**回测悬浮卡**：回测状态与完整结果存 `stores/replayTask.ts`，由 `ReplayTaskCard.vue`
+在 MainLayout 层渲染，切路由/切页签不销毁；点「查看回放详情」跳回数据回放页时，
+`onMounted` 从 store 恢复结果并自动切到「策略叠加回放」页签。
+`onModeChange` 仅在仍有运行中任务时才清理（主动放弃），已完成的回测结果会保留。
+store 以 `deep watch` 持久化到 `sessionStorage`（key `replay-task-card`）：刷新后恢复任务卡、
+结果与明细，并自动切回「策略叠加回放」。运行中任务也恢复：寻优是后台任务，进度轮询放在
+常驻的 `ReplayTaskCard`（不依赖 DataReplay 是否挂载），刷新后停在任意页面都能续接；
+数据回放页 `onMounted` 也会接上完整轮询以取回明细。普通叠加回放是一次性请求，刷新即断，
+续接逻辑标记为失败并提示重跑（不会永远转圈）。切页签/切路由只停止「按日期回放」
+的自动轮播，不中断后台寻优轮询、不清除卡片。关闭卡片后刷新不会重现；登录/登出会清理会话态。
+
+**`GET /data/replay/heatmap`**：一次范围查询后由服务端按板块聚合，返回
+`{dates, days, sectors:[{sector_name, main_net_inflow, index_change_pct, days}]}`，按
+`main_net_inflow` 降序。
+
+前端原来按 `dates` 逐日调 `/data/replay/day/{date}`（5/10/20 日 = 5/7/15 个串行请求，
+合计 1.3~3.3 秒），聚合口径是"每个板块在出现过的交易日上取算术平均，缺失字段按 0 计入"，
+服务端保持同一口径，因此数值与逐日聚合完全一致（实测差异 < 1e-6，只是浮点累加顺序）。
+接口耗时：5 日 0.28s、10 日 0.28s、20 日 0.40s。
+
+**批量取数与日期范围查询的两个性能点**
+
+1. `/factors/batch` 原来在循环里逐板块调 `query_sector_history()`，每个板块 3 次 InfluxQL
+   （K线 + 资金流 + 北向资金），90 个板块就是 270 次往返，实测 6.2 秒。改为
+   `influx_query.query_all_sector_history_map(start, end)`：一次资金流范围查询 + 一次K线范围查询，
+   在内存里按 `sector_code` 分组后合并，输出字段与 `query_sector_history` 逐项一致。实测降到
+   1.4~1.9 秒，90 个板块的 `composite_score` / `rank` / `category_scores` 与改动前完全相同。
+2. `get_available_date_range()` 的回退实现原来用 `sort + limit` 取首末行，Flux 需要把 730 天
+   的全部点读出来排序，实测 min 7.5s + max 6.0s；改成 `first()` / `last()` 流式选择器后
+   0.08s + 0.03s，结果一致。该函数带 5 分钟缓存，缓存过期时原本会让 `factors/batch`、
+   `data/replay/dates` 等接口卡十几秒（表现为"过一会儿再刷就特别慢"），现已消除。
+
+**`/factors/batch` 的缓存与并发**
+
+因子结果只依赖"交易日 + 策略类型 + 板块范围 + 当日数据本身"，而板块数据由 scheduler
+每工作日 15:30 采集一次，同一天内重复请求必然得到相同结果。因此加了进程内结果缓存：
+
+| 项 | 值 |
+|---|---|
+| 缓存键 | `(actual_date, strategy_type, tuple(sorted(sector_codes)), 当日数据指纹)` |
+| 指纹 | `_daily_data_fingerprint()`：当日 90 条记录所有标量字段（含 numpy 数值）排序后取 md5，任一字段变化即失效 |
+| 容量 | 64 条，满了整体清空 |
+| 效果 | 冷算 1.8s → 命中 0.08s（其中 0.05s 是取当日 90 条算指纹），前端切走再切回不再重算 |
+
+不用 TTL 而用数据指纹，是因为系统允许手动触发采集（`/scheduler/trigger/collect`、
+`/data/collect/history`）：TTL 内重采集会让用户看到旧结果，指纹则会在数据变化后立即失效。
+指纹计算复用流程里本来就要执行的"当天 90 条"查询，不额外增加查询。
+
+缓存只放在 `main.py` 进程内（uvicorn 单 worker），多 worker 部署时各进程各一份，
+不影响正确性。
+
+同一处还有一个并发问题：`analyze_factors_batch` 原来是 `async def`，内部却是 InfluxDB
+查询 + numpy 计算的**阻塞**调用，会独占事件循环。实测同时发两个请求时第二个要等第一个
+跑完（1.5s + 1.5s = 3.0s）。改成同步路由（`def`）后由 FastAPI 线程池执行，冷缓存并发
+两个不同策略实测 2.53s 完成（原为串行的 4.9s）。
+
+**同步路由是全局约定，不是单点修补**
+
+uvicorn 单 worker 只有一个事件循环，任何在 `async def` 里做阻塞 IO（InfluxDB 查询、
+requests、numpy 计算）的路由都会卡住所有其他请求。实测：`/data/replay/dates`（当时 5.2 秒）
+在跑的时候，一个**已缓存**的 `/factors/batch`（空闲时 0.12 秒）被拖到 5.1 秒。这就是
+"切到别的页面再切回因子排名要等 3~6 秒"的由来——切页面时目标页会并发拉若干接口，
+只要其中一个是这种阻塞路由，因子请求就跟着排队。
+
+因此把 `main.py` 里所有内部无 `await` 的路由统一改成同步 `def`（26 个，用 AST 扫描确认
+函数体内没有 `await` / `async for` / `async with` 才改），由 FastAPI 线程池调度。改造后
+同样的实验：慢路由跑 4.7 秒期间，已缓存的 `/factors/batch` 只用了 0.31 秒。
+
+判断规则：函数体里要调用同步阻塞库（`influx_query`、`numpy`、`requests`、同步 Redis）就用
+`def`；确实需要 `await`（异步客户端、SSE、WebSocket）才用 `async def`，且不能在里面混
+阻塞调用。
+
+**回放页的两个"重接口取轻信息"**
+
+`/data/replay/dates`、`/data/replay/sectors` 只返回日期列表和板块列表，原来都靠
+`query_daily_sectors` 把 730 天全部字段 pivot 出来再去重，实测 5~8.5 秒：
+
+| 接口 | 原实现 | 现实现 | 耗时 |
+|---|---|---|---|
+| `/data/replay/dates` | pivot 730 天全字段后取 keys | 只取 `_field=="index_close"`（2024-11 起每个交易日都有）再 `distinct(_time)`，即 `influx_query.get_trading_dates()` | 6.47s → 0.49s |
+| `/data/replay/sectors` | pivot 730 天全字段后 `distinct(sector_code)` | 只扫最近 90 天、去掉 pivot 直接 `distinct(sector_code)` | 8.5s → 0.24s |
+
+两者输出与改造前逐项一致（482 个交易日、90 个板块）。板块列表用 90 天窗口相当于"三个月
+没有数据的板块不再列出"，当前库里 90 个板块全部活跃，结果不变。
 
 ### 5.13 信号复盘统计
 
@@ -673,10 +878,13 @@ POST /data/replay/strategy-overlay  - 策略叠加回放
 
 | 表 | 说明 |
 |----|------|
-| `trade_signals` | 信号落库（`/calculate` 生成信号后写入，唯一键去重），并作为幂等自愈的持久层 |
-| `signal_outcomes` | 信号结果回填表，唯一键 `(signal_date, strategy_type, sector_code, direction, horizon_days)`；索引 `idx_signal_outcomes_perf` |
+| `trade_signals` | 信号落库（`/calculate` 生成信号后写入），唯一键 `uk_trade_signals_user (user_id, signal_date, strategy_type, sector_code, direction)`；索引 `idx_trade_signals_user` |
+| `signal_outcomes` | 信号结果回填表，唯一键 `uk_signal_outcomes_user (user_id, signal_date, strategy_type, sector_code, direction, horizon_days)`；索引 `idx_signal_outcomes_perf` / `idx_signal_outcomes_user` |
 
-建表在服务启动时由 `ensure_schema()` 幂等执行（失败降级，不影响主链路）。
+两表都带 `user_id BIGINT NOT NULL DEFAULT 1`，历史数据归管理员账号。
+建表与老库补列/换唯一键在服务启动时由 `ensure_schema()` 幂等执行（失败降级，不影响主链路）；
+老库的旧唯一键（不含 `user_id`）会先被删除再加新键，否则两个账号同一天同板块同方向会互相覆盖。
+查询接口（`/signals/performance`、`/signals/calendar`、`/signals/sync`、`/signals/backfill`）默认只读当前账号的数据。
 
 **统计口径**
 
@@ -692,6 +900,51 @@ POST /data/replay/strategy-overlay  - 策略叠加回放
   | `forward_return` | 板块价格变动 `exit/entry − 1`，未调整方向、未扣成本 |
   | `direction_return` | 方向收益 = `forward_return ×`（买入 +1 / 卖出 −1） |
   | `net_return` | 净收益 = `direction_return − cost_rate` |
+
+---
+
+## 九、策略工坊（用户自定义策略，2026-11）
+
+### 9.1 定位与边界
+
+- 用户注册/登录沿用 auth 的 JWT（claim 为 `userId`），个人策略按 token 归属，不接收前端传来的 user_id；公开广场只读他人策略，复制后才进入自己的账户。
+- 工坊不另起一套引擎：策略的 `scenario` 绑定到既有三档，`risk` 映射为 `StrategyParams` 覆盖项后由既有回测/信号计算执行；`conditions`（全部满足才采纳）与 `actions`（按顺序调整信号）在**信号层**真实生效，不是装饰性元数据。
+- 「模拟运行」= 调用回测引擎逐日回放，输出收益/回撤/夏普/胜率/净值曲线；「实际环境」= 调用 `/calculate` 生成当日信号并沿用 `signal.generated` 链路。系统未接券商通道，实际环境指本地持仓账本口径，界面文案据此标注。
+- 回测按风控参数执行；条件与动作不参与逐日撮合，只在当日信号层过滤/调整，结果说明里明确区分两者。
+
+### 9.2 数据表与隔离
+
+| 表 | 关键字段 | 说明 |
+|---|---|---|
+| `user_strategies` | `user_id`, `name`, `scenario`, `conditions/actions/risk`(JSONB), `is_public`, `status`, `version` | 策略主体，带 `users(id)` 外键 |
+| `user_strategy_versions` | `(strategy_id, version)` 唯一, `snapshot`, `change_note` | 仅内容变更才升版本；改公开状态/启停不升 |
+| `user_strategy_runs` | `mode`, `status`, `result`, `error`, 起止时间 | 每次应用一条记录，失败也记录 |
+
+DDL 同时写在 `scripts/init-db.sql` 与 `app/workshop.py::_DDL`（strategy 服务启动时幂等建表）。账号清理：`services/auth/.../AdminController.java` 的 `USER_FK_TABLES` 含 `user_strategies`，`/internal/users/{user_id}/purge` 调 `workshop.purge_user_rows`（versions/runs 由外键级联）。
+
+### 9.3 API 入口（`services/strategy/app/main.py` 末尾）
+
+`POST/GET /workshop/strategies`、`PUT/DELETE /workshop/strategies/{id}`、`GET .../versions`、`POST .../fork`、`POST .../apply`、`GET /workshop/runs[/{id}]`，全部经 `_require_user` 解析 JWT。编辑页的规则白名单在 `workshop.py` 的 `CONDITION_FIELDS / CONDITION_OPS / ACTION_TYPES / PARAM_KEYS`，新增字段必须同时改后端白名单与前端选项。
+
+### 9.4 前端
+
+`/strategy-workshop`（`frontend/src/views/StrategyWorkshop.vue`），三个页签：我的策略（新建/编辑/版本/公开/删除/应用）、公开广场（浏览他人 + 复制到自己）、运行记录（模拟与实况的结果摘要）。新页面同时登记在 `router/index.ts`、`MainLayout.vue` 的 `NAV_GROUPS` 与 auth 的 `RouteCatalog.java`，否则权限守卫会拦截。
+
+### 9.5 常用算法与自建算法（2026-11 补充）
+
+- 系统内置 8 个算法（强势动量/头部板块/主力资金流入/低估值分位/高活跃度/重仓信号/仅卖出信号/优质精选）在 `workshop.py::BUILTIN_ALGORITHMS` 单点定义，经 `GET /workshop/algorithms/builtin` 下发；编辑器「插入算法」把其条件追加到当前策略，字段全部在 `CONDITION_FIELDS` 白名单内。
+- 用户自建算法落在 `user_workshop_algorithms`（按 `user_id` 隔离，CRUD 为 `/workshop/algorithms[/{id}]`），供多个策略复用；账号清理时与 `user_strategies` 一并删除。
+- 公开广场点赞落在 `user_strategy_likes`（`UNIQUE(strategy_id, user_id)` + `ON CONFLICT DO NOTHING` 保证同一账号只计一次），`POST/DELETE /workshop/strategies/{id}/like` 点赞/取消；列表返回 `like_count` 与 `liked_by_me`，广场按 `like_count DESC, updated_at DESC` 排序。策略删除或账号清理时点赞记录级联删除。
+- 公开广场返回所有 `is_public=TRUE` 的策略（含自己的，否则公开后作者自己看不到），并为每条附带 `is_owner`。前端对 `is_owner` 的策略给「编辑我的策略」入口而非复制按钮；后端 `fork_strategy` 对自身返回 400「自己的策略已在「我的策略」中，无需复制」，避免重复生成副本，他人复制不受影响。
+- 当日涨跌幅、主力净流入、换手率、PE/PB 分位不在 `TradeSignal` 里：实际环境运行时按 `signal_date` 加载板块快照，按 `sector_code` 注入信号后再匹配，所以这些算法条件在实况层真实生效。模拟回测不逐日应用这些条件（只按风控参数回放），界面已标注该口径。
+- 多条件默认「全部满足」(`condition_logic='AND'`)，可切为「任一满足」(`OR`)；该字段落库并进入版本快照，`apply_rules` 据此用 `all`/`any` 匹配，避免并行插入的多个算法互相抵消。切换条件字段/动作类型会联动重置运算符与默认值，防止旧值残留。重复/互斥条件（AND 下同一字段阈值无法同时成立）、重复/互斥动作（排除与仅保留并存）在编辑器实时提示；插入算法时自动跳过重复条件。
+- 菜单图标用字符串名全局注册：`main.ts` 必须包含 `MagicStick`，否则 `NAV_GROUPS` 里的图标渲染成空的自定义元素；桌面端「运行状态」单选按钮用 flex 等宽 + `inline-flex/align-items:center/justify-content:center` + `line-height:1` 保证文字水平、垂直都严格居中（仅设 `text-align` 时 `line-height:30px` 与固定高度冲突，实测文字下沉 6.5px）。
+
+### 9.6 实测口径
+
+API 端到端（两个账号）：创建 v1 → 修改 v2（`change_note` 与快照 `stop_loss` 0.03→0.04）→ 跨账号公开可见 → 复制为副本 → 模拟回测成功（32 个净值点）→ 运行记录落库 → 清理。规则函数实测：2 条信号经 `score>=5` 过滤剩 1 条，`set_position_ratio=0.2` 与 `max_position=0.1` 依次生效，最终仓位 0.1。
+
+算法补充实测：内置列表 8 条；自建算法创建/改名/删除均落库且清理干净；`index_change_pct>=2` + `main_net_inflow>=5e7` 从 2 条信号中只留下符合的 1 条，`direction eq SELL` 同样只留下 SELL 信号。生产 80 端口页面：菜单与标题各渲染 1 个 SVG 图标，三个状态按钮等宽 52px、文字中心水平偏移 0px、垂直偏移 -0.5px，插入「强势动量」后条件列表新增 2 行行情/评分条件。字段 score→板块名称联动后运算符变「包含」且值清空，动作切「强制方向」后值变 BUY；score≥5 与 score≤3 在 AND 下出现冲突提示、切 OR 后消失；重复插入「头部板块」第二次提示「已跳过 1 条」。点赞实测：同一账号连续点赞两次计数仍为 1，另一账号点赞后为 2，取消后 1、再点赞回 2；广场前两名按 2 赞 / 1 赞排序，点击已赞按钮取消后顺序随之交换。
 
 - **卖出信号必须按方向取号**：SELL 后板块下跌才是策略盈利。若直接拿板块价格变动当策略收益，
   "胜率"与"命中率"会互相矛盾（同一份数据里出现"胜率 87.5% / 命中率 50%"）

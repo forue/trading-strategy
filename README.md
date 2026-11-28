@@ -248,6 +248,56 @@ docker compose exec backend-data-collector curl -X POST "http://localhost:8003/c
 | Redis | - | redis123 | 端口 6380 |
 | RabbitMQ | guest | guest |
 
+### 端口暴露范围
+
+`docker-compose.yml` 中除前端外，所有端口都绑定在 `127.0.0.1`：
+
+| 对外暴露 | 仅宿主机本机可访问 |
+|---|---|
+| `80`（前端 nginx，含所有 `/api/*` 反代） | 8001~8008、5432、6380、8086、5672、15672 |
+
+原因是家宽往往没有公网 IPv4 但有公网 IPv6，IPv6 没有 NAT，一旦在路由器上放行入站，
+所有监听 `0.0.0.0` 的端口（数据库、管理面板、后端服务）会直接暴露到公网。收敛后
+外网只能打到 nginx 的 80 端口，数据库必须经本机登录才能访问。
+
+需要从局域网其他设备访问后端调试接口时，临时改回 `"8002:8002"` 再 `docker compose up -d`；
+前端不受影响，内网其他设备访问 `http://<宿主机内网IP>/` 始终可用。
+
+### 外网访问
+
+前端所有请求走相对路径 `/api/*`，由 nginx 反代到各服务；WebSocket 用
+`window.location.protocol` 自动选择 `ws`/`wss`。因此只要 80 端口能被外部访问，
+前后端代码都不需要修改。
+
+**方式一：cloudflared 临时隧道（无需公网 IP、无需开端口）**
+
+```powershell
+docker run -d --name cf-tunnel --restart unless-stopped --add-host=host.docker.internal:host-gateway cloudflare/cloudflared:latest tunnel --url http://host.docker.internal:80
+docker logs cf-tunnel 2>&1 | Select-String trycloudflare
+```
+
+日志中的 `https://xxx.trycloudflare.com` 即外网地址，自带 HTTPS，WebSocket 走 `wss`
+正常（已验证登录、因子排名、数据回放、信号推送、实时推送连接）。局限：域名每次
+重启都会变化；请求经 Cloudflare 边缘中转，比局域网慢（实测缓存命中的
+`/factors/batch` 本地 80ms → 隧道 796ms）。
+
+**方式二：固定域名隧道**。域名托管到 Cloudflare 后：
+
+```powershell
+cloudflared tunnel login
+cloudflared tunnel create rotation
+cloudflared tunnel route dns rotation app.example.com
+cloudflared tunnel run --url http://localhost:80 rotation
+```
+
+**方式三：公网 IPv4 + 路由器端口映射**，或把整套 compose 部署到云服务器。
+
+外网暴露前必须完成：
+
+1. 修改默认账号密码（`admin/admin123` 及以上表中的数据库口令）
+2. 只放行 80/443，不要放行 8001~8008 与数据库端口
+3. 长期使用建议固定域名或 IPv6 + DDNS，临时隧道的域名会变且速度受中转影响
+
 ---
 
 ## AI 决策服务
@@ -386,6 +436,11 @@ mvn spring-boot:run
 | `SPRING_DATASOURCE_URL` | `jdbc:postgresql://localhost:5432/rotation_db` | `jdbc:postgresql://postgres:5432/rotation_db` |
 | `SPRING_REDIS_HOST` | `localhost` | `redis` |
 | `RABBITMQ_HOST` | `localhost` | `rabbitmq` |
+
+`INTERNAL_TOKEN` 是服务间调用凭证（请求头 `X-Internal-Token`）：scheduler / ai-decision / mcp-agent 用它访问
+strategy / signal-notification；策略与信号服务配置了该值后，未带 `Authorization` 的请求一律 401，
+只有带该凭证的内部调用按管理员口径处理。留空表示不校验（仅适合本地单机调试）。
+**所有服务必须配同一个值**，否则调度和 AI 解读会持续 401。前端请求不经过这条通路，仍用用户 JWT。
 
 ---
 

@@ -257,6 +257,7 @@ services/mcp-agent/
 │   ├── config.py             # 配置
 │   ├── server.py             # MCP Server 核心
 │   ├── router.py             # Agent 路由
+│   ├── internal_auth.py      # 服务间调用凭证 internal_headers()
 │   ├── tools/                # MCP 工具实现
 │   │   ├── __init__.py
 │   │   ├── market.py         # 市场分析工具
@@ -273,6 +274,10 @@ services/mcp-agent/
 ├── Dockerfile
 └── requirements.txt
 ```
+
+> **服务间凭证**：策略参数、信号、持仓已按账号隔离，MCP 工具没有终端用户上下文，
+> 因此 `tools/*.py` 里的 `httpx.AsyncClient` 统一通过 `internal_headers()` 带 `X-Internal-Token`，
+> 由 strategy / signal 服务按管理员口径返回数据。修改工具时不要漏掉该头，否则会收到 401。
 
 ---
 

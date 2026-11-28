@@ -105,10 +105,13 @@ A股市场存在显著的板块轮动效应，资金在不同行业板块间流�
 ```
 
 > **连接保活**：各 Python 服务共用 `shared/rabbitmq.py` 中的单例 `RabbitMQManager`，
-> 发布通道与消费通道相互独立（`heartbeat=60`）。纯发布型服务在长时间空闲后，本地
-> `is_open` 仍为 True 但连接已被 broker 因心跳超时关闭，首次发布会抛 `ConnectionReset`。
-> 因此发布通道在无消费者（`_consume_channel is None`）时会先调用
-> `process_data_events(time_limit=0)` 探活，失败则重建连接，避免首次发布失败。
+> 发布使用单例内部的连接（`heartbeat=60`）；`consume()` 每次调用另建独立连接与 channel。
+> pika 的 `BlockingConnection` 非线程安全，同进程内多个消费者线程（例如信号服务同时消费
+> `signal.#` 与 `ai.#`）共用连接会触发 `second 'channel.open' seen`、
+> `IndexError('pop from an empty deque')` 等协议错乱，因此消费者一律使用自己的连接。
+> 纯发布型服务长时间空闲后，本地 `is_open` 仍为 True 但连接已被 broker 因心跳超时关闭，
+> 首次发布会抛 `ConnectionReset`，因此发布前会先调用 `process_data_events(time_limit=0)`
+> 探活，失败则重建连接。
 
 ### 2.4 数据流向
 
@@ -127,6 +130,21 @@ Redis (实时缓存) + PostgreSQL (持久化)
     ▼ 读取
 前端 (ECharts可视化)
 ```
+
+### 2.5 多账号数据隔离
+
+策略参数、回测结果、信号、复盘统计、盘感训练、AI 配置与推送通道都**跟随账号**：
+
+| 层级 | 规则 |
+|------|------|
+| 账号来源 | 只认 `Authorization: Bearer <token>`；服务间调用用 `X-Internal-Token` 换管理员口径。URL/查询参数不能指定账号 |
+| Redis | 个人数据统一 `user:{id}:...` 前缀（`shared.user_scope()`），全局资源（板块快照、样本池）不带前缀 |
+| PostgreSQL | `strategy_configs` / `trade_signals` / `signal_outcomes` 等表带 `user_id`，唯一键含 `user_id` |
+| 信号计算 | 每个启用账号 × 三档策略各算一套；定时任务只调一次 `/calculate/all`，由策略服务遍历账号 |
+| 推送 | `signals_generated` 带 `user_id`，只推给该账号的 WebSocket 连接与外部通道 |
+| 页面权限 | `/monitor` 与 `/admin/*` 锁定为管理员专属，普通账号既拿不到默认授权，也无法被单独放开 |
+
+历史数据（改造前的全局键、无 `user_id` 的行）在服务启动时幂等归并到管理员账号（`user_id = 1`），不丢弃。
 
 ---
 
