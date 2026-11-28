@@ -373,6 +373,13 @@ onMounted(() => {
   border: 1px solid var(--border-primary);
   border-radius: var(--radius-md);
   padding: 16px;
+  /* grid 项默认 min-width:auto，下界取内容 min-content。表格空态（新账号还没信号）时
+     EP 会给 .el-table__empty-block 写内联 width（= 当前表格宽），而 index.scss 的
+     .responsive-table .el-table{min-width:100%} 又要求表格宽 ≥ 容器宽 —— 表格宽与
+     轨道宽互为输入，每次 ResizeObserver 回调都放大一次，表现为「板块表现」表格
+     越撑越宽（实测 8 秒从 10725px 涨到 19827px），横向滚动条无限延伸。
+     有数据时 empty-block 不渲染，所以只有空表的账号能复现。min-width:0 断开回环。 */
+  min-width: 0;
 }
 .block-title {
   font-size: 14px; font-weight: 600; color: var(--text-primary);

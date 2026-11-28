@@ -454,14 +454,14 @@ loadSectors()
 
   .m-factor-weight { flex: none; font-size: 10px; color: var(--text-tertiary); }
   :deep(.el-progress) { flex: 1; }
-  :deep(.el-progress__text) { font-size: 9px !important; min-width: 26px; }
+  :deep(.el-progress__text) { font-size: 10px !important; min-width: 26px; }
 }
 
 .m-factor-meta { margin-top: 2px; font-size: 10px; color: var(--text-secondary); font-family: var(--font-mono); }
 
 .m-factor-detail {
   margin-top: 2px;
-  font-size: 9px;
+  font-size: 10px;
   color: var(--text-tertiary);
   word-break: break-all;
 }
@@ -484,13 +484,13 @@ loadSectors()
   :deep(.el-select) { width: 100% !important; }
 
   .score-section { margin-bottom: 10px; }
-  .score-meta { font-size: 10px; margin-bottom: 8px; .hint { display: block; margin: 3px 0 0; font-size: 9px; } }
+  .score-meta { font-size: 10px; margin-bottom: 8px; .hint { display: block; margin: 3px 0 0; font-size: 10px; } }
   .score-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
   .score-box {
     padding: 8px 0;
     .score-value { font-size: 18px; }
-    .score-label { font-size: 9px; margin-top: 2px; }
-    &.main-score .score-value { font-size: 20px; }
+    .score-label { font-size: 10px; margin-top: 2px; }
+    &.main-score .score-value { font-size: 18px; }
   }
   .weight-hint { display: none; }
   .weight-item { padding: 6px 0; .weight-label { font-size: 10px; margin-bottom: 0; } .weight-value { font-size: 11px; } }

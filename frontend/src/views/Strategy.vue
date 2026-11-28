@@ -87,6 +87,28 @@
         </el-form-item>
       </el-form>
 
+      <!-- 当前回测任务：外框流光表示仍在计算，进度与交易日计数来自后端真实回放 -->
+      <div v-if="backtestTask" class="bt-task-card" :class="{ 'is-done': backtestTask.status === 'done' }">
+        <div class="bt-task-head">
+          <span class="bt-task-title">
+            {{ backtestTask.status === 'done' ? '回测完成' : '回测中' }} ·
+            {{ backtestTask.strategyType === 'AGGRESSIVE' ? '激进' : backtestTask.strategyType === 'MODERATE' ? '稳健' : '保守' }}
+          </span>
+          <span class="bt-task-range">{{ backtestTask.startDate }} ~ {{ backtestTask.endDate }}</span>
+        </div>
+        <!-- 取数阶段拿不到真实百分比（耗时取决于 InfluxDB），用流动条表示仍在工作 -->
+        <div class="bt-task-bar"
+          :class="{ 'is-indeterminate': backtestTask.total === 0, 'is-done': backtestTask.status === 'done' }">
+          <div class="bt-task-bar-fill" :style="backtestTask.total > 0 ? { width: backtestTask.progress + '%' } : undefined" />
+        </div>
+        <div class="bt-task-foot">
+          <span>{{ backtestStageText }}</span>
+          <span class="bt-task-meta">
+            {{ backtestTask.total > 0 ? backtestTask.progress + '% · ' : '' }}已用 {{ backtestElapsed }}s
+          </span>
+        </div>
+      </div>
+
       <div v-if="backtestResult" class="backtest-result">
         <el-row :gutter="16">
           <el-col :xs="12" :sm="6"><div class="result-item"><span>总收益率</span><strong>{{ (backtestResult.totalReturn * 100).toFixed(2) }}%</strong></div></el-col>
@@ -107,85 +129,6 @@
           <el-col :xs="12" :sm="6"><div class="result-item"><span>成本/总收益比</span><strong>{{ backtestResult.totalReturn > 0 ? (backtestResult.totalTradeCost / (backtestResult.totalReturn * backtestForm.initialCapital * 10000) * 100).toFixed(2) : '0.00' }}%</strong></div></el-col>
         </el-row>
         <v-chart :option="backtestChartOption" class="backtest-chart" autoresize />
-
-        <!-- 调仓明细 -->
-        <div v-if="rebalanceGroups.length" style="margin-top: 16px">
-          <div class="card-header" style="margin-bottom: 8px">
-            <span style="font-weight: 600">调仓明细</span>
-            <el-tag size="small">{{ rebalanceGroups.length }} 个调仓日</el-tag>
-          </div>
-          <div v-for="group in rebalanceGroups" :key="group.date" class="rebalance-group">
-            <div class="rebalance-date-header">
-              <span class="rebalance-date">{{ group.date }}</span>
-              <el-tag size="small">{{ group.trades.length }} 笔调仓</el-tag>
-            </div>
-            <!-- 持仓快照 -->
-            <template v-if="group.snapshot?.portfolio?.length">
-              <!-- 手机端：五列持仓表改为条目，避免横向滑动 -->
-              <ul v-if="isMobile" class="m-pf-list">
-                <li v-for="(row, i) in group.snapshot.portfolio" :key="i" class="m-pf-row">
-                  <div class="m-pf-head">
-                    <span class="m-pf-name">{{ row.sector_name }}</span>
-                    <span class="m-pf-weight">{{ (row.weight * 100).toFixed(1) }}%</span>
-                  </div>
-                  <div class="m-pf-grid">
-                    <div><em>金额</em><b>{{ formatMoney(row.amount) }}</b></div>
-                    <div>
-                      <em>当日涨跌</em>
-                      <b :style="{ color: row.day_change_pct >= 0 ? themeColors.profit : themeColors.loss }">
-                        {{ row.day_change_pct >= 0 ? '+' : '' }}{{ row.day_change_pct.toFixed(2) }}%
-                      </b>
-                    </div>
-                    <div>
-                      <em>贡献</em>
-                      <b :style="{ color: row.contribution_pct >= 0 ? themeColors.profit : themeColors.loss }">
-                        {{ row.contribution_pct >= 0 ? '+' : '' }}{{ row.contribution_pct.toFixed(2) }}%
-                      </b>
-                    </div>
-                  </div>
-                </li>
-              </ul>
-              <div v-else class="responsive-table" style="margin: 8px 0">
-                <el-table :data="group.snapshot.portfolio" stripe size="small" max-height="200">
-                  <el-table-column prop="sector_name" label="板块" min-width="120" />
-                  <el-table-column prop="weight" label="仓位" min-width="80" align="right">
-                    <template #default="{ row }">{{ (row.weight * 100).toFixed(1) }}%</template>
-                  </el-table-column>
-                  <el-table-column prop="amount" label="金额" min-width="96" align="right">
-                    <template #default="{ row }">{{ formatMoney(row.amount) }}</template>
-                  </el-table-column>
-                  <el-table-column prop="day_change_pct" label="当日涨跌" min-width="96" align="right">
-                    <template #default="{ row }">
-                      <span :style="{ color: row.day_change_pct >= 0 ? themeColors.profit : themeColors.loss }">
-                        {{ row.day_change_pct >= 0 ? '+' : '' }}{{ row.day_change_pct.toFixed(2) }}%
-                      </span>
-                    </template>
-                  </el-table-column>
-                  <el-table-column prop="contribution_pct" label="贡献" min-width="80" align="right">
-                    <template #default="{ row }">
-                      <span :style="{ color: row.contribution_pct >= 0 ? themeColors.profit : themeColors.loss }">
-                        {{ row.contribution_pct >= 0 ? '+' : '' }}{{ row.contribution_pct.toFixed(2) }}%
-                      </span>
-                    </template>
-                  </el-table-column>
-                </el-table>
-              </div>
-            </template>
-            <div v-else-if="group.snapshot && !group.snapshot.portfolio?.length" :style="{ color: themeColors.textSub, fontSize: '12px', margin: '4px 0' }">空仓</div>
-            <!-- 交易记录 -->
-            <div class="rebalance-trades">
-              <el-tag v-for="(t, idx) in group.trades" :key="idx" size="small"
-                :type="tradeTagType(t.action)" style="margin: 2px">
-                {{ t.sector_name || t.sector_code }} {{ actionLabel(t.action) }}
-                <span v-if="t.amount > 0">{{ formatMoney(t.amount) }}</span>
-                <span v-if="t.cost > 0" style="opacity:0.7"> (费{{ t.cost.toFixed(1) }})</span>
-              </el-tag>
-            </div>
-            <div v-if="group.trades.length && group.trades[0].reason" class="rebalance-reason" :style="{ color: themeColors.textSub, fontSize: '12px', marginTop: '4px' }">
-              {{ group.trades[0].reason }}
-            </div>
-          </div>
-        </div>
       </div>
     </div>
 
@@ -274,11 +217,90 @@
       </div>
       <el-empty v-else description="暂无回测历史" />
     </div>
+
+    <!-- 调仓明细：明细较长，独立放在回测历史之后；按日期倒序，最近的调仓在最前 -->
+    <div v-if="rebalanceGroups.length" class="page-card page-section">
+      <div class="card-header">
+        <span class="card-title">调仓明细</span>
+        <el-tag size="small">{{ rebalanceGroups.length }} 个调仓日</el-tag>
+      </div>
+      <div v-for="group in rebalanceGroups" :key="group.date" class="rebalance-group">
+        <div class="rebalance-date-header">
+          <span class="rebalance-date">{{ group.date }}</span>
+          <el-tag size="small">{{ group.trades.length }} 笔调仓</el-tag>
+        </div>
+        <!-- 持仓快照 -->
+        <template v-if="group.snapshot?.portfolio?.length">
+          <!-- 手机端：五列持仓表改为条目，避免横向滑动 -->
+          <ul v-if="isMobile" class="m-pf-list">
+            <li v-for="(row, i) in group.snapshot.portfolio" :key="i" class="m-pf-row">
+              <div class="m-pf-head">
+                <span class="m-pf-name">{{ row.sector_name }}</span>
+                <span class="m-pf-weight">{{ (row.weight * 100).toFixed(1) }}%</span>
+              </div>
+              <div class="m-pf-grid">
+                <div><em>金额</em><b>{{ formatMoney(row.amount) }}</b></div>
+                <div>
+                  <em>当日涨跌</em>
+                  <b :style="{ color: row.day_change_pct >= 0 ? themeColors.profit : themeColors.loss }">
+                    {{ row.day_change_pct >= 0 ? '+' : '' }}{{ row.day_change_pct.toFixed(2) }}%
+                  </b>
+                </div>
+                <div>
+                  <em>贡献</em>
+                  <b :style="{ color: row.contribution_pct >= 0 ? themeColors.profit : themeColors.loss }">
+                    {{ row.contribution_pct >= 0 ? '+' : '' }}{{ row.contribution_pct.toFixed(2) }}%
+                  </b>
+                </div>
+              </div>
+            </li>
+          </ul>
+          <div v-else class="responsive-table" style="margin: 8px 0">
+            <el-table :data="group.snapshot.portfolio" stripe size="small" max-height="200">
+              <el-table-column prop="sector_name" label="板块" min-width="120" />
+              <el-table-column prop="weight" label="仓位" min-width="80" align="right">
+                <template #default="{ row }">{{ (row.weight * 100).toFixed(1) }}%</template>
+              </el-table-column>
+              <el-table-column prop="amount" label="金额" min-width="96" align="right">
+                <template #default="{ row }">{{ formatMoney(row.amount) }}</template>
+              </el-table-column>
+              <el-table-column prop="day_change_pct" label="当日涨跌" min-width="96" align="right">
+                <template #default="{ row }">
+                  <span :style="{ color: row.day_change_pct >= 0 ? themeColors.profit : themeColors.loss }">
+                    {{ row.day_change_pct >= 0 ? '+' : '' }}{{ row.day_change_pct.toFixed(2) }}%
+                  </span>
+                </template>
+              </el-table-column>
+              <el-table-column prop="contribution_pct" label="贡献" min-width="80" align="right">
+                <template #default="{ row }">
+                  <span :style="{ color: row.contribution_pct >= 0 ? themeColors.profit : themeColors.loss }">
+                    {{ row.contribution_pct >= 0 ? '+' : '' }}{{ row.contribution_pct.toFixed(2) }}%
+                  </span>
+                </template>
+              </el-table-column>
+            </el-table>
+          </div>
+        </template>
+        <div v-else-if="group.snapshot && !group.snapshot.portfolio?.length" :style="{ color: themeColors.textSub, fontSize: '12px', margin: '4px 0' }">空仓</div>
+        <!-- 交易记录 -->
+        <div class="rebalance-trades">
+          <el-tag v-for="(t, idx) in group.trades" :key="idx" size="small"
+            :type="tradeTagType(t.action)" style="margin: 2px">
+            {{ t.sector_name || t.sector_code }} {{ actionLabel(t.action) }}
+            <span v-if="t.amount > 0">{{ formatMoney(t.amount) }}</span>
+            <span v-if="t.cost > 0" style="opacity:0.7"> (费{{ t.cost.toFixed(1) }})</span>
+          </el-tag>
+        </div>
+        <div v-if="group.trades.length && group.trades[0].reason" class="rebalance-reason" :style="{ color: themeColors.textSub, fontSize: '12px', marginTop: '4px' }">
+          {{ group.trades[0].reason }}
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, onBeforeUnmount } from 'vue'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
 import { LineChart } from 'echarts/charts'
@@ -347,6 +369,25 @@ const strategies = reactive<StrategyState[]>([
 ])
 
 const backtesting = ref(false)
+// 当前正在执行的回测任务：发起后由进度卡片展示，结束即收起
+const backtestTask = ref<{
+  strategyType: string
+  startDate: string
+  endDate: string
+  status: string
+  progress: number
+  done: number
+  total: number
+} | null>(null)
+const backtestElapsed = ref(0)
+const backtestStageText = computed(() => {
+  const t = backtestTask.value
+  if (!t) return ''
+  if (t.status === 'queued') return '任务排队中'
+  if (t.status === 'done') return '计算完成'
+  if (t.total > 0) return `逐日回放 ${t.done}/${t.total} 个交易日`
+  return '读取历史行情数据'
+})
 const collecting = ref(false)
 const backtestResult = ref<any>(null)
 const dataAvailability = reactive({ has_data: false, min_date: '', max_date: '' })
@@ -493,8 +534,60 @@ async function saveStrategy(strategy: StrategyState) {
   }
 }
 
+// 回测改为「提交任务 + 轮询」：单次算完要十几秒，同步请求在手机切换网络时
+// 会被浏览器断开并重发，导致后端重复计算、历史里出现两条一样的记录。
+const BACKTEST_POLL_INTERVAL = 2000
+const BACKTEST_POLL_TIMEOUT = 5 * 60 * 1000
+let pollAborted = false
+
+onBeforeUnmount(() => { pollAborted = true })
+
+async function waitBacktestTask(taskId: string): Promise<string> {
+  const deadline = Date.now() + BACKTEST_POLL_TIMEOUT
+  let networkErrors = 0
+  while (Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, BACKTEST_POLL_INTERVAL))
+    if (pollAborted) throw new Error('已离开页面，回测仍在后台执行，可稍后刷新回测历史')
+    let task
+    try {
+      task = await strategyApi.getBacktestTask(taskId)
+      networkErrors = 0
+    } catch (e: any) {
+      // 单次查询失败多半是手机网络抖动，任务本身还在后台跑，容忍若干次
+      if (e?.response?.status === 404) throw new Error('回测任务已过期，请刷新回测历史')
+      if (++networkErrors >= 5) throw new Error('网络异常，回测仍在后台执行，请稍后刷新回测历史')
+      continue
+    }
+    // 同步到进度卡片：百分比与交易日计数都来自后端真实回放进度
+    if (backtestTask.value) {
+      backtestTask.value.status = task.status
+      backtestTask.value.progress = task.progress ?? backtestTask.value.progress
+      backtestTask.value.done = task.progress_done ?? backtestTask.value.done
+      backtestTask.value.total = task.progress_total ?? backtestTask.value.total
+    }
+    if (task.status === 'done' && task.bt_id) return task.bt_id
+    if (task.status === 'failed') throw new Error(task.error || '回测失败')
+  }
+  throw new Error('回测超时，请稍后刷新回测历史查看结果')
+}
+
+let elapsedTimer: number | undefined
+
 async function runBacktest() {
+  pollAborted = false
   backtesting.value = true
+  backtestElapsed.value = 0
+  backtestTask.value = {
+    strategyType: backtestForm.strategyType,
+    startDate: backtestForm.startDate,
+    endDate: backtestForm.endDate,
+    status: 'queued',
+    progress: 0,
+    done: 0,
+    total: 0,
+  }
+  // 卡片上的「已用 Ns」用本地计时，不依赖轮询频率
+  elapsedTimer = window.setInterval(() => { backtestElapsed.value += 1 }, 1000)
   try {
     // 获取当前选中策略的参数
     const currentStrategy = strategies.find(s => s.type === backtestForm.strategyType)
@@ -511,36 +604,169 @@ async function runBacktest() {
       ...(currentStrategy.type === 'CONSERVATIVE' ? { valuation_pct_max: currentStrategy.params.valuation_pct_max } : {}),
     } : undefined
 
-    const res = await strategyApi.runBacktest({
+    const task = await strategyApi.submitBacktest({
       strategyType: backtestForm.strategyType,
       startDate: backtestForm.startDate,
       endDate: backtestForm.endDate,
       initialCapital: backtestForm.initialCapital * 10000,
       strategyParams,
     })
-    // Map snake_case from backend to camelCase for frontend
-    backtestResult.value = {
-      totalReturn: res.total_return ?? 0,
-      annualReturn: res.annual_return ?? 0,
-      maxDrawdown: res.max_drawdown ?? 0,
-      sharpeRatio: res.sharpe_ratio ?? 0,
-      winRate: res.win_rate ?? 0,
-      tradeCount: res.trade_count ?? 0,
-      // 交易成本统计
-      totalCommission: res.total_commission ?? 0,
-      totalStampTax: res.total_stamp_tax ?? 0,
-      totalSlippageCost: res.total_slippage_cost ?? 0,
-      totalTradeCost: res.total_trade_cost ?? 0,
-      tradeCountActual: res.trade_count_actual ?? 0,
-      navCurve: res.nav_curve ?? [],
-      positionChanges: res.position_changes ?? [],
-      portfolioSnapshots: res.portfolio_snapshots ?? [],
+    if (task.reused) {
+      ElMessage.info('相同参数的回测正在执行，等待结果中')
     }
-    // 刷新回测历史
+    // 记下任务：切到其他页面时组件会被卸载，回到本页要能接着等这个任务
+    saveBacktestSession({
+      taskId: task.task_id,
+      strategyType: backtestForm.strategyType,
+      startDate: backtestForm.startDate,
+      endDate: backtestForm.endDate,
+      startedAt: Date.now(),
+    })
+    const btId = await waitBacktestTask(task.task_id)
+    // 任务完成：留下 btId，切页回来直接重新拉结果，不必再跑一遍
+    saveBacktestSession({
+      btId,
+      strategyType: backtestForm.strategyType,
+      startDate: backtestForm.startDate,
+      endDate: backtestForm.endDate,
+      startedAt: Date.now(),
+    })
+    try {
+      applyBacktestResult(await strategyApi.getBacktestDetail(btId))
+    } catch {
+      // 拦截器已提示；历史列表已刷新，用户可点「详情」重试
+    }
     loadBacktestHistory()
-  } catch {
-    ElMessage.error('回测失败')
+    // 让卡片走到 100% 再收起，避免进度条停在半途突然消失
+    backtestTask.value.status = 'done'
+    backtestTask.value.progress = 100
+    await new Promise(resolve => setTimeout(resolve, 600))
+  } catch (e: any) {
+    // 已离开页面时不再提示，任务仍在后台执行
+    if (pollAborted) return
+    // axios 错误已由拦截器提示，这里只补充轮询得到的业务原因
+    if (!e?.config && e?.message) {
+      ElMessage.error(e.message)
+    }
+    // 任务可能在网络中断期间已经算完，失败也要刷新历史
+    loadBacktestHistory()
   } finally {
+    if (elapsedTimer !== undefined) {
+      window.clearInterval(elapsedTimer)
+      elapsedTimer = undefined
+    }
+    backtestTask.value = null
+    backtesting.value = false
+  }
+}
+
+// ============ 回测任务续接 ============
+// 切换路由会卸载本组件（MainLayout 没有 keep-alive），但任务跑在后端。
+// 把 task_id / bt_id 记到 sessionStorage：回来时任务没结束就接着轮询，已结束就直接展示结果。
+const BACKTEST_SESSION_KEY = 'strategy.backtestSession'
+
+interface BacktestSession {
+  taskId?: string
+  btId?: string
+  strategyType: string
+  startDate: string
+  endDate: string
+  startedAt: number
+}
+
+function readBacktestSession(): BacktestSession | null {
+  try {
+    const raw = sessionStorage.getItem(BACKTEST_SESSION_KEY)
+    return raw ? (JSON.parse(raw) as BacktestSession) : null
+  } catch {
+    return null
+  }
+}
+
+function saveBacktestSession(session: BacktestSession | null) {
+  try {
+    if (session) sessionStorage.setItem(BACKTEST_SESSION_KEY, JSON.stringify(session))
+    else sessionStorage.removeItem(BACKTEST_SESSION_KEY)
+  } catch {
+    // 隐私模式下 sessionStorage 不可写，退化成原来的「切页即丢」，不影响回测本身
+  }
+}
+
+// 回到本页时接上上次的回测：先探测一次任务状态，避免已完成的任务还闪一下「回测中」
+async function restoreBacktestSession() {
+  const session = readBacktestSession()
+  if (!session) return
+  if (session.btId) {
+    try {
+      applyBacktestResult(await strategyApi.getBacktestDetail(session.btId), false)
+    } catch {
+      saveBacktestSession(null)
+    }
+    return
+  }
+  if (!session.taskId) {
+    saveBacktestSession(null)
+    return
+  }
+  let probe: any = null
+  try {
+    probe = await strategyApi.getBacktestTask(session.taskId)
+  } catch (e: any) {
+    // 服务重启会清空内存里的任务表，这条任务已无从接续
+    if (e?.response?.status === 404) saveBacktestSession(null)
+    return
+  }
+  if (probe?.status === 'failed') {
+    saveBacktestSession(null)
+    loadBacktestHistory()
+    return
+  }
+  if (probe?.status === 'done' && probe.bt_id) {
+    saveBacktestSession({ ...session, taskId: undefined, btId: probe.bt_id })
+    try {
+      applyBacktestResult(await strategyApi.getBacktestDetail(probe.bt_id), false)
+    } catch {
+      // 拦截器已提示，用户可从回测历史点「详情」重试
+    }
+    loadBacktestHistory()
+    return
+  }
+  // 仍在执行：恢复进度卡并继续轮询，结束后照常展示结果
+  pollAborted = false
+  backtesting.value = true
+  backtestElapsed.value = Math.max(0, Math.round((Date.now() - (session.startedAt || Date.now())) / 1000))
+  backtestTask.value = {
+    strategyType: session.strategyType,
+    startDate: session.startDate,
+    endDate: session.endDate,
+    status: 'queued',
+    progress: 0,
+    done: 0,
+    total: 0,
+  }
+  elapsedTimer = window.setInterval(() => { backtestElapsed.value += 1 }, 1000)
+  try {
+    const btId = await waitBacktestTask(session.taskId)
+    saveBacktestSession({ ...session, taskId: undefined, btId })
+    try {
+      applyBacktestResult(await strategyApi.getBacktestDetail(btId), false)
+    } catch {
+      // 同上，历史列表可兜底
+    }
+    loadBacktestHistory()
+    backtestTask.value.status = 'done'
+    backtestTask.value.progress = 100
+    await new Promise(resolve => setTimeout(resolve, 600))
+  } catch (e: any) {
+    if (pollAborted) return
+    if (!e?.config && e?.message) ElMessage.error(e.message)
+    loadBacktestHistory()
+  } finally {
+    if (elapsedTimer !== undefined) {
+      window.clearInterval(elapsedTimer)
+      elapsedTimer = undefined
+    }
+    backtestTask.value = null
     backtesting.value = false
   }
 }
@@ -556,31 +782,37 @@ async function loadBacktestHistory() {
   }
 }
 
+// Map snake_case from backend to camelCase for frontend
+// scroll=false 用于切页恢复：回填结果但不打断用户当前浏览位置
+function applyBacktestResult(res: any, scroll = true) {
+  backtestResult.value = {
+    totalReturn: res.total_return ?? 0,
+    annualReturn: res.annual_return ?? 0,
+    maxDrawdown: res.max_drawdown ?? 0,
+    sharpeRatio: res.sharpe_ratio ?? 0,
+    winRate: res.win_rate ?? 0,
+    tradeCount: res.trade_count ?? 0,
+    // 交易成本统计
+    totalCommission: res.total_commission ?? 0,
+    totalStampTax: res.total_stamp_tax ?? 0,
+    totalSlippageCost: res.total_slippage_cost ?? 0,
+    totalTradeCost: res.total_trade_cost ?? 0,
+    tradeCountActual: res.trade_count_actual ?? 0,
+    navCurve: res.nav_curve ?? [],
+    positionChanges: res.position_changes ?? [],
+    portfolioSnapshots: res.portfolio_snapshots ?? [],
+  }
+  // 滚动到回测结果区域
+  if (!scroll) return
+  const resultEl = document.querySelector('.backtest-result')
+  if (resultEl) {
+    resultEl.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }
+}
+
 async function viewBacktestDetail(btId: string) {
   try {
-    const res = await strategyApi.getBacktestDetail(btId)
-    backtestResult.value = {
-      totalReturn: res.total_return ?? 0,
-      annualReturn: res.annual_return ?? 0,
-      maxDrawdown: res.max_drawdown ?? 0,
-      sharpeRatio: res.sharpe_ratio ?? 0,
-      winRate: res.win_rate ?? 0,
-      tradeCount: res.trade_count ?? 0,
-      // 交易成本统计
-      totalCommission: res.total_commission ?? 0,
-      totalStampTax: res.total_stamp_tax ?? 0,
-      totalSlippageCost: res.total_slippage_cost ?? 0,
-      totalTradeCost: res.total_trade_cost ?? 0,
-      tradeCountActual: res.trade_count_actual ?? 0,
-      navCurve: res.nav_curve ?? [],
-      positionChanges: res.position_changes ?? [],
-      portfolioSnapshots: res.portfolio_snapshots ?? [],
-    }
-    // 滚动到回测结果区域
-    const resultEl = document.querySelector('.backtest-result')
-    if (resultEl) {
-      resultEl.scrollIntoView({ behavior: 'smooth', block: 'center' })
-    }
+    applyBacktestResult(await strategyApi.getBacktestDetail(btId))
     ElMessage.success('已加载回测详情')
   } catch {
     ElMessage.error('获取回测详情失败')
@@ -633,11 +865,14 @@ const rebalanceGroups = computed(() => {
     }
     groupMap[d].trades.push(item)
   }
+  // 调仓日按日期倒序：最近的调仓显示在最前面
   return Object.values(groupMap)
+    .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')))
 })
 
-// 页面加载时获取回测历史
+// 页面加载时获取回测历史，并接上可能还在跑的回测任务
 loadBacktestHistory()
+restoreBacktestSession()
 
 /** 纵轴金额简写：≥1 万写 w、≥1 千写 k，否则百万级刻度把左轴撑爆（390 下只容 5-6 字符）。
  *  小数位取 2 位再去尾 0：刻度步长偏小时 1050/1100 不会都显示成 1.1k，10200/10800 也不会都是 1.1w */
@@ -706,6 +941,105 @@ const backtestChartOption = computed(() => {
 .backtest-header-right {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
 }
+/* ─── 当前回测任务卡片：外框流光表示任务仍在计算 ─── */
+.bt-task-card {
+  position: relative;
+  margin-top: 16px;
+  padding: 14px 16px;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  // 伪元素用负层级，靠 isolation 把层级限制在本卡片内
+  isolation: isolate;
+
+  // 旋转的锥形渐变打底，再用内层实色盖住中间，只留一圈流动的边
+  &::before {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 230%;
+    aspect-ratio: 1;
+    background: conic-gradient(from 0deg, transparent 0deg, transparent 200deg,
+      var(--accent-primary) 280deg, var(--accent-warning) 320deg, transparent 360deg);
+    transform: translate(-50%, -50%);
+    animation: bt-task-spin 2.4s linear infinite;
+    // 持续旋转交给合成层，避免每帧重绘整个渐变大图
+    will-change: transform;
+    z-index: -2;
+  }
+  &::after {
+    content: '';
+    position: absolute;
+    inset: 1.5px;
+    border-radius: calc(var(--radius-md) - 1.5px);
+    background: var(--bg-surface);
+    z-index: -1;
+  }
+  &.is-done::before {
+    background: var(--accent-success);
+    animation: none;
+  }
+
+  .bt-task-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 10px;
+
+    .bt-task-title { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+    .bt-task-range { font-size: 11px; color: var(--text-tertiary); font-family: var(--font-mono); }
+  }
+  .bt-task-bar {
+    position: relative;
+    height: 8px;
+    border-radius: 4px;
+    background: var(--bg-tertiary);
+    overflow: hidden;
+
+    .bt-task-bar-fill {
+      height: 100%;
+      border-radius: 4px;
+      background: linear-gradient(90deg, var(--accent-primary), var(--accent-warning));
+      transition: width var(--dur-base) var(--ease);
+    }
+
+    // 取数阶段时长不定：条子来回流动，表示在工作但还不知道要多久
+    &.is-indeterminate .bt-task-bar-fill {
+      width: 35%;
+      transition: none;
+      animation: bt-task-flow 1.4s ease-in-out infinite;
+    }
+    &.is-done .bt-task-bar-fill { background: var(--accent-success); }
+  }
+  .bt-task-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-top: 8px;
+    font-size: 11px;
+    color: var(--text-tertiary);
+
+    .bt-task-meta { font-family: var(--font-mono); }
+  }
+}
+
+@keyframes bt-task-spin {
+  from { transform: translate(-50%, -50%) rotate(0deg); }
+  to { transform: translate(-50%, -50%) rotate(360deg); }
+}
+
+@keyframes bt-task-flow {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(320%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bt-task-card::before { animation: none; }
+  .bt-task-card .bt-task-bar.is-indeterminate .bt-task-bar-fill { animation: none; width: 100%; opacity: 0.5; }
+}
+
 .backtest-result {
   margin-top: 16px;
   .result-row { margin-top: 12px; }
@@ -771,7 +1105,7 @@ const backtestChartOption = computed(() => {
     background: var(--bg-tertiary);
     border-radius: 4px;
 
-    em { font-style: normal; font-size: 9px; color: var(--text-tertiary); }
+    em { font-style: normal; font-size: 10px; color: var(--text-tertiary); }
     b { font-size: 11px; font-weight: 600; font-family: var(--font-mono); }
   }
 }
@@ -828,11 +1162,20 @@ const backtestChartOption = computed(() => {
 @media (max-width: 480px) {
   .strategy-page { padding: 0; }
   .strategy-card { padding: 10px; border-radius: 8px; }
-  .strategy-card .strategy-header { gap: 8px; margin-bottom: 8px; :deep(.el-icon) { font-size: 22px; } h3 { font-size: 13px; } }
+  .strategy-card .strategy-header { gap: 8px; margin-bottom: 8px; :deep(.el-icon) { font-size: 17px; } h3 { font-size: 13px; } }
   .strategy-card .strategy-desc { font-size: 11px; line-height: 1.5; margin-bottom: 10px; }
   .strategy-card .strategy-actions { margin-top: 10px; gap: 6px; }
-  .backtest-result .result-item { padding: 7px 4px; span { font-size: 9px; margin-bottom: 3px; } strong { font-size: 13px; } }
+  .backtest-result .result-item { padding: 7px 4px; span { font-size: 10px; margin-bottom: 3px; } strong { font-size: 13px; } }
   .backtest-chart { height: var(--chart-h-sm); margin-top: 10px; }
+  .bt-task-card {
+    margin-top: 10px;
+    padding: 10px 12px;
+    border-radius: 8px;
+
+    &::after { border-radius: 6.5px; }
+    .bt-task-head { margin-bottom: 8px; .bt-task-title { font-size: 11px; } .bt-task-range { font-size: 10px; } }
+    .bt-task-foot { margin-top: 6px; font-size: 10px; }
+  }
 
   /* 数据范围是 el-tag（高 20），采集历史数据是 el-button（高 36），并排时规格不一致。
      手机端改为卡片头纵向两行：tag 整行、按钮整行 */

@@ -3,16 +3,21 @@
     <header class="sense-header page-card">
       <div class="title-block">
         <h2>盘感训练</h2>
-        <p>随机标的 · 隐藏后市的连续一年K线 · 按天/周推进，判断买卖时机</p>
+        <p>
+          随机标的 · 隐藏后市的连续一年K线 · 按天/周推进，判断买卖时机
+          <span v-if="quotaText" class="quota-text">{{ quotaText }}</span>
+        </p>
       </div>
       <div class="header-actions">
-        <el-radio-group v-model="view" size="small" :disabled="busy || !sid" @change="onViewChange">
+        <el-radio-group v-model="view" size="small" class="fill" :disabled="busy || !sid" @change="onViewChange">
           <el-radio-button value="day">日线</el-radio-button>
           <el-radio-button value="week">周线</el-radio-button>
           <el-radio-button value="month">月线</el-radio-button>
         </el-radio-group>
-        <el-button v-if="!state" type="primary" :loading="busy" @click="start">开始训练</el-button>
-        <el-button v-else-if="state.ended" type="primary" :loading="busy" @click="start">
+        <el-button v-if="!state" type="primary" :loading="busy" :disabled="quotaExhausted" @click="start">
+          开始训练
+        </el-button>
+        <el-button v-else-if="state.ended" type="primary" :loading="busy" :disabled="quotaExhausted" @click="start">
           再来一轮
         </el-button>
         <el-button v-else type="danger" :loading="busy" :disabled="!sid" @click="doFinish">结束训练</el-button>
@@ -21,7 +26,7 @@
     </header>
 
     <el-empty v-if="!state" description="点击「开始训练」，系统会随机抽取一只A股并隐藏后市K线">
-      <el-button type="primary" :loading="busy" @click="start">开始训练</el-button>
+      <el-button type="primary" :loading="busy" :disabled="quotaExhausted" @click="start">开始训练</el-button>
     </el-empty>
 
     <div v-else class="sense-body">
@@ -79,13 +84,13 @@
         </div>
         <el-progress :percentage="progressPct" :show-text="false" :stroke-width="4" />
         <div class="kline-chart-scroll">
-          <VChart ref="chartRef" class="kline-chart" :option="chartOption" autoresize @datazoom="onDataZoom" />
-        </div>
-        <div v-if="magnifier" class="magnifier">
-          <div class="magnifier-title">
-            局部放大 · 第{{ magnifier.no }}根 · {{ magnifier.price.toFixed(3) }}
+          <div v-if="magnifier" class="magnifier">
+            <div class="magnifier-title">
+              <span class="m-prefix">局部放大 · </span>第{{ magnifier.no }}根 · {{ magnifier.price.toFixed(3) }}
+            </div>
+            <VChart class="magnifier-chart" :option="magnifierOption" autoresize />
           </div>
-          <VChart class="magnifier-chart" :option="magnifierOption" autoresize />
+          <VChart ref="chartRef" class="kline-chart" :option="chartOption" autoresize @datazoom="onDataZoom" />
         </div>
         <div class="chart-toolbar">
           <div class="indicator-toggles">
@@ -100,7 +105,7 @@
         </div>
         <div v-if="!state.ended" class="trade-bar">
           <span class="trade-label">仓位</span>
-          <el-radio-group v-model="ratio" size="small" :disabled="busy">
+          <el-radio-group v-model="ratio" size="small" class="fill" :disabled="busy">
             <el-radio-button :value="0.25">1/4</el-radio-button>
             <el-radio-button :value="1 / 3">1/3</el-radio-button>
             <el-radio-button :value="0.5">1/2</el-radio-button>
@@ -122,13 +127,13 @@
           >
             {{ autoPlaying ? '暂停' : '自动播放' }}
           </el-button>
-          <el-radio-group v-model="speed" size="small">
+          <el-radio-group v-model="speed" size="small" class="fill">
             <el-radio-button :value="1200">慢</el-radio-button>
             <el-radio-button :value="600">中</el-radio-button>
             <el-radio-button :value="250">快</el-radio-button>
           </el-radio-group>
           <span class="trade-divider" />
-          <el-radio-group v-model="unit" size="small" :disabled="busy" @change="onUnitChange">
+          <el-radio-group v-model="unit" size="small" class="fill" :disabled="busy" @change="onUnitChange">
             <el-radio-button value="day">按天</el-radio-button>
             <el-radio-button value="week">按周</el-radio-button>
           </el-radio-group>
@@ -417,10 +422,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, onUpdated, reactive, ref, watch } from 'vue'
 import { useBreakpoint } from '@/composables/useBreakpoint'
 import VChart from 'vue-echarts'
-import { use } from 'echarts/core'
+import { use, getInstanceByDom } from 'echarts/core'
 import { BarChart, LineChart, ScatterChart, CandlestickChart } from 'echarts/charts'
 import {
   GridComponent,
@@ -436,6 +441,8 @@ import { CanvasRenderer } from 'echarts/renderers'
 import { ElMessage } from 'element-plus'
 import SenseReviewPanel from '@/components/SenseReviewPanel.vue'
 import { stockSenseApi } from '@/api/stockSense'
+import { accessApi } from '@/api/admin'
+import type { QuotaState } from '@/api/admin'
 import type {
   ChartView,
   SenseChart,
@@ -460,6 +467,31 @@ use([
 const userStore = useUserStore()
 const bp = useBreakpoint()
 const userName = computed(() => userStore.userInfo?.username || 'default')
+
+/** 今日训练次数配额（后台「高级功能」页配置，普通账号默认 3 次/天） */
+const quota = ref<QuotaState | null>(null)
+const quotaText = computed(() => {
+  const q = quota.value
+  if (!q || !q.enabled) return ''
+  if (q.dailyLimit <= 0) return '今日不限次数'
+  return quotaSuffix(q)
+})
+const quotaExhausted = computed(() =>
+  !!quota.value && quota.value.enabled && quota.value.dailyLimit > 0 && quota.value.remaining <= 0
+)
+
+function quotaSuffix(q: QuotaState): string {
+  return q.remaining > 0 ? `今日剩余 ${q.remaining}/${q.dailyLimit} 次` : '今日次数已用完'
+}
+
+async function loadQuota() {
+  try {
+    quota.value = await accessApi.getMyQuota('stock_sense_training')
+  } catch {
+    // 配额读数失败不打扰用户，按钮本身仍会由后端拦截
+    quota.value = null
+  }
+}
 
 /** 当前训练会话 id 的本地记录，用于刷新页面后恢复训练（会话与划线都在后端） */
 const SID_KEY = 'stock-sense-sid:'
@@ -800,7 +832,8 @@ function buildChartOption(
     animation: false,
     backgroundColor: 'transparent',
     legend: {
-      top: 0,
+      // 手机端顶部 0-24px 留给提示横条 / 放大镜，图例下移到 26px
+      top: bp.isMobile.value ? 26 : 0,
       left: 0,
       show: vis.ma,
       data: vis.ma ? Object.keys(c.ma).map((n) => n.toUpperCase()) : [],
@@ -808,9 +841,41 @@ function buildChartOption(
       itemHeight: bp.isMobile.value ? 6 : 14,
       textStyle: { color: '#8a94a6', fontSize: bp.isMobile.value ? 9 : 11 },
     },
-    tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
+    // 手机端提示框固定在图顶单行横条，不随触点浮在 K 线上；微调时让位给顶部放大镜
+    tooltip: bp.isMobile.value
+      ? {
+          show: !magnifier.value,
+          trigger: 'axis',
+          triggerOn: 'click',
+          confine: true,
+          axisPointer: { type: 'line', lineStyle: { color: '#637EE8', width: 1, type: 'dashed' } },
+          position: (point: number[], _p: any, _dom: any, _rect: any, size: any) => {
+            const w = size.contentSize[0] as number
+            return [Math.max(4, Math.min(point[0] - w / 2, size.viewSize[0] - w - 4)), 0]
+          },
+          backgroundColor: 'rgba(255,255,255,0.98)',
+          borderColor: '#e4e4e7',
+          borderWidth: 1,
+          padding: [3, 8],
+          textStyle: { color: '#27272a', fontSize: 11 },
+          extraCssText: 'border-radius:4px;box-shadow:none;white-space:nowrap;line-height:16px;',
+          formatter: (params: any) => {
+            const list = Array.isArray(params) ? params : [params]
+            const k = list.find((p: any) => p.seriesType === 'candlestick') || list[0]
+            const raw = k?.data
+            const d: number[] = Array.isArray(raw) ? raw : raw?.value
+            if (!d || d.length < 4) return ''
+            // ECharts 回调的 candle.data 是 [dataIndex, open, close, low, high]
+            const [, open, close, low, high] = d
+            const pct = open ? ((close - open) / open) * 100 : 0
+            const color = pct >= 0 ? '#ef232a' : '#14b143'
+            const day = String(k.axisValue ?? '')
+            return `<span style="color:#71717a">${day}</span> 开 ${(+open).toFixed(2)} 高 ${(+high).toFixed(2)} 低 ${(+low).toFixed(2)} 收 ${(+close).toFixed(2)} <span style="color:${color}">${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%</span>`
+          },
+        }
+      : { trigger: 'axis', axisPointer: { type: 'cross' } },
     axisPointer: { link: [{ xAxisIndex: 'all' }] },
-    // 手机端把价格轴的横向占位从 56px 压到 38px，把宽度让给 40 根K线
+    // 手机端纵轴刻度内置，grid 左右只留 4px，把宽度让给 40 根 K 线
     grid: (subPanels.length === 2
       ? [
           { left: 56, right: 20, top: 30, height: '46%' },
@@ -823,7 +888,20 @@ function buildChartOption(
             { left: 56, right: 20, top: '72%', height: '20%' },
           ]
         : [{ left: 56, right: 20, top: 30, height: '80%' }]
-    ).map((g) => (bp.isMobile.value ? { ...g, left: 38, right: 6 } : g)),
+    ).map((g, i) => (bp.isMobile.value
+      ? {
+          ...g,
+          left: 4,
+          right: 4,
+          // 主图顶部让出 44px：0-24 横条、26-38 图例，均不压 K 线
+          ...(i === 0
+            ? {
+                top: 44,
+                height: subPanels.length === 2 ? '42%' : subPanels.length === 1 ? '56%' : '76%',
+              }
+            : {}),
+        }
+      : g)),
     xAxis: axisIdx.map((i) => ({
       type: 'category',
       gridIndex: i,
@@ -844,23 +922,40 @@ function buildChartOption(
         scale: true,
         gridIndex: 0,
         splitLine: { lineStyle: { color: 'rgba(128,128,128,0.15)' } },
-        axisLabel: { color: '#8a94a6', fontSize: bp.isMobile.value ? 9 : 10 },
+        axisLabel: bp.isMobile.value
+          ? { color: '#8a94a6', fontSize: 9, inside: true, margin: 4 }
+          : { color: '#8a94a6', fontSize: 10 },
+        ...(bp.isMobile.value ? { axisLine: { show: false }, axisTick: { show: false } } : {}),
       },
       ...subPanels.map((p, i) => ({
         scale: true,
         gridIndex: i + 1,
         splitNumber: 2,
-        axisLabel: p === 'volume' ? { show: false } : { color: '#8a94a6', fontSize: bp.isMobile.value ? 9 : 10 },
+        axisLabel: p === 'volume'
+          ? { show: false }
+          : bp.isMobile.value
+            ? { color: '#8a94a6', fontSize: 9, inside: true, margin: 4 }
+            : { color: '#8a94a6', fontSize: 10 },
+        ...(bp.isMobile.value ? { axisLine: { show: false }, axisTick: { show: false } } : {}),
         splitLine: { show: false },
       })),
     ],
     dataZoom: [
-      { type: 'inside', xAxisIndex: axisIdx, ...zoomSpan },
+      // 移动端单指平移由 bindChartPan 自己接管（ECharts inside 内置触摸拖动跟手差）
+      // 最小窗口与 localStorage 记录的根数下限同源：盘感训练要放大看单根细节与微调锚点，
+      // 下限取 MIN_ZOOM_BARS（数据回放是 28 根）。minValueSpan 是索引跨度，可视根数 = 跨度+1，
+      // 故取 MIN_ZOOM_BARS - 1 才是「最少 6 根」；inside 与 slider 都要设，捏合/拖滑块才一致
+      {
+        type: 'inside', xAxisIndex: axisIdx, ...zoomSpan,
+        moveOnMouseMove: !bp.isMobile.value, preventDefaultMouseMove: false,
+        minValueSpan: Math.min(MIN_ZOOM_BARS, dates.length) - 1,
+      },
       {
         type: 'slider', xAxisIndex: axisIdx,
         height: bp.isMobile.value ? 12 : 16,
         bottom: bp.isMobile.value ? 0 : 4,
         ...zoomSpan,
+        minValueSpan: Math.min(MIN_ZOOM_BARS, dates.length) - 1,
         showDetail: false,
       },
     ],
@@ -1041,14 +1136,19 @@ const magnifierOption = computed(() => {
   const center = m.idx - from
   return {
     animation: false,
-    grid: { left: 40, right: 8, top: 8, bottom: 18 },
+    grid: bp.isMobile.value
+      ? { left: 2, right: 2, top: 1, bottom: 1 }
+      : { left: 40, right: 8, top: 8, bottom: 18 },
     xAxis: {
       type: 'category', data: part.map((b, i) => dayLabel(b.date) + (i === center ? ' ●' : '')),
       axisLabel: { show: false }, axisTick: { show: false },
-      axisLine: { lineStyle: { color: '#2f3644' } },
+      axisLine: bp.isMobile.value ? { show: false } : { lineStyle: { color: '#2f3644' } },
     },
     yAxis: {
-      scale: true, axisLabel: { color: '#8a94a6', fontSize: 9 },
+      scale: true,
+      axisLabel: bp.isMobile.value ? { show: false } : { color: '#8a94a6', fontSize: 9 },
+      axisLine: bp.isMobile.value ? { show: false } : undefined,
+      axisTick: bp.isMobile.value ? { show: false } : undefined,
       splitLine: { lineStyle: { color: 'rgba(128,128,128,0.15)' } },
     },
     series: [{
@@ -1060,6 +1160,7 @@ const magnifierOption = computed(() => {
       },
       markLine: {
         symbol: 'none', silent: true, animation: false,
+        label: bp.isMobile.value ? { show: false } : undefined,
         data: [
           { xAxis: center, lineStyle: { color: '#409eff', type: 'dashed', width: 1 } },
           { yAxis: m.price, lineStyle: { color: '#409eff', type: 'dashed', width: 1 } },
@@ -1071,7 +1172,7 @@ const magnifierOption = computed(() => {
 
 async function loadStats() {
   try {
-    stats.value = await stockSenseApi.stats(userName.value)
+    stats.value = await stockSenseApi.stats()
   } catch { /* 统计失败不影响训练 */ }
 }
 
@@ -1131,7 +1232,7 @@ async function switchReplayView(v: string | number | boolean | undefined) {
 async function loadReplay(sessionId: string, v: ChartView) {
   replayLoading.value = true
   try {
-    const res = await stockSenseApi.replay(sessionId, userName.value, v)
+    const res = await stockSenseApi.replay(sessionId, v)
     replayRecord.value = res.record
     replayChart.value = res.chart
   } catch {
@@ -1245,7 +1346,8 @@ async function start() {
   if (!(await guardManual())) return
   busy.value = true
   try {
-    const res = await stockSenseApi.start(userName.value)
+    const res = await stockSenseApi.start()
+    if (res.quota) quota.value = res.quota
     sid.value = res.session.session_id
     state.value = res.session
     resetViewWindow()
@@ -1392,6 +1494,63 @@ function onDataZoom(e: any) {
   pendingZoom = { start, end }
   if (zoomTimer) clearTimeout(zoomTimer)
   zoomTimer = setTimeout(applyPendingZoom, 160)
+}
+
+// ===== 规则7.5.4：移动端单指平移自己接管（与板块K线图同一套换算） =====
+// ECharts inside 内置触摸拖动在移动端跟手差，故 moveOnMouseMove 在移动端置 false，
+// 按下锁定当前窗口，move 时按 deltaPct = dx / 图宽 × 窗口跨度 直接 dispatchAction。
+// 拖拽内容语义：右滑(dx>0)露出左侧更早数据 → start 减小；左滑看更晚数据 → start 增大。
+// 窗口跨度不变，撞 0/100 边界时平移量被 clamp；双指捏合仍交给 inside。
+let panBase: { x: number; start: number; end: number; id: number } | null = null
+
+function chartInstanceIn(host: HTMLElement) {
+  // vue-echarts 把 _echarts_instance_ 挂在内部 wrapper 上，不是根节点
+  const dom = host.querySelector('[_echarts_instance_]') as HTMLElement | null
+  return dom ? getInstanceByDom(dom) : null
+}
+
+function bindChartPan(host: HTMLElement | null, enabled: () => boolean) {
+  if (!host || (host as any).__panBound) return
+  ;(host as any).__panBound = true
+
+  host.addEventListener('pointerdown', (e) => {
+    if (!bp.isMobile.value || e.pointerType === 'mouse' || !enabled()) return
+    // 底部滑块区（slider height 12/16 + bottom 0/4）交给 ECharts slider 自己拖：
+    // 这里若也接管，每帧 dispatchAction 会把手柄拖动覆盖成同宽度的整体平移，实测拖手柄窗口不缩
+    if (e.clientY > host.getBoundingClientRect().bottom - 26) return
+    if (!e.isPrimary) { panBase = null; return } // 第二根手指：捏合缩放优先
+    const dz = (chartInstanceIn(host)?.getOption() as any)?.dataZoom?.find((d: any) => d.type === 'inside')
+    panBase = dz ? { x: e.clientX, start: Number(dz.start) || 0, end: Number(dz.end) ?? 100, id: e.pointerId } : null
+  }, true)
+
+  host.addEventListener('pointermove', (e) => {
+    if (!bp.isMobile.value || !panBase || e.pointerId !== panBase.id) return
+    const dx = e.clientX - panBase.x
+    if (Math.abs(dx) < 3) return // 原地轻点仍走 click（画线取点 / 点击出提示框）
+    const width = host.getBoundingClientRect().width || 320
+    const span = panBase.end - panBase.start
+    const deltaPct = (dx / width) * span
+    let start = panBase.start - deltaPct
+    let end = panBase.end - deltaPct
+    if (start < 0) { start = 0; end = span }
+    if (end > 100) { end = 100; start = 100 - span }
+    // 不指定 dataZoomIndex：同步 inside + slider 两个组件，避免窗口不一致造成不绘制/闪回
+    chartInstanceIn(host)?.dispatchAction({ type: 'dataZoom', start, end })
+  }, true)
+}
+
+function bindChartPans() {
+  // 训练图：微调模式下拖拽的是锚点，交给 zrender，不平移
+  bindChartPan(document.querySelector('.kline-chart-scroll'), () => !adjustMode.value)
+  bindChartPan(document.querySelector('.replay-chart'), () => true)
+}
+
+// 松手兜底：zrender 可能捕获指针导致容器收不到 pointerup
+if (!(document as any).__sensePanEndBound) {
+  ;(document as any).__sensePanEndBound = true
+  const endPan = () => { panBase = null }
+  document.addEventListener('pointerup', endPan, true)
+  document.addEventListener('pointercancel', endPan, true)
 }
 
 /**
@@ -1643,8 +1802,10 @@ const onWindowMouseUp = () => { if (dragging.value) endDrag() }
 onMounted(async () => {
   window.addEventListener('mouseup', onWindowMouseUp)
   window.addEventListener('keydown', onKeyDown)
+  bindChartPans()
   userZoomBars.value = readZoomBars()
   await loadStats()
+  void loadQuota()
   // 刷新页面后排断：会话与划线都存后端，按本地记录的会话 id 恢复
   const saved = localStorage.getItem(SID_KEY + userName.value)
   if (!saved) return
@@ -1659,6 +1820,9 @@ onMounted(async () => {
     localStorage.removeItem(SID_KEY + userName.value)
   }
 })
+
+// 训练图随会话出现、复盘图随抽屉重建成新 DOM，每次渲染后补绑一次
+onUpdated(bindChartPans)
 
 onUnmounted(() => {
   stopAuto()
@@ -1693,6 +1857,12 @@ onUnmounted(() => {
   margin: 0;
   font-size: 12px;
   color: var(--text-secondary, #8a94a6);
+}
+
+.quota-text {
+  margin-left: 4px;
+  color: var(--accent-primary, #5f72e8);
+  white-space: nowrap;
 }
 
 .header-actions {
@@ -1789,6 +1959,11 @@ onUnmounted(() => {
 .revealed {
   color: var(--accent-primary, #4051E0);
   font-weight: 600;
+}
+
+/* 放大镜相对图表容器定位，而不是整个面板 */
+.kline-chart-scroll {
+  position: relative;
 }
 
 .kline-chart {
@@ -2141,7 +2316,7 @@ onUnmounted(() => {
 
 .m-pair-grid em {
   font-style: normal;
-  font-size: 9px;
+  font-size: 10px;
   color: var(--text-tertiary, #9499a6);
 }
 
@@ -2180,7 +2355,7 @@ onUnmounted(() => {
 }
 
 .m-trade-list .m-trade-head {
-  font-size: 9px;
+  font-size: 10px;
   color: var(--text-tertiary, #9499a6);
   padding-bottom: 3px;
 }
@@ -2285,12 +2460,15 @@ onUnmounted(() => {
     width: 100%;
     max-width: 100%;
     overflow: hidden;
+    /* 平移由 bindChartPan 自己接管：不声明 touch-action 时浏览器会把横向拖动判定成
+       页面滚动并派发 pointercancel，平移在第一步之后就断掉（实测 sv 卡在 2 不再前进） */
+    touch-action: none;
   }
   .kline-chart { height: 320px; width: 100%; max-width: 100%; }
   .replay .kline-chart { height: 280px; width: 100%; }
   /* 容器高度必须跟着图表一起降：.replay-chart 桌面 min-height 420，只改图表 280
      就会在图表与盘后总结之间留出 140px 空白 */
-  .replay-chart { min-height: 280px; }
+  .replay-chart { min-height: 280px; touch-action: none; }
 
   /* 局部放大镜收窄到视口内 */
   .magnifier {
@@ -2312,6 +2490,33 @@ onUnmounted(() => {
   /* 页面自身不再叠加内边距，避免与全局 10px 双重留白 */
   .sense-page { padding: 0; }
   .kline-chart { height: 300px; }
+
+  /* 局部放大镜改为图顶横条：24px 落在 grid 的 30px 顶部留白内，不遮 K 线 */
+  .magnifier {
+    top: 0;
+    left: 0;
+    right: 0;
+    width: 100%;
+    max-width: none;
+    box-sizing: border-box;
+    height: 24px;
+    padding: 2px 4px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    border-color: #e4e4e7;
+    border-radius: 4px;
+    box-shadow: none;
+  }
+  .magnifier-title {
+    flex: 0 0 auto;
+    margin: 0;
+    font-size: 10px;
+    line-height: 18px;
+    color: #71717a;
+  }
+  .m-prefix { display: none; }
+  .magnifier-chart { flex: 1; width: 0; height: 18px; }
 
   .sense-header,
   .chart-panel {
@@ -2335,7 +2540,7 @@ onUnmounted(() => {
   .chart-meta { font-size: 10px; gap: 6px; margin-bottom: 4px; }
   .meta-text { gap: 4px 8px; }
   .draw-tools { gap: 4px; }
-  .draw-hint { font-size: 9px; }
+  .draw-hint { font-size: 10px; }
 
   /* 交易栏：从单行长条改为 4 行网格，主操作占满整行，符合触屏点击习惯 */
   .trade-bar {
@@ -2355,14 +2560,13 @@ onUnmounted(() => {
      后代选择器），永远匹配不到，规则静默失效。所以本文件所有 :deep() 一律写在顶层。
      分段选择器必须显式跨 3 列：el-radio-group 是 inline-flex，宽度会塌缩成内容宽（53px），
      "按天/按周"、"慢/中/快" 因此被挤成竖排。 */
+  /* 分段样式（高/内边距/字号/等分）统一由 mobile.scss 的 .fill 规范负责，
+     这里只负责 grid 跨列与避免 radio-group 塌缩 */
   .header-actions :deep(.el-radio-group) { grid-column: 1 / -1; display: flex; min-width: 0; }
   .header-actions :deep(.el-radio-button) { flex: 1 1 0; min-width: 0; }
-  .header-actions :deep(.el-radio-button__inner) { width: 100%; }
   .trade-bar > :deep(.el-radio-group) { display: flex; min-width: 0; grid-column: span 3; }
   .trade-bar > :deep(.el-radio-group):first-of-type { grid-column: span 6; }
   .trade-bar :deep(.el-radio-button) { flex: 1 1 0; min-width: 0; }
-  /* 控件尺寸（高 36 / 内边距 0 8 / 字号 12）由 mobile.scss 的分段规范统一，这里只管铺满 */
-  .trade-bar :deep(.el-radio-button__inner) { width: 100%; }
 
   /* 划线工具：5 个工具用 6 列栅格排版 —— 第一行 3 个各占 2 列、第二行 2 个各占 3 列。
      原先用 flex 换行 + flex:1 1 30%，两行各自的伸缩基数不同，第一行整体比第二行

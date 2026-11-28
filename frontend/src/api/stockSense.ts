@@ -1,4 +1,5 @@
 import request from './request'
+import type { QuotaState } from './admin'
 
 export type ChartView = 'day' | 'week' | 'month'
 export type StepUnit = 'day' | 'week'
@@ -234,6 +235,8 @@ export interface SenseStats {
 export interface StartResult {
   session: SenseState
   chart: SenseChart
+  /** 本次消耗后的当日配额（auth 服务不可达时为空） */
+  quota?: QuotaState | null
 }
 
 export interface StepResult {
@@ -248,9 +251,9 @@ export interface SenseReplay {
 }
 
 export const stockSenseApi = {
-  /** 开始新一轮训练（随机标的 + 随机一年区间） */
-  start(user: string): Promise<StartResult> {
-    return request.post('/strategy/stock-sense/start', null, { params: { user } })
+  /** 开始新一轮训练（随机标的 + 随机一年区间），归属由登录态决定 */
+  start(): Promise<StartResult> {
+    return request.post('/strategy/stock-sense/start')
   },
 
   /** 当前可见K线（切换视图时调用，不推进） */
@@ -288,15 +291,15 @@ export const stockSenseApi = {
     return request.post(`/strategy/stock-sense/${sid}/finish`, null, { params: { view } })
   },
 
-  /** 训练统计（含历史记录） */
-  stats(user: string): Promise<SenseStats> {
-    return request.get(`/strategy/stock-sense/stats/${encodeURIComponent(user)}`)
+  /** 训练统计（含历史记录），按登录账号隔离 */
+  stats(): Promise<SenseStats> {
+    return request.get('/strategy/stock-sense/stats')
   },
 
   /** 复盘：按历史记录回放训练区间的K线与买卖点 */
-  replay(sessionId: string, user: string, view: ChartView): Promise<SenseReplay> {
+  replay(sessionId: string, view: ChartView): Promise<SenseReplay> {
     return request.get(`/strategy/stock-sense/replay/${encodeURIComponent(sessionId)}`, {
-      params: { user, view },
+      params: { view },
     })
   },
 }

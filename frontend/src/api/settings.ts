@@ -108,6 +108,18 @@ export const settingsApi = {
     return request.get(`/strategy/data/replay/day/${date}`, { params })
   },
 
+  /**
+   * 板块资金流热力图聚合数据：后端一次范围查询后按板块取平均，
+   * 替代逐日拉 /replay/day（5/10/20 个串行请求）
+   */
+  getReplayHeatmap(days: number): Promise<{
+    dates: string[]
+    days: number
+    sectors: { sector_name: string; main_net_inflow: number; index_change_pct: number; days: number }[]
+  }> {
+    return request.get('/strategy/data/replay/heatmap', { params: { days } })
+  },
+
   getReplaySectorHistory(sectorCode: string, startDate?: string, endDate?: string): Promise<any[]> {
     const params: any = {}
     if (startDate) params.start_date = startDate
@@ -132,19 +144,25 @@ export const settingsApi = {
     })
   },
 
-runStrategyOverlay(data: {
+  runStrategyOverlay(data: {
     start_date: string
     end_date: string
     strategy_type: string
     initial_capital?: number
     params?: any
-  }): Promise<{
-    daily_signals: any[]
-    nav_curve: any[]
-    summary: any
-    position_changes: any[]
+  }): Promise<{ accepted: boolean; message: string }> {
+    // 后台任务模式：立即返回，前端轮询进度/结果
+    return request.post('/strategy/data/replay/strategy-overlay', data, { headers: { 'X-Silent': '1' } })
+  },
+  getOverlayProgress(): Promise<{ active: boolean; completed: number; total: number; error: string | null }> {
+    return request.get('/strategy/data/replay/strategy-overlay/progress')
+  },
+  getOverlayResult(): Promise<{
+    status: 'running' | 'done' | 'failed'
+    result: { daily_signals: any[]; nav_curve: any[]; summary: any; position_changes: any[]; portfolio_snapshots: any[] } | null
+    error: string | null
   }> {
-    return request.post('/strategy/data/replay/strategy-overlay', data)
+    return request.get('/strategy/data/replay/strategy-overlay/result')
   },
 
   runStrategyOptimize(data: {
@@ -168,6 +186,9 @@ runStrategyOverlay(data: {
   },
   getOptimizeHistory(): Promise<OptimizeHistoryItem[]> {
     return request.get('/strategy/data/replay/strategy-optimize/history')
+  },
+  getOptimizeHistoryDetail(id: string): Promise<OptimizeResult> {
+    return request.get(`/strategy/data/replay/strategy-optimize/history/${encodeURIComponent(id)}`)
   },
 }
 
@@ -198,6 +219,7 @@ export interface OptimizeResult {
 
 /** 历史寻优记录摘要（后端按完成时间倒序返回） */
 export interface OptimizeHistoryItem {
+  id: string
   created_at: string
   strategy_type: string
   n_trials: number

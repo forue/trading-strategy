@@ -13,7 +13,7 @@
               <el-switch v-model="wsEnabled" active-text="开" inactive-text="关" @change="onWsEnabledChange" />
             </el-form-item>
             <el-form-item label="推送策略类型">
-              <el-checkbox-group v-model="wsStrategyTypes" @change="saveSettings">
+              <el-checkbox-group v-model="wsStrategyTypes" @change="saveUserSettings">
                 <el-checkbox label="AGGRESSIVE">激进轮动</el-checkbox>
                 <el-checkbox label="MODERATE">稳健轮动</el-checkbox>
                 <el-checkbox label="CONSERVATIVE">保守轮动</el-checkbox>
@@ -136,10 +136,11 @@
         <div class="page-card">
           <div class="card-header">
             <span class="card-title">数据源配置</span>
+            <el-tag v-if="!isAdmin" size="small" type="info">系统级设置，仅管理员可改</el-tag>
           </div>
           <el-form label-width="160px" style="max-width: 700px">
             <el-form-item label="当前数据源">
-              <el-select v-model="dataSource" style="width: 300px" @change="saveSettings">
+              <el-select v-model="dataSource" style="width: 300px" :disabled="!isAdmin" @change="saveSystemSettings">
                 <el-option label="AkShare (东方财富)" value="akshare" />
                 <el-option label="Tushare Pro" value="tushare" disabled />
                 <el-option label="Wind 万得" value="wind" disabled />
@@ -207,8 +208,9 @@
           <el-form label-width="160px" style="max-width: 600px; margin-bottom: 20px">
             <el-form-item label="默认缓存天数">
               <div class="ctrl-unit">
-                <el-input-number v-model="cacheTtlDays" :min="1" :max="90" @change="saveSettings" />
+                <el-input-number v-model="cacheTtlDays" :min="1" :max="90" :disabled="!isAdmin" @change="saveSystemSettings" />
                 <span class="unit-text">天</span>
+                <span v-if="!isAdmin" class="unit-text">（系统级设置，仅管理员可改）</span>
               </div>
             </el-form-item>
           </el-form>
@@ -313,18 +315,18 @@
         <div class="page-card page-section">
           <div class="card-header">
             <span class="card-title">定时任务调度</span>
-            <el-switch v-model="schedulerEnabled" active-text="启用" inactive-text="关闭" @change="saveSettings" />
+            <el-switch v-model="schedulerEnabled" active-text="启用" inactive-text="关闭" :disabled="!isAdmin" @change="saveSystemSettings" />
           </div>
           <el-form label-width="160px" style="max-width: 600px">
             <el-form-item label="数据采集时间">
               <div class="ctrl-unit">
-                <el-time-picker v-model="schedulerTimes.collect" format="HH:mm" value-format="HH:mm" placeholder="采集时间" @change="saveSettings" />
+                <el-time-picker v-model="schedulerTimes.collect" format="HH:mm" value-format="HH:mm" placeholder="采集时间" :disabled="!isAdmin" @change="saveSystemSettings" />
                 <span class="unit-text">每交易日</span>
               </div>
             </el-form-item>
             <el-form-item label="策略计算时间">
               <div class="ctrl-unit">
-                <el-time-picker v-model="schedulerTimes.calculate" format="HH:mm" value-format="HH:mm" placeholder="计算时间" @change="saveSettings" />
+                <el-time-picker v-model="schedulerTimes.calculate" format="HH:mm" value-format="HH:mm" placeholder="计算时间" :disabled="!isAdmin" @change="saveSystemSettings" />
                 <span class="unit-text">每交易日</span>
               </div>
             </el-form-item>
@@ -354,12 +356,17 @@ import { ElMessage } from 'element-plus'
 import { settingsApi } from '@/api/settings'
 import { strategyApi } from '@/api/strategy'
 import { useSignalStore } from '@/stores/signal'
+import { useUserStore } from '@/stores/user'
 import AiSettings from '@/components/AiSettings.vue'
 import type { NotifyConfig } from '@/api/settings'
 import { useBreakpoint } from '@/composables/useBreakpoint'
 
 const { isMobile } = useBreakpoint()
 const signalStore = useSignalStore()
+const userStore = useUserStore()
+
+// 数据源/缓存/调度是系统级参数（全局一份），只有管理员能改
+const isAdmin = computed(() => userStore.userInfo?.role === 'ADMIN')
 
 const activeTab = ref('ws')
 const loadingCache = ref(false)
@@ -465,7 +472,7 @@ function onWsEnabledChange(val: boolean) {
   } else {
     signalStore.disconnectWebSocket()
   }
-  saveSettings()
+  saveUserSettings()
 }
 
 // 数据源设置
@@ -575,18 +582,30 @@ async function loadDbStatus() {
   }
 }
 
-// 保存设置
-async function saveSettings() {
+// 保存个人设置（实时推送偏好，按用户隔离）
+async function saveUserSettings() {
   try {
     await settingsApi.updateSystemSettings({
       ws_push_enabled: wsEnabled.value,
       ws_push_strategy_types: wsStrategyTypes.value,
+    })
+    ElMessage.success('设置已保存')
+  } catch (e: any) {
+    ElMessage.error('保存设置失败: ' + (e?.message || '未知错误'))
+  }
+}
+
+// 保存系统级设置（数据源/缓存/调度，仅管理员，全局一份）
+async function saveSystemSettings() {
+  if (!isAdmin.value) return
+  try {
+    await settingsApi.updateSystemSettings({
       data_source: dataSource.value,
       cache_ttl_days: cacheTtlDays.value,
       scheduler_enabled: schedulerEnabled.value,
       scheduler_times: { ...schedulerTimes },
     })
-    ElMessage.success('设置已保存')
+    ElMessage.success('系统设置已保存')
   } catch (e: any) {
     ElMessage.error('保存设置失败: ' + (e?.message || '未知错误'))
   }
@@ -609,7 +628,11 @@ async function loadSettings() {
   } catch { /* ignore */ }
 }
 
-onMounted(() => {
+onMounted(async () => {
+  // 刷新页面后 userInfo 为空，需先补齐角色，避免管理员被误判为普通用户
+  if (!userStore.userInfo) {
+    await userStore.checkAuth()
+  }
   loadSettings()
   loadNotifyConfig()
   loadCacheStats()
